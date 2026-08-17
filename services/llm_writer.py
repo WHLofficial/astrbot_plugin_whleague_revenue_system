@@ -71,14 +71,18 @@ class LlmWriter:
         fans_clamp = float(self._cfg.get("event_fans_clamp", 0.05))
         maintenance_clamp = float(self._cfg.get("event_maintenance_clamp", 5.0))
         prompt = (
-            "为足球联赛主场随机事件系统设计若干个新事件。"
-            f"主题：{topic or '不限'}。输出 JSON 数组，每个元素结构：\n"
-            '{"name": "事件名", "category": "分类", "weight": 权重整数1-100, '
-            '"effects": {"money": 金额M（-5到5之间的小数，可用于模板显示，实际结算会钳制）, '
-            '"fans_pct": 死忠百分比小数如0.03或-0.02, "maintenance": 维护额外支出M}, '
-            '"template": "一条带{team}和{stadium}占位符的播报模板文案"}\n'
+            "为足球联赛主场随机事件系统设计新事件。"
+            f"主题：{topic or '不限'}。输出 JSON 数组，每个元素二选一：\n"
+            "一、即发事件：{\"event_type\":\"instant\",\"name\":\"事件名\",\"category\":\"分类\","
+            "\"weight\":权重整数1-100,\"effects\":{\"money\":金额M,\"fans_pct\":死忠比例小数如0.03,"
+            "\"maintenance\":维护额外支出M},\"template\":\"带{{team}}和{{stadium}}占位符的播报文案\"}\n"
+            "二、选择事件：{\"event_type\":\"choice\",\"name\":\"事件名\",\"category\":\"分类\","
+            "\"weight\":权重整数1-100,\"template\":\"…\",\"options\":[{\"name\":\"操作1\","
+            "\"desc\":\"简短说明\",\"outcomes\":[{\"w\":概率权重整数,\"effects\":{同上效果}},…]},…]}\n"
+            "选择事件需要 2~4 个选项，每个选项 2 条以上概率结果，概率权重为相对大小（会自动归一化）；"
+            "每个选项的高低概率路径应尽量一正一负。\n"
             f"金额绝对值不要超过 {money_clamp}M，死忠百分比绝对值不要超过 {fans_clamp}，"
-            f"维护绝对值不要超过 {maintenance_clamp}M。只输出 JSON 数组。"
+            f"维护不超过 {maintenance_clamp}M。只输出 JSON 数组。"
         )
         text = await self._ask(prompt)
         if not text:
@@ -86,7 +90,15 @@ class LlmWriter:
         raw = _extract_json(text)
         if not isinstance(raw, list):
             raise RuntimeError("LLM 返回格式不是 JSON 数组")
-        return [_clamp_event(d, money_clamp, fans_clamp, maintenance_clamp) for d in raw[:count]]
+        drafts = []
+        for d in raw[:count]:
+            try:
+                drafts.append(_clamp_event(d, money_clamp, fans_clamp, maintenance_clamp))
+            except (ValueError, TypeError):
+                continue
+        if not drafts:
+            raise RuntimeError("LLM 事件均未通过结构校验")
+        return drafts
 
     # ─── 品牌设计 ─────────────────────────────────────────
 
@@ -130,27 +142,75 @@ def _extract_json(text: str):
         return None
 
 
+def _clamp_effects(effects, money_clamp: float, fans_clamp: float, maintenance_clamp: float) -> dict:
+    """对单条效果钳制：金额/money、死忠/fans_pct、维护/maintenance、上座/attendance_mod。"""
+    money = max(-money_clamp, min(money_clamp, float(effects.get("money", 0.0))))
+    fans_pct = max(-fans_clamp, min(fans_clamp, float(effects.get("fans_pct", 0.0))))
+    # 维护只允许支出（0 ~ 上限），不允许负维护退款
+    maintenance = max(0.0, min(maintenance_clamp, float(effects.get("maintenance", 0.0))))
+    attendance = float(effects.get("attendance_mod", 1.0))
+    attendance = 1.0 if attendance == 1.0 else max(0.5, min(2.0, attendance))
+    return {"money": round(money, 3), "fans_pct": round(fans_pct, 4),
+            "maintenance": round(maintenance, 3), "attendance_mod": round(attendance, 3)}
+
+
+def _clamp_choice_event(d, money_clamp: float, fans_clamp: float, maintenance_clamp: float) -> dict:
+    """校验并钳制选择型事件：2~4 个选项、每选项≥2条概率结果、概率归一、正负路径保障。"""
+    name = str(d.get("name", "")).strip()
+    if not name:
+        raise ValueError("事件缺少名称")
+    raw_options = d.get("options")
+    if not isinstance(raw_options, list) or not (2 <= len(raw_options) <= 4):
+        raise ValueError(f"选择事件「{name}」需要 2~4 个选项")
+    options = []
+    for i, opt in enumerate(raw_options, start=1):
+        opt_name = str(opt.get("name", "")).strip()
+        if not opt_name:
+            raise ValueError(f"事件「{name}」选项缺名称")
+        outs = opt.get("outcomes")
+        if not isinstance(outs, list) or len(outs) < 2:
+            raise ValueError(f"选项「{opt_name}」至少需要 2 条概率结果")
+        outcomes = []
+        for o in outs:
+            w = float(o.get("w", 1))
+            if w <= 0:
+                w = 1.0
+            outcomes.append({"w": round(w, 1),
+                             "effects": _clamp_effects(o.get("effects") or {},
+                                                       money_clamp, fans_clamp, maintenance_clamp)})
+        total = sum(x["w"] for x in outcomes)
+        for x in outcomes:
+            x["w"] = round(x["w"] / total * 100, 1)
+        # 保证每项选择带一条负面与一条正面路径（净额 = 资金 − 维护）
+        nets = [x["effects"]["money"] - x["effects"]["maintenance"] for x in outcomes]
+        if min(nets) >= 0:
+            outcomes[-1]["effects"]["money"] = round(-min(1.0, max(0.5, money_clamp * 0.1)), 3)
+        elif max(nets) < 0:
+            outcomes[-1]["effects"]["money"] = round(min(1.0, max(0.5, money_clamp * 0.1)), 3)
+        options.append({"no": i, "name": opt_name,
+                        "desc": str(opt.get("desc", "")).strip()[:40], "outcomes": outcomes})
+    return {"name": name, "event_type": "choice",
+            "options": options,
+            "category": str(d.get("category", "自定义")).strip()[:10] or "自定义",
+            "weight": max(1, min(100, int(d.get("weight", 10)))),
+            "template": (str(d.get("template", "")).strip() or f"{name}：{{team}} 的球场发生了趣事。")[:200]}
+
+
 def _clamp_event(d, money_clamp: float, fans_clamp: float, maintenance_clamp: float) -> dict:
     name = str(d.get("name", "")).strip()
     if not name:
         raise ValueError("事件缺少名称")
-    effects = d.get("effects") or {}
-    money = float(effects.get("money", 0.0))
-    fans_pct = float(effects.get("fans_pct", 0.0))
-    maintenance = float(effects.get("maintenance", 0.0))
-    money = max(-money_clamp, min(money_clamp, money))
-    fans_pct = max(-fans_clamp, min(fans_clamp, fans_pct))
-    # 维护只允许支出（0 ~ 上限），不允许负维护退款
-    maintenance = max(0.0, min(maintenance_clamp, maintenance))
-    weight = max(1, min(100, int(d.get("weight", 10))))
-    template = str(d.get("template", "")).strip() or f"{name}：{team} 的球场发生了趣事。"
+    event_type = str(d.get("event_type", "instant")).strip().lower()
+    if event_type == "choice":
+        return _clamp_choice_event(d, money_clamp, fans_clamp, maintenance_clamp)
+    effects = _clamp_effects(d.get("effects") or {}, money_clamp, fans_clamp, maintenance_clamp)
     return {
         "name": name,
         "category": str(d.get("category", "自定义")).strip()[:10] or "自定义",
-        "weight": weight,
-        "effects": {"money": round(money, 3), "fans_pct": round(fans_pct, 4),
-                    "maintenance": round(maintenance, 3)},
-        "template": template[:200],
+        "weight": max(1, min(100, int(d.get("weight", 10)))),
+        "event_type": "instant",
+        "effects": effects,
+        "template": (str(d.get("template", "")).strip() or f"{name}：{{team}} 的球场发生了趣事。")[:200],
     }
 
 

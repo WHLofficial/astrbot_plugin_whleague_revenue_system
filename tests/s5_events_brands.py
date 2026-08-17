@@ -316,3 +316,90 @@ async def test_llm_flavor_text_fallback():
         assert "围巾" in text2
     finally:
         await env.teardown()
+
+
+async def test_llm_design_choice_event():
+    env = await TestEnv().setup()
+    try:
+        env.provider.set_response(
+            '[{"event_type":"choice","name":"球迷投票活动","category":"运营","weight":30,'
+            '"template":"t","options":[{"name":"自费办线下活动","desc":"投入换口碑",'
+            '"outcomes":[{"w":70,"effects":{"fans_pct":0.04,"money":-1}},{"w":30,"effects":{"money":1}}]},'
+            '{"name":"线上抽奖","desc":"低成本",'
+            '"outcomes":[{"w":50,"effects":{"money":2,"fans_pct":-0.02}},'
+            '{"w":50,"effects":{"money":-3,"maintenance":2}}]}]}]'
+        )
+        drafts = await env.event_engine.generate_drafts(1)
+        assert len(drafts) == 1
+        d = drafts[0]
+        assert d["event_type"] == "choice" and len(d["options"]) == 2
+        pending = await env.dao.list_events("pending")
+        assert pending[0]["event_type"] == "choice"
+        options = json.loads(pending[0]["options_json"])
+        # 概率归一化、自动编号、每项选择带正负路径
+        for opt in options:
+            total = sum(o["w"] for o in opt["outcomes"])
+            assert abs(total - 100) < 0.2, total
+            nets = [o["effects"]["money"] - o["effects"]["maintenance"] for o in opt["outcomes"]]
+            assert min(nets) < 0 and max(nets) >= 0, nets
+        assert options[0]["no"] == 1 and options[1]["no"] == 2
+    finally:
+        await env.teardown()
+
+
+async def test_llm_choice_single_option_skipped():
+    env = await TestEnv().setup()
+    try:
+        env.provider.set_response(
+            '[{"event_type":"choice","name":"坏选择","category":"x","weight":5,"template":"t",'
+            '"options":[{"name":"只有一项","desc":"","outcomes":'
+            '[{"w":100,"effects":{"money":1}},{"w":1,"effects":{"money":-1}}]}]},'
+            '{"name":"好即发","category":"c","weight":5,"effects":{"money":1},"template":"t"}]'
+        )
+        drafts = await env.event_engine.generate_drafts(2)
+        assert len(drafts) == 1 and drafts[0]["name"] == "好即发"
+    finally:
+        await env.teardown()
+
+
+async def test_llm_event_empty_template_fallback():
+    env = await TestEnv().setup()
+    try:
+        env.provider.set_response(
+            '[{"name":"无模板事件","category":"c","weight":5,"effects":{"money":1},"template":""}]'
+        )
+        drafts = await env.event_engine.generate_drafts(1)
+        assert len(drafts) == 1
+        pending = await env.dao.list_events("pending")
+        assert "{team}" in pending[0]["template"] and "无模板事件" in pending[0]["template"]
+    finally:
+        await env.teardown()
+
+
+async def test_add_custom_choice_event():
+    env = await TestEnv().setup()
+    try:
+        await env.event_engine.add_custom(
+            "吉祥物巡游", "运营", 5, "{}", event_type="choice",
+            options_text=json.dumps([
+                {"name": "请网红造势", "desc": "花钱买流量",
+                 "outcomes": [{"w": 60, "effects": {"money": 3, "fans_pct": 0.02}},
+                              {"w": 40, "effects": {"money": -2, "fans_pct": -0.01}}]},
+                {"name": "低调举办", "desc": "稳",
+                 "outcomes": [{"w": 70, "effects": {"fans_pct": 0.02}},
+                              {"w": 30, "effects": {"maintenance": 1}}]},
+            ]),
+        )
+        rows = await env.dao.list_events("adopted")
+        ev = next(r for r in rows if r["name"] == "吉祥物巡游")
+        assert ev["event_type"] == "choice"
+        options = json.loads(ev["options_json"])
+        assert len(options) == 2 and options[0]["no"] == 1
+        # 可直接触发为待定选择
+        await env.stadium_service.import_attributes("利物浦", influence=150.0)
+        hit = await env.event_engine.trigger_team("利物浦", 1, 1, event_id=ev["event_id"])
+        assert hit["hits"][0]["type"] == "choice"
+        c = await env.dao.get_event_choice("利物浦", 1, 1, ev["event_id"])
+        assert c is not None and c["resolved"] == 0
+    finally:
+        await env.teardown()

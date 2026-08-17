@@ -539,10 +539,15 @@ class EventEngine:
             event_id = f"llm_{await self._dao.next_event_counter()}"
             await self._dao.upsert_event(
                 event_id, d["name"], d["category"], d["weight"],
-                "{}", json.dumps(d["effects"], ensure_ascii=False),
+                "{}", json.dumps(d.get("effects") or {}, ensure_ascii=False),
                 d["template"], source="llm", status="pending",
+                event_type=d.get("event_type", "instant"),
+                options_json=json.dumps(d.get("options") or [], ensure_ascii=False),
             )
-            added.append({"id": event_id, "name": d["name"], "effects": d["effects"]})
+            added.append({
+                "id": event_id, "name": d["name"], "event_type": d.get("event_type", "instant"),
+                "effects": d.get("effects") or {}, "options": d.get("options") or [],
+            })
         return added
 
     async def adopt(self, event_id: int) -> None:
@@ -561,8 +566,38 @@ class EventEngine:
     # ─── 管理员手写 ───────────────────────────────────────
 
     async def add_custom(self, name: str, category: str, weight: int,
-                         effects_text: str) -> None:
-        """手写自定义事件（effects_text 为 JSON 文本，如 {"money": 3}）。"""
+                         effects_text: str, event_type: str = "instant",
+                         options_text: str = "") -> None:
+        """手写自定义事件。
+
+        即发型：effects_text 为 JSON 文本（money/fans_pct/maintenance/attendance_mod）；
+        选择型：options_text 为选项 JSON 数组文本（结构同 LLM 草稿，效果自动钳制）。
+        """
+        from .llm_writer import _clamp_event
+
+        money_clamp = float(self._cfg.get("event_money_clamp", 8.0))
+        fans_clamp = float(self._cfg.get("event_fans_clamp", 0.05))
+        maintenance_clamp = float(self._cfg.get("event_maintenance_clamp", 5.0))
+        event_id = f"custom_{await self._dao.next_event_counter()}"
+        if event_type.lower() == "choice":
+            try:
+                raw_options = json.loads(options_text)
+            except (ValueError, TypeError):
+                raise EventError("选择事件需要 options 为 JSON 数组文本")
+            try:
+                d = _clamp_event(
+                    {"event_type": "choice", "name": name, "category": category,
+                     "weight": weight, "template": name, "options": raw_options},
+                    money_clamp, fans_clamp, maintenance_clamp,
+                )
+            except ValueError as e:
+                raise EventError(str(e))
+            await self._dao.upsert_event(
+                event_id, d["name"], d["category"], d["weight"],
+                "{}", "{}", d["template"], source="custom", status="adopted",
+                event_type="choice", options_json=json.dumps(d["options"], ensure_ascii=False),
+            )
+            return
         import json as _json
 
         try:
@@ -571,7 +606,6 @@ class EventEngine:
             raise EventError("effects 需为 JSON 文本，如 {\"money\": 3}（money/fans_pct/maintenance/attendance_mod）")
         if not isinstance(effects, dict):
             raise EventError("effects 需为 JSON 对象")
-        event_id = f"custom_{await self._dao.next_event_counter()}"
         await self._dao.upsert_event(
             event_id, name.strip(), category.strip() or "自定义", weight,
             "{}", _json.dumps(effects, ensure_ascii=False), name.strip(),
