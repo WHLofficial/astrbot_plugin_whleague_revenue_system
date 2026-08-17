@@ -1,9 +1,10 @@
-"""窗口末结算：维护费 + 档期兑现 + 冠名费 + 死忠演化 → 账本 → 窗口摘要。
+"""窗口末结算：维护费 + 档期兑现 + 冠名费 + 死忠演化 + 选择事件兑现 → 账本 → 窗口摘要。
 
 自然成本纪律：维护按容量收、票房只按实际上座，超前扩建每窗口自然流血；
-无显式惩罚条目。事件在结算外由管理员独立触发。
+无显式惩罚条目。即发事件在结算外由管理员独立触发，选择型事件在结算内
+统一兑现（已定按概率掷骰、未定按最差结果兜底）。
 「强制」重算 = 撤销上次结算创建的流水（按 window_summaries 记录的 ID）并重算余额，
-死忠演化是状态变更（无历史快照），重算不重复执行。
+重置选择事件后随本次结算重新兑现；死忠演化是状态变更（无历史快照），重算不重复执行。
 """
 
 import json
@@ -18,12 +19,13 @@ class SettleError(Exception):
 
 
 class WindowService:
-    def __init__(self, db, dao, cfg, fans_service, brand_service):
+    def __init__(self, db, dao, cfg, fans_service, brand_service, event_engine):
         self._db = db
         self._dao = dao
         self._cfg = cfg
         self._fans_service = fans_service
         self._brand_service = brand_service
+        self._event_engine = event_engine
 
     async def settle(self, force: bool = False) -> dict:
         state = await self._dao.get_league_state()
@@ -51,13 +53,17 @@ class WindowService:
             for s in stadiums:
                 await self._dao.recompute_balance(s["team_name"])
             logger.info(f"Force re-settle window {season}-{window_seq}: removed {removed} transactions.")
+            # 重置该窗口已结算的选择事件，随本次结算重新兑现
+            await self._dao.reset_choices_for_redo(season, window_seq)
+
+        # 事件选择结算：已定按选项概率掷骰、未定按最差结果兜底；流水并入可撤销集合
+        choice_res = await self._event_engine.settle_choices(season, window_seq)
+        created_ids: list[int] = list(choice_res["tx_ids"])
+        lines = []
 
         # 死忠演化每窗口仅执行一轮（一次调用作用于全部球队），重算时跳过
         fans_details = [] if redo else await self._fans_service.evolve(season, window_seq)
         fans_by_team = {fd["team"]: fd for fd in fans_details}
-
-        created_ids: list[int] = []
-        lines = []
         for s in stadiums:
             team = s["team_name"]
             await self._dao.ensure_balance(team, float(self._cfg.get("start_funds", 50.0)))

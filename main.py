@@ -60,7 +60,8 @@ class StadiumPlugin(Star):
             self.db, self.dao, self.config_cache, self.stadium_service
         )
         self.window_service = WindowService(
-            self.db, self.dao, self.config_cache, self.fans_service, self.brand_service
+            self.db, self.dao, self.config_cache, self.fans_service, self.brand_service,
+            self.event_engine,
         )
         self.backup_service = BackupService(self.db, self.config_cache)
         self.chart_service = ChartService(self.db, self.dao, self.config_cache)

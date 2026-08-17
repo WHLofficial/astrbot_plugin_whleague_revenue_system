@@ -97,7 +97,8 @@ class TestEnv:
         self.event_engine = EventEngine(self.db, self.dao, self.cfg, self.llm_writer)
         self.fixture_service = FixtureService(self.db, self.dao, self.cfg, self.stadium_service)
         self.window_service = WindowService(
-            self.db, self.dao, self.cfg, self.fans_service, self.brand_service
+            self.db, self.dao, self.cfg, self.fans_service, self.brand_service,
+            self.event_engine,
         )
         await self.brand_service.init_brand_pool()
         await self.event_engine.init_defaults()

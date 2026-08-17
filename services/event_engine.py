@@ -15,52 +15,208 @@ class EventError(Exception):
     pass
 
 
-# 默认事件库（22 条，8 类）：模板文案为 LLM 兜底
+# 默认事件库（22 条：6 即发 + 16 选择）。
+# · 即发型（event_type=instant）：触发即按 effects 记账。
+# · 选择型（event_type=choice）：触发只广播选项进入待定，玩家任选一项操作；
+#   每项操作下有「正面/负面概率表」（outcomes），结算时已定按概率掷骰、
+#   未定按最差结果（净额最小）兜底。取值均在 LLM 钳制范围内。
 DEFAULT_EVENTS = [
+    # ─── 即发型（6 条，触发即生效） ─────────────────────────
     {"event_id": "storm_buzz", "name": "暴雨滂沱", "category": "天气衍生", "weight": 8,
-     "conditions": {}, "effects": {"attendance_mod": 0.85}, "template": "暴雨突袭，{stadium} 门前的长队湿了一半，{team} 球迷热情不减。"},
-    {"event_id": "pitch_disease", "name": "草皮病害", "category": "场地故障", "weight": 8,
-     "conditions": {}, "effects": {"maintenance": 3.0}, "template": "球场的草皮最近越长越秃，{team} 紧急加急养护，多花了一笔维护费。"},
-    {"event_id": "light_fail", "name": "灯光故障", "category": "场地故障", "weight": 6,
-     "conditions": {}, "effects": {"attendance_mod": 0.9, "money": -0.5}, "template": "比赛日灯光跳闸两小时，{stadium} 现场一片手电筒海，部分观众提前离场。"},
-    {"event_id": "roof_leak", "name": "顶棚漏水", "category": "场地故障", "weight": 6,
-     "conditions": {}, "effects": {"maintenance": 1.5}, "template": "{stadium} 的顶棚在雨夜漏了水，维修队连夜开工。"},
-    {"event_id": "fan_clash", "name": "球迷冲突", "category": "球迷舆情", "weight": 5,
-     "conditions": {}, "effects": {"money": -3.0, "fans_pct": -0.02}, "template": "客队球迷与主队球迷在 {stadium} 外发生冲突，{team} 被处以罚款。"},
+     "event_type": "instant", "conditions": {}, "effects": {"attendance_mod": 0.85},
+     "template": "暴雨突袭，{stadium} 门前的长队湿了一半，{team} 球迷热情不减。"},
     {"event_id": "tifo_viral", "name": "TIFO出圈", "category": "球迷舆情", "weight": 7,
-     "conditions": {}, "effects": {"fans_pct": 0.03, "money": 1.0}, "template": "{team} 球迷的巨型 TIFO 刷爆社交平台，{stadium} 一夜出圈。"},
-    {"event_id": "new_wave", "name": "新球迷浪潮", "category": "球迷舆情", "weight": 6,
-     "conditions": {}, "effects": {"fans_pct": 0.04}, "template": "社区推广见效，一群年轻人把 {stadium} 当成了周末打卡地。"},
-    {"event_id": "merch_hit", "name": "周边爆款", "category": "商业机会", "weight": 7,
-     "conditions": {}, "effects": {"money": 4.0}, "template": "{team} 新年款围巾脱销，周边商品盈利大涨。"},
-    {"event_id": "scalper_raid", "name": "黄牛泛滥", "category": "商业机会", "weight": 5,
-     "conditions": {}, "effects": {"money": -2.0}, "template": "黄牛把 {team} 主场球票炒到三倍，俱乐部配合警方清理，损失了部分收入。"},
-    {"event_id": "food_fest", "name": "球场美食节", "category": "商业机会", "weight": 6,
-     "conditions": {}, "effects": {"money": 2.0}, "template": "{stadium} 美食节开了 18 个小吃摊，球迷边吃边看，营业额创纪录。"},
-    {"event_id": "doc_film", "name": "纪录片取景", "category": "媒体", "weight": 5,
-     "conditions": {}, "effects": {"money": 1.5}, "template": "有纪录片团队进驻 {stadium}，为 {team} 拍了一整个比赛日。"},
-    {"event_id": "extra_broadcast", "name": "追加转播", "category": "媒体", "weight": 5,
-     "conditions": {}, "effects": {"money": 2.0}, "template": "{team} 的主场比赛被追加为全国转播场次，转播分成到账。"},
+     "event_type": "instant", "conditions": {}, "effects": {"fans_pct": 0.03, "money": 1.0},
+     "template": "{team} 球迷的巨型 TIFO 刷爆社交平台，{stadium} 一夜出圈。"},
     {"event_id": "bad_press", "name": "负面报道", "category": "媒体", "weight": 5,
-     "conditions": {}, "effects": {"fans_pct": -0.02}, "template": "一篇关于 {team} 的更衣室传闻登上头条，部分球迷表示要冷静观望。"},
-    {"event_id": "guest_ghost", "name": "演唱会嘉宾鸽了", "category": "档期联动", "weight": 5,
-     "conditions": {"requires_activity": "concert"}, "effects": {"money": -2.0}, "template": "原定在 {stadium} 开唱的嘉宾临时鸽了，退票潮来袭。"},
-    {"event_id": "concert_pack", "name": "档期爆满加场", "category": "档期联动", "weight": 5,
-     "conditions": {"requires_activity": "concert"}, "effects": {"money": 4.0}, "template": "{stadium} 演唱会门票秒空，主办方当场宣布加场一场。"},
-    {"event_id": "brand_crisis", "name": "冠名品牌危机", "category": "冠名联动", "weight": 4,
-     "conditions": {"requires_naming": True}, "effects": {"money": -2.0}, "template": "冠名品牌出事了，{team} 的球场广告位被下架整改，损失了当期冠名收入。"},
-    {"event_id": "brand_anniv", "name": "冠名周年庆", "category": "冠名联动", "weight": 4,
-     "conditions": {"requires_naming": True}, "effects": {"money": 3.0}, "template": "冠名品牌在 {stadium} 办周年嘉年华，赠送了 {team} 一笔营销赞助。"},
+     "event_type": "instant", "conditions": {}, "effects": {"fans_pct": -0.02},
+     "template": "一篇关于 {team} 的更衣室传闻登上头条，部分球迷表示要冷静观望。"},
     {"event_id": "relic_found", "name": "球场挖出文物", "category": "意外之财", "weight": 2,
-     "conditions": {}, "effects": {"money": 6.0}, "template": "施工队在 {stadium} 地下挖到疑似文物，随后文旅部门送来一笔补偿金。"},
+     "event_type": "instant", "conditions": {}, "effects": {"money": 6.0},
+     "template": "施工队在 {stadium} 地下挖到疑似文物，随后文旅部门送来一笔补偿金。"},
     {"event_id": "subsidy", "name": "政府补贴", "category": "意外之财", "weight": 3,
-     "conditions": {}, "effects": {"money": 4.0}, "template": "{team} 获评城市标杆俱乐部，{stadium} 拿到了政府补贴。"},
-    {"event_id": "derby_buzz", "name": "德比热度", "category": "商业机会", "weight": 6,
-     "conditions": {}, "effects": {"attendance_mod": 1.15, "money": 1.0}, "template": "德比大战将至，{stadium} 的球票一票难求，气氛提前被点燃。"},
-    {"event_id": "vip_luxury", "name": "VIP礼遇升级", "category": "商业机会", "weight": 4,
-     "conditions": {}, "effects": {"money": 2.5}, "template": "{stadium} 的 VIP 包厢推出香槟套餐，包厢收入水涨船高。"},
+     "event_type": "instant", "conditions": {}, "effects": {"money": 4.0},
+     "template": "{team} 获评城市标杆俱乐部，{stadium} 拿到了政府补贴。"},
     {"event_id": "security_break", "name": "安保存漏洞", "category": "场地故障", "weight": 3,
-     "conditions": {}, "effects": {"money": -2.5, "fans_pct": -0.01}, "template": "安检口被曝出漏洞，{team} 加急整改并缴纳了罚款。"},
+     "event_type": "instant", "conditions": {}, "effects": {"money": -2.5, "fans_pct": -0.01},
+     "template": "安检口被曝出漏洞，{team} 加急整改并缴纳了罚款。"},
+    # ─── 选择型（16 条，玩家任选一项操作） ───────────────────
+    {"event_id": "pitch_disease", "name": "草皮病害", "category": "场地故障", "weight": 8,
+     "event_type": "choice", "conditions": {},
+     "template": "球场的草皮最近越长越秃，{team} 需要决定怎么处理。",
+     "options": [
+         {"no": 1, "name": "整块翻新草皮", "desc": "一步到位，代价高",
+          "outcomes": [{"w": 60, "effects": {"money": -3.0}},
+                       {"w": 40, "effects": {"maintenance": 4.0, "attendance_mod": 0.9}}]},
+         {"no": 2, "name": "局部修补省钱", "desc": "花小钱赌一把",
+          "outcomes": [{"w": 50, "effects": {"money": -1.0, "fans_pct": 0.01}},
+                       {"w": 50, "effects": {"maintenance": 3.0, "attendance_mod": 0.85}}]},
+     ]},
+    {"event_id": "light_fail", "name": "灯光故障", "category": "场地故障", "weight": 6,
+     "event_type": "choice", "conditions": {},
+     "template": "比赛日灯光跳闸两小时，{stadium} 现场一片手电筒海，怎么补救?",
+     "options": [
+         {"no": 1, "name": "连夜抢修灯光", "desc": "保证夜场正常",
+          "outcomes": [{"w": 70, "effects": {"money": -2.0}},
+                       {"w": 30, "effects": {"maintenance": 2.0, "attendance_mod": 0.9}}]},
+         {"no": 2, "name": "租移动照明车", "desc": "临时顶上",
+          "outcomes": [{"w": 50, "effects": {"money": -0.5, "attendance_mod": 1.05}},
+                       {"w": 50, "effects": {"money": -3.5, "attendance_mod": 0.95}}]},
+     ]},
+    {"event_id": "roof_leak", "name": "顶棚漏水", "category": "场地故障", "weight": 6,
+     "event_type": "choice", "conditions": {},
+     "template": "{stadium} 的顶棚在雨夜漏了水，维修队给出两套方案。",
+     "options": [
+         {"no": 1, "name": "赶在雨前修顶", "desc": "花钱买保险",
+          "outcomes": [{"w": 70, "effects": {"money": -2.0}},
+                       {"w": 30, "effects": {"maintenance": 3.0, "attendance_mod": 0.9}}]},
+         {"no": 2, "name": "先遮再商议", "desc": "省钱拖修",
+          "outcomes": [{"w": 50, "effects": {"money": -0.5, "fans_pct": 0.01}},
+                       {"w": 50, "effects": {"maintenance": 4.0, "attendance_mod": 0.85}}]},
+     ]},
+    {"event_id": "fan_clash", "name": "球迷冲突", "category": "球迷舆情", "weight": 5,
+     "event_type": "choice", "conditions": {},
+     "template": "客队球迷与主队球迷在 {stadium} 外发生冲突，{team} 要尽快表态。",
+     "options": [
+         {"no": 1, "name": "高调道歉并处罚", "desc": "平息舆论，成本高",
+          "outcomes": [{"w": 60, "effects": {"money": -4.0, "fans_pct": 0.02}},
+                       {"w": 40, "effects": {"money": -6.0, "fans_pct": -0.01}}]},
+         {"no": 2, "name": "低调冷处理", "desc": "省事但风险大",
+          "outcomes": [{"w": 40, "effects": {"money": -1.0}},
+                       {"w": 60, "effects": {"money": -5.0, "fans_pct": -0.03}}]},
+     ]},
+    {"event_id": "new_wave", "name": "新球迷浪潮", "category": "球迷舆情", "weight": 6,
+     "event_type": "choice", "conditions": {},
+     "template": "社区推广见效，一群年轻人把 {stadium} 当成了周末打卡地，怎么接住?",
+     "options": [
+         {"no": 1, "name": "办球迷开放日", "desc": "小投入拉口碑",
+          "outcomes": [{"w": 70, "effects": {"fans_pct": 0.04, "money": -0.5}},
+                       {"w": 30, "effects": {"fans_pct": 0.01, "money": -1.5}}]},
+         {"no": 2, "name": "推出低价学生票", "desc": "薄利多销搏长期",
+          "outcomes": [{"w": 50, "effects": {"fans_pct": 0.05, "money": -1.0}},
+                       {"w": 50, "effects": {"money": 0.5, "fans_pct": -0.01}}]},
+     ]},
+    {"event_id": "merch_hit", "name": "周边爆款", "category": "商业机会", "weight": 7,
+     "event_type": "choice", "conditions": {},
+     "template": "{team} 新年款围巾脱销，周边商品盈利大涨，要不要趁机加码?",
+     "options": [
+         {"no": 1, "name": "加班加单补货", "desc": "趁热度冲一波销售",
+          "outcomes": [{"w": 60, "effects": {"money": 5.0, "maintenance": 1.0}},
+                       {"w": 40, "effects": {"money": -1.5, "maintenance": 3.0}}]},
+         {"no": 2, "name": "线上限量抽签", "desc": "饥饿营销保口碑",
+          "outcomes": [{"w": 50, "effects": {"money": 4.0, "fans_pct": 0.02}},
+                       {"w": 50, "effects": {"money": 0.5, "fans_pct": -0.02}}]},
+     ]},
+    {"event_id": "scalper_raid", "name": "黄牛泛滥", "category": "商业机会", "weight": 5,
+     "event_type": "choice", "conditions": {},
+     "template": "黄牛把 {team} 主场球票炒到三倍，俱乐部打算清理。",
+     "options": [
+         {"no": 1, "name": "实名购票+人脸入场", "desc": "动真格清理黄牛",
+          "outcomes": [{"w": 60, "effects": {"money": -2.0, "fans_pct": 0.03}},
+                       {"w": 40, "effects": {"maintenance": 4.0, "fans_pct": 0.01}}]},
+         {"no": 2, "name": "与票务平台合作", "desc": "技术封堵，成本中等",
+          "outcomes": [{"w": 70, "effects": {"money": -1.0, "fans_pct": 0.02}},
+                       {"w": 30, "effects": {"money": -3.0, "fans_pct": -0.02}}]},
+     ]},
+    {"event_id": "food_fest", "name": "球场美食节", "category": "商业机会", "weight": 6,
+     "event_type": "choice", "conditions": {},
+     "template": "{stadium} 美食节开了 18 个小吃摊，怎么运营赚得更多?",
+     "options": [
+         {"no": 1, "name": "自营加放15个摊", "desc": "摊租全收",
+          "outcomes": [{"w": 60, "effects": {"money": 3.0}},
+                       {"w": 40, "effects": {"money": -1.0, "maintenance": 1.5}}]},
+         {"no": 2, "name": "免铺租换流量", "desc": "让利引流",
+          "outcomes": [{"w": 60, "effects": {"fans_pct": 0.03, "money": 1.0}},
+                       {"w": 40, "effects": {"money": -2.0}}]},
+     ]},
+    {"event_id": "doc_film", "name": "纪录片取景", "category": "媒体", "weight": 5,
+     "event_type": "choice", "conditions": {},
+     "template": "有纪录片团队进驻 {stadium}，为 {team} 拍一个比赛日，怎么谈?",
+     "options": [
+         {"no": 1, "name": "免费借景", "desc": "换口碑曝光",
+          "outcomes": [{"w": 70, "effects": {"fans_pct": 0.03, "money": -1.0}},
+                       {"w": 30, "effects": {"fans_pct": 0.01, "money": -2.5}}]},
+         {"no": 2, "name": "收取拍摄场地费", "desc": "明码标价",
+          "outcomes": [{"w": 50, "effects": {"money": 2.0}},
+                       {"w": 50, "effects": {"money": -0.5, "fans_pct": -0.01}}]},
+     ]},
+    {"event_id": "extra_broadcast", "name": "追加转播", "category": "媒体", "weight": 5,
+     "event_type": "choice", "conditions": {},
+     "template": "{team} 的主场比赛被追加为全国转播场次，转播分成怎么最大化?",
+     "options": [
+         {"no": 1, "name": "追加投入信号制作", "desc": "自掏腰包提画质",
+          "outcomes": [{"w": 70, "effects": {"money": 4.0, "maintenance": 0.5}},
+                       {"w": 30, "effects": {"money": -1.5, "maintenance": 2.0}}]},
+         {"no": 2, "name": "按现行制式上", "desc": "零成本佛系",
+          "outcomes": [{"w": 60, "effects": {"money": 1.5}},
+                       {"w": 40, "effects": {"money": -0.5}}]},
+     ]},
+    {"event_id": "guest_ghost", "name": "演唱会嘉宾鸽了", "category": "档期联动", "weight": 5,
+     "event_type": "choice", "conditions": {"requires_activity": "concert"},
+     "template": "原定在 {stadium} 开唱的嘉宾临时鸽了，退票潮来袭。",
+     "options": [
+         {"no": 1, "name": "紧急补位嘉宾", "desc": "高价临时请人",
+          "outcomes": [{"w": 60, "effects": {"money": 2.0, "maintenance": 1.0}},
+                       {"w": 40, "effects": {"money": -3.0, "maintenance": 2.0}}]},
+         {"no": 2, "name": "全额退票+补偿", "desc": "花钱保口碑",
+          "outcomes": [{"w": 50, "effects": {"money": -4.0, "fans_pct": 0.03}},
+                       {"w": 50, "effects": {"money": -6.0, "fans_pct": -0.02}}]},
+     ]},
+    {"event_id": "concert_pack", "name": "档期爆满加场", "category": "档期联动", "weight": 5,
+     "event_type": "choice", "conditions": {"requires_activity": "concert"},
+     "template": "{stadium} 演唱会门票秒空，主办方问要不要加场。",
+     "options": [
+         {"no": 1, "name": "加开一场", "desc": "吃满热度",
+          "outcomes": [{"w": 60, "effects": {"money": 5.0, "maintenance": 1.5}},
+                       {"w": 40, "effects": {"money": -1.0, "maintenance": 4.0}}]},
+         {"no": 2, "name": "不加场，卖贵一点", "desc": "物以稀为贵",
+          "outcomes": [{"w": 60, "effects": {"money": 3.0, "fans_pct": -0.01}},
+                       {"w": 40, "effects": {"money": -1.0}}]},
+     ]},
+    {"event_id": "brand_crisis", "name": "冠名品牌危机", "category": "冠名联动", "weight": 4,
+     "event_type": "choice", "conditions": {"requires_naming": True},
+     "template": "冠名品牌出事了，{team} 的球场广告位被下架整改。",
+     "options": [
+         {"no": 1, "name": "声援品牌共渡难关", "desc": "留人情换长约",
+          "outcomes": [{"w": 60, "effects": {"money": -3.0, "fans_pct": 0.02}},
+                       {"w": 40, "effects": {"money": -4.0, "fans_pct": -0.02}}]},
+         {"no": 2, "name": "紧急换广告位", "desc": "切割风险",
+          "outcomes": [{"w": 50, "effects": {"money": -4.0, "fans_pct": 0.02}},
+                       {"w": 50, "effects": {"money": 1.0}}]},
+     ]},
+    {"event_id": "brand_anniv", "name": "冠名周年庆", "category": "冠名联动", "weight": 4,
+     "event_type": "choice", "conditions": {"requires_naming": True},
+     "template": "冠名品牌在 {stadium} 办周年嘉年华，赠送 {team} 一笔营销赞助。",
+     "options": [
+         {"no": 1, "name": "全力赞助庆典", "desc": "借势营销",
+          "outcomes": [{"w": 70, "effects": {"money": 4.0, "fans_pct": 0.02, "maintenance": 0.5}},
+                       {"w": 30, "effects": {"money": -1.0, "fans_pct": -0.01}}]},
+         {"no": 2, "name": "只提供场地", "desc": "稳赚不亏",
+          "outcomes": [{"w": 60, "effects": {"money": 2.5}},
+                       {"w": 40, "effects": {"money": -0.5, "maintenance": 1.0}}]},
+     ]},
+    {"event_id": "derby_buzz", "name": "德比热度", "category": "商业机会", "weight": 6,
+     "event_type": "choice", "conditions": {},
+     "template": "德比大战将至，{stadium} 的球票一票难求，气氛提前被点燃。",
+     "options": [
+         {"no": 1, "name": "加急印限量球衣", "desc": "抢德比财",
+          "outcomes": [{"w": 60, "effects": {"money": 6.0, "maintenance": 1.0}},
+                       {"w": 40, "effects": {"money": -2.0, "maintenance": 2.0}}]},
+         {"no": 2, "name": "提高包厢价格", "desc": "趁热抬价",
+          "outcomes": [{"w": 50, "effects": {"money": 4.0, "fans_pct": -0.01}},
+                       {"w": 50, "effects": {"money": -1.5, "fans_pct": -0.02}}]},
+     ]},
+    {"event_id": "vip_luxury", "name": "VIP礼遇升级", "category": "商业机会", "weight": 4,
+     "event_type": "choice", "conditions": {},
+     "template": "{stadium} 的 VIP 包厢推出香槟套餐，要不要借机升级?",
+     "options": [
+         {"no": 1, "name": "升级包厢软装", "desc": "高投入高回报",
+          "outcomes": [{"w": 60, "effects": {"money": 4.0, "maintenance": 2.0}},
+                       {"w": 40, "effects": {"money": -3.0, "maintenance": 3.0}}]},
+         {"no": 2, "name": "与豪华酒店联名", "desc": "借名头少投入",
+          "outcomes": [{"w": 60, "effects": {"money": 3.0, "fans_pct": 0.01}},
+                       {"w": 40, "effects": {"money": -1.5, "fans_pct": -0.01}}]},
+     ]},
 ]
 
 
@@ -77,14 +233,19 @@ class EventEngine:
             await self._dao.upsert_event(
                 ev["event_id"], ev["name"], ev["category"], ev["weight"],
                 json.dumps(ev["conditions"], ensure_ascii=False),
-                json.dumps(ev["effects"], ensure_ascii=False),
+                json.dumps(ev.get("effects") or {}, ensure_ascii=False),
                 ev["template"], source="builtin", status="adopted",
+                event_type=ev.get("event_type", "instant"),
+                options_json=json.dumps(ev.get("options") or [], ensure_ascii=False),
             )
 
     # ─── 触发 ─────────────────────────────────────────────
 
     async def trigger_all(self, season: int, window_seq: int, updated_by: str = "") -> dict:
-        """全员触发：每队独立命中（默认 40%），命中队抽 1 条符合条件的。"""
+        """全员分配：每队独立命中（默认 40%），命中队抽 1 条符合条件的。
+
+        即发型立即生效；选择型进入待定并返回广播文案。
+        """
         stadiums = await self._dao.list_stadiums()
         if not stadiums:
             raise EventError("没有已建球场的球队")
@@ -99,8 +260,7 @@ class EventEngine:
             ev = await self._pick(s, events_pool, bookings)
             if ev is None:
                 continue
-            row = await self._apply(ev, s["team_name"], season, window_seq)
-            hits.append(row)
+            hits.append(await self._dispatch(ev, s["team_name"], season, window_seq))
         await self._decorate(hits)
         return {"triggered": len(hits), "hits": hits}
 
@@ -121,9 +281,15 @@ class EventEngine:
             ev = await self._pick(s, events_pool, bookings)
             if ev is None:
                 raise EventError("没有符合条件的事件")
-        row = await self._apply(ev, team_name, season, window_seq)
+        row = await self._dispatch(ev, team_name, season, window_seq)
         await self._decorate([row])
         return {"triggered": 1, "hits": [row]}
+
+    async def _dispatch(self, event, team_name: str, season: int, window_seq: int) -> dict:
+        """按事件类型分流：即发立即生效，选择型进入待定并广播选项。"""
+        if str(event["event_type"] or "instant") == "choice":
+            return await self._trigger_choice(event, team_name, season, window_seq)
+        return await self._apply(event, team_name, season, window_seq)
 
     async def _pick(self, stadium, events_pool, bookings: list[str]):
         """条件过滤 + 权重抽取一条。"""
@@ -156,15 +322,31 @@ class EventEngine:
                 return False
         return True
 
-    async def _apply(self, event, team_name: str, season: int, window_seq: int) -> dict:
+    def _event_effects(self, event) -> dict:
         try:
-            effects = json.loads(event["effects_json"] or "{}")
+            raw = json.loads(event["effects_json"] or "{}")
         except (ValueError, TypeError):
-            effects = {}
+            raw = {}
+        return raw if isinstance(raw, dict) else {}
+
+    def _event_options(self, event) -> list:
+        try:
+            raw = json.loads(event["options_json"] or "[]")
+        except (ValueError, TypeError):
+            raw = []
+        return raw if isinstance(raw, list) else []
+
+    async def _apply_effects(self, team_name: str, season: int, window_seq: int,
+                             effects: dict, label: str,
+                             created_ids: list[int] | None = None) -> list[str]:
+        """应用一组效果（资金/维护/死忠/上座修正），返回中文备注行。
+
+        资金与维护各计一条 event 流水；created_ids 非空时收集流水 ID，
+        供结算把选择结果流水并入可撤销集合。
+        """
         stadium = await self._dao.get_stadium(team_name)
         await self._dao.ensure_balance(team_name, float(self._cfg.get("start_funds", 50.0)))
         notes = []
-
         money = float(effects.get("money", 0.0))
         maintenance = float(effects.get("maintenance", 0.0))
         fans_pct = float(effects.get("fans_pct", 0.0))
@@ -172,16 +354,20 @@ class EventEngine:
 
         if money:
             await self._dao.apply_balance(team_name, money)
-            await self._dao.add_transaction(
-                team_name, season, window_seq, "event", money, note=event["name"],
+            tx_id = await self._dao.add_transaction(
+                team_name, season, window_seq, "event", money, note=label,
             )
+            if created_ids is not None:
+                created_ids.append(tx_id)
             notes.append(f"资金 {'+' if money > 0 else ''}{money:.1f}M")
         if maintenance:
             await self._dao.apply_balance(team_name, -maintenance)
-            await self._dao.add_transaction(
+            tx_id = await self._dao.add_transaction(
                 team_name, season, window_seq, "event", -maintenance,
-                note=f"{event['name']}（维护）",
+                note=f"{label}（维护）",
             )
+            if created_ids is not None:
+                created_ids.append(tx_id)
             notes.append(f"维护 −{maintenance:.1f}M")
         if fans_pct:
             fans = min(max(stadium["fans_diehards"] * (1.0 + fans_pct), 0.0),
@@ -192,23 +378,94 @@ class EventEngine:
             mod = stadium["next_attendance_mod"] * attendance_mod
             await self._dao.update_attendance_mod(team_name, mod)
             notes.append(f"下一场上座 {'+' if attendance_mod > 1 else ''}{attendance_mod * 100:.0f}%")
+        return notes
 
-        effect_snapshot = json.dumps({"money": money, "maintenance": maintenance,
-                                      "fans_pct": fans_pct, "attendance_mod": attendance_mod},
-                                     ensure_ascii=False)
+    async def _apply(self, event, team_name: str, season: int, window_seq: int) -> dict:
+        """即发型：立即按 effects 记账并写日志。"""
+        effects = self._event_effects(event)
+        notes = await self._apply_effects(team_name, season, window_seq, effects, event["name"])
         await self._dao.add_event_log(team_name, season, window_seq, event["event_id"],
-                                      effect_snapshot, event["name"])
+                                      json.dumps(effects, ensure_ascii=False), event["name"])
         return {"team": team_name, "event": event["name"], "event_id": event["event_id"],
                 "notes": notes}
 
+    async def _trigger_choice(self, event, team_name: str, season: int, window_seq: int) -> dict:
+        """选择型：仅创建待定选择并写广播文案，不记账（结算时才兑现）。"""
+        await self._dao.add_event_choice(team_name, season, window_seq, event["event_id"])
+        options = self._event_options(event)
+        stadium = await self._dao.get_stadium(team_name)
+        broadcast = self._build_broadcast(event, team_name,
+                                          stadium["name"] if stadium else team_name, options)
+        await self._dao.add_event_log(team_name, season, window_seq, event["event_id"],
+                                      "{}", broadcast)
+        return {"team": team_name, "event": event["name"], "event_id": event["event_id"],
+                "type": "choice", "broadcast": broadcast, "options": options}
+
+    def _build_broadcast(self, event, team_name: str, stadium_name: str, options: list) -> str:
+        """确定性生成面向球员的广播文案（含选项与概率），按选项号回复。"""
+        lines = [f"🎲 事件「{event['name']}」（{event['category']}）@ {team_name}·{stadium_name}",
+                 "请在窗口结算前任选一项操作（回复：队名 事件名 选项号）："]
+        for opt in options:
+            odds = " / ".join(f"{o['w']}% {self._outcome_desc(o.get('effects') or {})}"
+                              for o in opt.get("outcomes", []))
+            desc = opt.get("desc") or ""
+            lines.append(f"{self._num(opt['no'])} {opt['name']}"
+                         + (f"（{desc}）" if desc else "") + f"：{odds}")
+        return "\n".join(lines)
+
+    @staticmethod
+    def _num(n) -> str:
+        return {1: "①", 2: "②", 3: "③", 4: "④"}.get(int(n), f"{n}.")
+
+    @staticmethod
+    def _outcome_desc(effects: dict) -> str:
+        parts = []
+        money = float(effects.get("money", 0.0))
+        maintenance = float(effects.get("maintenance", 0.0))
+        fans = float(effects.get("fans_pct", 0.0))
+        mod = float(effects.get("attendance_mod", 1.0))
+        if money:
+            parts.append(f"资金{money:+.1f}M")
+        if maintenance:
+            parts.append(f"维护−{maintenance:.1f}M")
+        if fans:
+            parts.append(f"死忠{fans * 100:+.1f}%")
+        if mod != 1.0:
+            parts.append(f"上座×{mod:.2f}")
+        return "、".join(parts) if parts else "无变化"
+
+    def _roll_option(self, opt: dict) -> dict:
+        """按选项结果的权重掷骰选一条 outcome。"""
+        outcomes = opt.get("outcomes") or []
+        weights = [max(1, int(o.get("w", 1))) for o in outcomes]
+        return random.choices(outcomes, weights=weights, k=1)[0]
+
+    def _worst_option(self, options: list) -> tuple[dict, dict]:
+        """全部选项所有结果里净额最小（money−maintenance）的一条，确定性平局取低序号。"""
+        best = None
+        for i, opt in enumerate(options):
+            for j, out in enumerate(opt.get("outcomes") or []):
+                effects = out.get("effects") or {}
+                net = float(effects.get("money", 0.0)) - float(effects.get("maintenance", 0.0))
+                key = (net, opt.get("no", i + 1), j)
+                if best is None or key < best[0]:
+                    best = (key, opt, out)
+        return best[1], best[2]
+
     async def _decorate(self, hits: list[dict]) -> None:
-        """为命中事件生成文案（LLM，超限/失败回退模板）写入日志。"""
+        """为即发命中事件生成文案（LLM，超限/失败回退模板）写入日志。
+
+        选择型事件保留广播文案，不作 LLM 装饰（选项与概率必须确定呈现）。
+        """
         if not hits or self._llm is None:
             return
         max_calls = int(self._cfg.get("llm_max_calls", 8))
         for i, hit in enumerate(hits):
             event_row = await self._dao.fetch_event_by_id(hit["event_id"])
             if event_row is None:
+                continue
+            if str(event_row["event_type"] or "instant") == "choice":
+                hit["text"] = hit.get("broadcast", "")
                 continue
             stadium = await self._dao.get_stadium(hit["team"])
             stadium_name = stadium["name"] if stadium else hit["team"]
@@ -224,6 +481,52 @@ class EventEngine:
                 hit["team"], hit["event_id"], text
             )
             hit["text"] = text
+
+    # ─── 结算 ─────────────────────────────────────────────
+
+    async def settle_choices(self, season: int, window_seq: int) -> dict:
+        """结算选择型事件：已导入选择按选项概率掷骰，未定按最差结果兜底。
+
+        返回的 tx_ids 并入窗口结算的可撤销集合；同时把 events_log 中该选择
+        事件的广播文案替换为一行结算摘要（保持结算回顾简洁）。
+        """
+        rows = await self._dao.get_unresolved_choices(season, window_seq)
+        resolved = []
+        tx_ids: list[int] = []
+        for c in rows:
+            event = await self._dao.fetch_event_by_id(c["event_id"])
+            options = self._event_options(event) if event else []
+            if not options:
+                await self._dao.mark_choice_resolved(c["id"], '{"skipped": true}')
+                name = event["name"] if event else c["event_id"]
+                await self._dao.update_event_log_text(c["team_name"], c["event_id"],
+                                                      f"「{name}」无选项信息，跳过")
+                resolved.append({"team": c["team_name"], "event": name,
+                                 "auto": True, "skipped": True, "notes": []})
+                continue
+            auto = c["choice_no"] is None
+            opt = None
+            if not auto:
+                opt = next((o for o in options if o["no"] == c["choice_no"]), None)
+                auto = opt is None  # 选项号无效同样按最差兜底
+            if auto:
+                opt, outcome = self._worst_option(options)
+            else:
+                outcome = self._roll_option(opt)
+            effects = outcome.get("effects") or {}
+            notes = await self._apply_effects(c["team_name"], season, window_seq,
+                                              effects, f"{event['name']}·{opt['name']}", tx_ids)
+            how = "未收到选择，按最差结果" if auto else f"选项{opt['no']} {opt['name']}"
+            await self._dao.mark_choice_resolved(c["id"], json.dumps(
+                {"option": opt["no"], "option_name": opt["name"], "auto": auto,
+                 "effects": effects}, ensure_ascii=False))
+            await self._dao.update_event_log_text(
+                c["team_name"], c["event_id"],
+                f"「{event['name']}」{how} → {'；'.join(notes) if notes else '无变化'}",
+            )
+            resolved.append({"team": c["team_name"], "event": event["name"],
+                             "option": opt["name"], "auto": auto, "notes": notes})
+        return {"resolved": resolved, "tx_ids": tx_ids}
 
     # ─── LLM 设计 ─────────────────────────────────────────
 
