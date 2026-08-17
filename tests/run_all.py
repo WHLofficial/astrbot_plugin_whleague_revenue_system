@@ -14,6 +14,7 @@ MODULES = [
     "tests.s4_window",
     "tests.s5_events_brands",
     "tests.s6_handlers",
+    "tests.s7_file_import",
 ]
 
 

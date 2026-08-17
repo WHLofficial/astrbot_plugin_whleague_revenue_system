@@ -69,6 +69,7 @@ _FLOAT_RANGES = {
     "naming_fans_drop_threshold": (0.0, 1.0),
     "naming_terminate_probability": (0.0, 1.0),
     "event_hit_probability": (0.0, 1.0),
+    "import_max_file_size_mb": (0.1, 500.0),
     "event_money_clamp": (0.0, 1000.0),
     "event_fans_clamp": (0.0, 1.0),
     "event_maintenance_clamp": (0.0, 1000.0),

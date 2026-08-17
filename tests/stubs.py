@@ -54,7 +54,19 @@ def install_stubs():
     sys.modules["astrbot.api.star"] = star_pkg
 
     mc_pkg = types.ModuleType("astrbot.api.message_components")
-    mc_pkg.File = object
+
+    class _File:
+        """文件消息段桩：File(name, file=本地路径, url=...) + async get_file()。"""
+
+        def __init__(self, name: str = "", file: str = "", url: str = ""):
+            self.name = name
+            self.file_ = file
+            self.url = url
+
+        async def get_file(self, allow_return_url: bool = False) -> str:
+            return self.file_ or ""
+
+    mc_pkg.File = _File
     mc_pkg.Plain = object
     sys.modules["astrbot.api.message_components"] = mc_pkg
 

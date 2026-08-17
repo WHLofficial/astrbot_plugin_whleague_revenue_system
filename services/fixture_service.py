@@ -9,6 +9,7 @@ import re
 from astrbot.api import logger
 
 from . import formula
+from .file_import_service import parse_fixture_file, parse_result_file
 from .stadium_service import StadiumService
 
 _WEATHER_ALIASES = {
@@ -137,6 +138,16 @@ class FixtureService:
         return {"imported": imported, "skipped": skipped, "errors": errors[:10],
                 "season": season, "window_seq": window_seq}
 
+    async def import_fixtures_file(self, path: str) -> dict:
+        """从 xlsx/csv 文件导入赛程（文件 → 归一化 → 复用 import_fixtures）。"""
+        parsed = await parse_fixture_file(self._cfg, path)
+        if not parsed["lines"]:
+            detail = f"（{parsed['errors'][0]}）" if parsed["errors"] else ""
+            raise FixtureError(f"文件中没有可导入的赛程行{detail}")
+        result = await self.import_fixtures("\n".join(parsed["lines"]))
+        result["file_errors"] = parsed["errors"]
+        return result
+
     # ─── 天气预报 ─────────────────────────────────────────
 
     async def forecast_round(self, round_no: int) -> dict:
@@ -193,6 +204,16 @@ class FixtureService:
             detail = await self._record_one(m, result, season, window_seq)
             results.append(detail)
         return {"round_no": round_no, "count": len(results), "results": results}
+
+    async def record_results_file(self, round_no: int, path: str) -> dict:
+        """从 xlsx/csv 文件录入赛果（文件 → 归一化 → 复用 record_results）。"""
+        parsed = await parse_result_file(self._cfg, path)
+        if not parsed["lines"]:
+            detail = f"（{parsed['errors'][0]}）" if parsed["errors"] else ""
+            raise FixtureError(f"文件中没有可录入的赛果行{detail}")
+        result = await self.record_results(round_no, "\n".join(parsed["lines"]))
+        result["file_errors"] = parsed["errors"]
+        return result
 
     async def _record_one(self, match, result: str, season: int, window_seq: int) -> dict:
         home, away = match["home_team"], match["away_team"]

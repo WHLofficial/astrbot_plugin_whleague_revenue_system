@@ -179,6 +179,12 @@
     "type": "float",
     "default": 0.4
   },
+  "import_max_file_size_mb": {
+    "description": "单文件导入大小上限",
+    "hint": "赛程/赛果/属性导入的 xlsx/csv 附件大小上限（MB）。",
+    "type": "float",
+    "default": 20.0
+  },
   "event_money_clamp": {
     "description": "事件金额钳制",
     "hint": "LLM 设计事件时单次金钱效果绝对值上限（M）。",

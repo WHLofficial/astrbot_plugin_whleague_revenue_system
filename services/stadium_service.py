@@ -7,6 +7,7 @@
 from astrbot.api import logger
 
 from . import formula
+from .file_import_service import parse_attribute_file
 
 
 class StadiumError(Exception):
@@ -143,6 +144,23 @@ class StadiumService:
             notes.append(f"影响力 → {influence:g}")
 
         return {"team": team_name, "notes": notes, "stadium": await self._dao.get_stadium(team_name)}
+
+    async def import_attributes_file(self, path: str) -> dict:
+        """从 xlsx/csv 文件批量导入属性（逐队复用 import_attributes，独立报错）。"""
+        parsed = await parse_attribute_file(self._cfg, path)
+        if not parsed["records"]:
+            detail = f"（{parsed['errors'][0]}）" if parsed["errors"] else ""
+            raise StadiumError(f"文件中没有可导入的属性行{detail}")
+        results = []
+        imported = 0
+        for team, influence, capacity, tier in parsed["records"]:
+            try:
+                r = await self.import_attributes(team, influence, capacity, tier)
+                results.append({"team": team, "ok": True, "notes": r["notes"]})
+                imported += 1
+            except (StadiumError, ValueError) as e:
+                results.append({"team": team, "ok": False, "error": str(e)})
+        return {"imported": imported, "results": results, "errors": parsed["errors"]}
 
     async def _record_build_cost(self, team_name: str, season: int, window_seq: int,
                                  cost: float, note: str) -> None:

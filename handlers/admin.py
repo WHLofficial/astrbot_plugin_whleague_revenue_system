@@ -4,10 +4,12 @@ from collections.abc import AsyncGenerator
 
 from astrbot.api import logger
 from astrbot.api.event import MessageEventResult
+from astrbot.api.message_components import File
 
 from ..config.defaults import validate_and_cast
 from ..services.brand_service import BrandError
 from ..services.event_engine import EventError
+from ..services.file_import_service import FileImportError, cleanup_file
 from ..services.fixture_service import FixtureError
 from ..services.stadium_service import StadiumError
 from ..services.window_service import SettleError
@@ -34,7 +36,8 @@ class AdminHandler:
     async def _run(self, event, coro):
         try:
             return await coro
-        except (StadiumError, FixtureError, EventError, BrandError, SettleError, ValueError) as e:
+        except (StadiumError, FixtureError, EventError, BrandError, SettleError,
+                FileImportError, ValueError) as e:
             return {"error": str(e)}
         except Exception as e:
             logger.error(f"Admin handler error: {e}")
@@ -46,6 +49,23 @@ class AdminHandler:
             return "你没有权限执行此操作"
         return None
 
+    async def _get_attachment(self, event) -> str | None:
+        """从消息链中提取第一个文件附件，返回下载后的本地路径；无附件返回 None。"""
+        try:
+            messages = event.get_messages()
+        except Exception:
+            return None
+        for comp in messages:
+            if isinstance(comp, File):
+                try:
+                    path = await comp.get_file()
+                except Exception as e:
+                    logger.warning(f"附件下载失败: {e}")
+                    return None
+                if path:
+                    return path
+        return None
+
     # ─── 赛程 ─────────────────────────────────────────────
 
     async def import_fixtures(self, event) -> AsyncGenerator[MessageEventResult, None]:
@@ -53,16 +73,25 @@ class AdminHandler:
         if deny:
             yield event.plain_result(deny)
             return
+        path = await self._get_attachment(event)
         parts = event.get_message_str().split(maxsplit=1)
-        if len(parts) < 2:
-            yield event.plain_result("用法: /主场赛程导入\n每行：轮次 主队 客队")
+        if path is None and len(parts) < 2:
+            yield event.plain_result("用法: /主场赛程导入\n每行：轮次 主队 客队（或附带 xlsx/csv 文件）")
             return
-        result = await self._run(event, self._plugin.fixture_service.import_fixtures(parts[1]))
+        if path:
+            try:
+                result = await self._run(
+                    event, self._plugin.fixture_service.import_fixtures_file(path)
+                )
+            finally:
+                cleanup_file(path)
+        else:
+            result = await self._run(event, self._plugin.fixture_service.import_fixtures(parts[1]))
         if "error" in result:
             yield event.plain_result(result["error"])
             return
         lines = [f"📋 已导入第 {result['season']} 赛季窗口 {result['window_seq']} 赛程 {result['imported']} 场（跳过 {result['skipped']}）"]
-        for e in result["errors"]:
+        for e in list(result.get("file_errors", [])) + list(result.get("errors", [])):
             lines.append(f"⚠️ {e}")
         yield event.plain_result("\n".join(lines))
 
@@ -106,17 +135,29 @@ class AdminHandler:
             yield event.plain_result(deny)
             return
         parts = event.get_message_str().split(maxsplit=2)
-        if len(parts) < 3:
-            yield event.plain_result("用法: /主场赛果 <轮次>\n每行：主队 胜/平/负")
+        if len(parts) < 2:
+            yield event.plain_result("用法: /主场赛果 <轮次>\n每行：主队 胜/平/负（或附带 xlsx/csv 文件）")
             return
         try:
             round_no = parse_int(parts[1], min_val=1)
         except ValueError:
             yield event.plain_result("轮次需为正整数")
             return
-        result = await self._run(
-            event, self._plugin.fixture_service.record_results(round_no, parts[2])
-        )
+        path = await self._get_attachment(event)
+        if path is None and len(parts) < 3:
+            yield event.plain_result("用法: /主场赛果 <轮次>\n每行：主队 胜/平/负（或附带 xlsx/csv 文件）")
+            return
+        if path:
+            try:
+                result = await self._run(
+                    event, self._plugin.fixture_service.record_results_file(round_no, path)
+                )
+            finally:
+                cleanup_file(path)
+        else:
+            result = await self._run(
+                event, self._plugin.fixture_service.record_results(round_no, parts[2])
+            )
         if "error" in result:
             yield event.plain_result(result["error"])
             return
@@ -127,6 +168,8 @@ class AdminHandler:
                 f"· {r['home']} {r['result']} {r['away']} {wx} | 上座 {r['attendance']:,}"
                 f" | 票 {r['ticket']:.2f}M 商 {r['commercial']:.2f}M 转 {r['broadcast']:.2f}M"
             )
+        for e in result.get("file_errors", []):
+            lines.append(f"⚠️ {e}")
         yield event.plain_result("\n".join(lines))
 
     async def round_stats(self, event) -> AsyncGenerator[MessageEventResult, None]:
@@ -218,8 +261,29 @@ class AdminHandler:
             yield event.plain_result(deny)
             return
         parts = event.get_message_str().split(maxsplit=1)
-        if len(parts) < 2:
-            yield event.plain_result("用法: /主场属性导入\n每行：队名 影响力 容量 等级")
+        path = await self._get_attachment(event)
+        if path is None and len(parts) < 2:
+            yield event.plain_result("用法: /主场属性导入\n每行：队名 影响力 容量 等级（或附带 xlsx/csv 文件）")
+            return
+        if path:
+            try:
+                result = await self._run(
+                    event, self._plugin.stadium_service.import_attributes_file(path)
+                )
+            finally:
+                cleanup_file(path)
+            if "error" in result:
+                yield event.plain_result(result["error"])
+                return
+            lines_out = [f"📄 文件导入属性 {result['imported']} 队"]
+            for r in result["results"]:
+                if r["ok"]:
+                    lines_out.append(f"✅ {r['team']}: " + "；".join(r["notes"]))
+                else:
+                    lines_out.append(f"⚠️ {r['team']}: {r['error']}")
+            for e in result.get("errors", []):
+                lines_out.append(f"⚠️ {e}")
+            yield event.plain_result("\n".join(lines_out) if lines_out else "没有可导入的行")
             return
         lines_out = []
         for raw in parts[1].splitlines():
