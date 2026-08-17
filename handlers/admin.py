@@ -7,6 +7,7 @@ from astrbot.api.event import MessageEventResult
 from astrbot.api.message_components import File
 
 from ..config.defaults import validate_and_cast
+from ..services import formula
 from ..services.brand_service import BrandError
 from ..services.event_engine import EventError
 from ..services.file_import_service import FileImportError, cleanup_file
@@ -102,28 +103,29 @@ class AdminHandler:
             return
         parts = event.get_message_str().split()
         if len(parts) < 2:
-            yield event.plain_result("用法: /主场天气 <轮次>（或 /主场天气 <轮次> <主队> <天气> 覆盖）")
+            yield event.plain_result("用法: /主场天气 <轮次>（或 /主场天气 <轮次> <主队> <天气> 覆盖）\n轮次支持前缀：顶级9/次级11/冠军3（默认联赛）")
             return
         try:
-            round_no = parse_int(parts[1], min_val=1)
-        except ValueError:
-            yield event.plain_result("轮次需为正整数")
+            competition, round_no = formula.parse_round_token(self._plugin.config_cache, parts[1])
+        except ValueError as e:
+            yield event.plain_result(str(e))
             return
         if len(parts) >= 4:
             result = await self._run(
-                event, self._plugin.fixture_service.set_weather(round_no, parts[2], parts[3])
+                event,
+                self._plugin.fixture_service.set_weather(round_no, parts[2], parts[3], competition),
             )
             if "error" in result:
                 yield event.plain_result(result["error"])
                 return
-            yield event.plain_result(f"☀️ 第 {round_no} 轮「{result['home']}」天气改为 {result['weather']}")
+            yield event.plain_result(f"☀️ 第 {round_no} 轮({competition})「{result['home']}」天气改为 {result['weather']}")
             return
-        result = await self._run(event, self._plugin.fixture_service.forecast_round(round_no))
+        result = await self._run(event, self._plugin.fixture_service.forecast_round(round_no, competition))
         if "error" in result:
             yield event.plain_result(result["error"])
             return
         icons = {"晴": "☀️", "多云": "⛅", "雨": "🌧️", "雪": "❄️"}
-        lines = [f"🌤 第 {round_no} 轮天气预报"]
+        lines = [f"🌤 第 {round_no} 轮({competition})天气预报"]
         for m in result["matches"]:
             mark = "（已定）" if m["existing"] else ""
             lines.append(f"· {m['home']}: {icons.get(m['weather'], '')}{m['weather']}{mark}")
@@ -136,32 +138,32 @@ class AdminHandler:
             return
         parts = event.get_message_str().split(maxsplit=2)
         if len(parts) < 2:
-            yield event.plain_result("用法: /主场赛果 <轮次>\n每行：主队 胜/平/负（或附带 xlsx/csv 文件）")
+            yield event.plain_result("用法: /主场赛果 <轮次>\n每行：主队 胜/平/负（或附带 xlsx/csv 文件）\n轮次支持前缀：顶级9/次级11/冠军3（默认联赛）")
             return
         try:
-            round_no = parse_int(parts[1], min_val=1)
-        except ValueError:
-            yield event.plain_result("轮次需为正整数")
+            competition, round_no = formula.parse_round_token(self._plugin.config_cache, parts[1])
+        except ValueError as e:
+            yield event.plain_result(str(e))
             return
         path = await self._get_attachment(event)
         if path is None and len(parts) < 3:
-            yield event.plain_result("用法: /主场赛果 <轮次>\n每行：主队 胜/平/负（或附带 xlsx/csv 文件）")
+            yield event.plain_result("用法: /主场赛果 <轮次>\n每行：主队 胜/平/负（或附带 xlsx/csv 文件）\n轮次支持前缀：顶级9/次级11/冠军3（默认联赛）")
             return
         if path:
             try:
                 result = await self._run(
-                    event, self._plugin.fixture_service.record_results_file(round_no, path)
+                    event, self._plugin.fixture_service.record_results_file(round_no, path, competition)
                 )
             finally:
                 cleanup_file(path)
         else:
             result = await self._run(
-                event, self._plugin.fixture_service.record_results(round_no, parts[2])
+                event, self._plugin.fixture_service.record_results(round_no, parts[2], competition)
             )
         if "error" in result:
             yield event.plain_result(result["error"])
             return
-        lines = [f"⚽ 第 {round_no} 轮赛果已录入（{result['count']} 场）"]
+        lines = [f"⚽ 第 {round_no} 轮({competition})赛果已录入（{result['count']} 场）"]
         for r in result["results"]:
             wx = {"晴": "☀️", "多云": "⛅", "雨": "🌧️", "雪": "❄️"}.get(r["weather"] or "", "")
             lines.append(
@@ -179,18 +181,18 @@ class AdminHandler:
             return
         parts = event.get_message_str().split()
         if len(parts) < 2:
-            yield event.plain_result("用法: /主场轮次统计 <轮次>")
+            yield event.plain_result("用法: /主场轮次统计 <轮次>\n轮次支持前缀：顶级9/次级11/冠军3（默认联赛）")
             return
         try:
-            round_no = parse_int(parts[1], min_val=1)
-        except ValueError:
-            yield event.plain_result("轮次需为正整数")
+            competition, round_no = formula.parse_round_token(self._plugin.config_cache, parts[1])
+        except ValueError as e:
+            yield event.plain_result(str(e))
             return
-        result = await self._run(event, self._plugin.fixture_service.round_stats(round_no))
+        result = await self._run(event, self._plugin.fixture_service.round_stats(round_no, competition))
         if "error" in result:
             yield event.plain_result(result["error"])
             return
-        lines = [f"📊 第 {result['round_no']} 轮统计（赛季{result['season']} 窗口{result['window_seq']}）"]
+        lines = [f"📊 第 {result['round_no']} 轮({competition})统计（赛季{result['season']} 窗口{result['window_seq']}）"]
         lines.extend(result["lines"])
         t = result["totals"]
         lines.append(f"合计: 上座 {t['attendance']:,} / 票房 {t['ticket']:.2f}M")

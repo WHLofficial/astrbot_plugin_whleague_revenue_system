@@ -169,6 +169,32 @@ async def test_naming_fee():
     assert abs(fee - 1.58) < 1e-6, fee
 
 
+async def test_parse_round_token():
+    cfg = _cfg()
+    cases = [
+        ("1", "联赛", 1),
+        ("第9轮", "联赛", 9),
+        ("顶级9", "顶级联赛", 9),
+        ("顶3", "顶级联赛", 3),
+        ("超级联赛第2轮", "顶级联赛", 2),
+        ("次级11", "次级联赛", 11),
+        ("次第5轮", "次级联赛", 5),
+        ("冠军3", "冠军杯", 3),
+        ("冠军杯第4轮", "冠军杯", 4),
+        ("小组赛第3轮", "冠军杯", 3),
+        ("欧冠第4轮", "冠军杯", 4),
+    ]
+    for token, comp, rnd in cases:
+        got_comp, got_rnd = formula.parse_round_token(cfg, token)
+        assert (got_comp, got_rnd) == (comp, rnd), f"{token}: {got_comp},{got_rnd}"
+    for bad in ("", "abc", "顶级", "第轮"):
+        try:
+            formula.parse_round_token(cfg, bad)
+            assert False, f"应拒绝 {bad}"
+        except ValueError:
+            pass
+
+
 def run_all():
     import asyncio
 

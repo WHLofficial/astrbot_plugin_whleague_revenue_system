@@ -118,6 +118,26 @@ async def test_fixture_csv_tsv():
         p.unlink(missing_ok=True)
 
 
+async def test_fixture_file_competition_token():
+    env = await TestEnv().setup()
+    try:
+        p = Path(os.path.join(os.path.dirname(os.path.abspath(__file__)), "tmp_fix_comp.csv"))
+        p.write_text("轮次,主队,客队\n顶级9,利物浦,巴塞罗那\n次级9,纽卡斯尔联,勒沃库森\n",
+                     encoding="utf-8")
+        try:
+            result = await env.fixture_service.import_fixtures_file(str(p))
+            assert result["imported"] == 2, result
+            assert result["file_errors"] == [], result
+            top = await env.dao.get_round_matches(1, 1, 9, "顶级联赛")
+            sub = await env.dao.get_round_matches(1, 1, 9, "次级联赛")
+            assert len(top) == 1 and top[0]["competition"] == "顶级联赛"
+            assert len(sub) == 1 and sub[0]["competition"] == "次级联赛"
+        finally:
+            p.unlink(missing_ok=True)
+    finally:
+        await env.teardown()
+
+
 async def test_xlsx_header_columns():
     base = os.path.dirname(os.path.abspath(__file__))
 

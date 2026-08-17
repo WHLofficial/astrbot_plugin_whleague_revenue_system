@@ -107,6 +107,7 @@ _JSON_STRING_KEYS = (
     "form_coef_table",
     "facility_effects",
     "activity_config",
+    "competition_aliases",
 )
 
 

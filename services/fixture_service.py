@@ -41,8 +41,11 @@ class FixtureError(Exception):
     pass
 
 
-def parse_fixture_lines(text: str) -> list[tuple[int, str, str]]:
-    """解析赛程文本行。每行三字段：轮次 主队 客队（| 逗号 空白分隔）。"""
+def parse_fixture_lines(text: str, cfg: dict) -> list[tuple[int, str, str, str]]:
+    """解析赛程文本行。每行三字段：轮次 主队 客队（| 逗号 空白分隔）。
+
+    轮次支持文字前缀识别赛事（formula.parse_round_token），返回 (轮次, 赛事, 主队, 客队)。
+    """
     out = []
     for raw_line in str(text or "").splitlines():
         line = raw_line.strip()
@@ -54,16 +57,14 @@ def parse_fixture_lines(text: str) -> list[tuple[int, str, str]]:
         if len(parts) < 3:
             raise FixtureError(f"无法解析行: {line}（需为：轮次 主队 客队）")
         try:
-            round_no = int(parts[0].strip())
-        except ValueError:
-            raise FixtureError(f"轮次需为数字: {line}")
-        if round_no < 1:
-            raise FixtureError(f"轮次需为正数: {line}")
+            competition, round_no = formula.parse_round_token(cfg, parts[0].strip())
+        except ValueError as e:
+            raise FixtureError(f"轮次非法: {line}（{e}）")
         home = parts[1].strip()
         away = parts[2].strip()
         if not home or not away or home == away:
             raise FixtureError(f"主客队非法: {line}")
-        out.append((round_no, home, away))
+        out.append((round_no, competition, home, away))
     return out
 
 
@@ -117,7 +118,7 @@ class FixtureService:
     # ─── 赛程导入 ─────────────────────────────────────────
 
     async def import_fixtures(self, text: str) -> dict:
-        rows = parse_fixture_lines(text)
+        rows = parse_fixture_lines(text, self._cfg)
         if not rows:
             raise FixtureError("没有可导入的赛程行")
         state = await self.get_state()
@@ -126,14 +127,14 @@ class FixtureService:
         known = await self._stadium_service.list_known_teams()
         errors = []
         imported, skipped = 0, 0
-        for round_no, home, away in rows:
+        for round_no, competition, home, away in rows:
             if home not in known or away not in known:
-                errors.append(f"第{round_no}轮 {home} vs {away}: 未知球队（先导入属性或已建队）")
+                errors.append(f"第{round_no}轮({competition}) {home} vs {away}: 未知球队（先导入属性或已建队）")
                 skipped += 1
                 continue
             for team in (home, away):
                 await self._stadium_service.ensure_stadium(team)
-            await self._dao.add_match(season, window_seq, round_no, home, away)
+            await self._dao.add_match(season, window_seq, round_no, home, away, competition)
             imported += 1
         return {"imported": imported, "skipped": skipped, "errors": errors[:10],
                 "season": season, "window_seq": window_seq}
@@ -150,13 +151,13 @@ class FixtureService:
 
     # ─── 天气预报 ─────────────────────────────────────────
 
-    async def forecast_round(self, round_no: int) -> dict:
+    async def forecast_round(self, round_no: int, competition: str | None = None) -> dict:
         state = await self.get_state()
         matches = await self._dao.get_round_matches(
-            state["season_number"], state["window_seq"], round_no
+            state["season_number"], state["window_seq"], round_no, competition
         )
         if not matches:
-            raise FixtureError(f"第 {round_no} 轮没有赛程")
+            raise FixtureError(f"第 {round_no} 轮({competition or '联赛'})没有赛程")
         results = []
         for m in matches:
             if m["weather"]:
@@ -165,34 +166,36 @@ class FixtureService:
             weather = formula.roll_weather(self._cfg)
             await self._dao.set_match_weather(m["id"], weather)
             results.append({"home": m["home_team"], "weather": weather, "existing": False})
-        return {"round_no": round_no, "matches": results}
+        return {"round_no": round_no, "competition": competition or "联赛", "matches": results}
 
-    async def set_weather(self, round_no: int, home_team: str, weather_text: str) -> dict:
+    async def set_weather(self, round_no: int, home_team: str, weather_text: str,
+                          competition: str | None = None) -> dict:
         weather = _WEATHER_ALIASES.get(weather_text.strip().lower())
         if weather is None:
             raise FixtureError(f"未知天气: {weather_text}（晴/多云/雨/雪）")
         state = await self.get_state()
         matches = await self._dao.get_round_matches(
-            state["season_number"], state["window_seq"], round_no
+            state["season_number"], state["window_seq"], round_no, competition
         )
         for m in matches:
             if m["home_team"] == home_team:
                 await self._dao.set_match_weather(m["id"], weather)
                 return {"home": home_team, "weather": weather}
-        raise FixtureError(f"第 {round_no} 轮无主队「{home_team}」的比赛")
+        raise FixtureError(f"第 {round_no} 轮({competition or '联赛'})无主队「{home_team}」的比赛")
 
     # ─── 赛果录入 ─────────────────────────────────────────
 
-    async def record_results(self, round_no: int, text: str) -> dict:
+    async def record_results(self, round_no: int, text: str,
+                             competition: str | None = None) -> dict:
         rows = parse_result_lines(text)
         if not rows:
             raise FixtureError("没有可录入的赛果")
         state = await self.get_state()
         season, window_seq = state["season_number"], state["window_seq"]
-        matches = await self._dao.get_round_matches(season, window_seq, round_no)
+        matches = await self._dao.get_round_matches(season, window_seq, round_no, competition)
         by_home = {m["home_team"]: m for m in matches}
         if not by_home:
-            raise FixtureError(f"第 {round_no} 轮没有赛程")
+            raise FixtureError(f"第 {round_no} 轮({competition or '联赛'})没有赛程")
 
         results = []
         for home, result in rows:
@@ -205,13 +208,14 @@ class FixtureService:
             results.append(detail)
         return {"round_no": round_no, "count": len(results), "results": results}
 
-    async def record_results_file(self, round_no: int, path: str) -> dict:
+    async def record_results_file(self, round_no: int, path: str,
+                                  competition: str | None = None) -> dict:
         """从 xlsx/csv 文件录入赛果（文件 → 归一化 → 复用 record_results）。"""
         parsed = await parse_result_file(self._cfg, path)
         if not parsed["lines"]:
             detail = f"（{parsed['errors'][0]}）" if parsed["errors"] else ""
             raise FixtureError(f"文件中没有可录入的赛果行{detail}")
-        result = await self.record_results(round_no, "\n".join(parsed["lines"]))
+        result = await self.record_results(round_no, "\n".join(parsed["lines"]), competition)
         result["file_errors"] = parsed["errors"]
         return result
 
@@ -268,10 +272,10 @@ class FixtureService:
 
     # ─── 统计 ─────────────────────────────────────────────
 
-    async def round_stats(self, round_no: int) -> dict:
+    async def round_stats(self, round_no: int, competition: str | None = None) -> dict:
         state = await self.get_state()
         matches = await self._dao.get_round_matches(
-            state["season_number"], state["window_seq"], round_no
+            state["season_number"], state["window_seq"], round_no, competition
         )
         totals = {"attendance": 0, "ticket": 0.0}
         lines = []

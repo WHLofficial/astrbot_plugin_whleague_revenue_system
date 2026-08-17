@@ -9,6 +9,7 @@
 
 import asyncio
 import csv
+import re
 from pathlib import Path
 
 from astrbot.api import logger
@@ -157,15 +158,15 @@ def build_fixture_lines(rows: list[list[str]]) -> tuple[list[str], list[str]]:
         if home == away:
             errors.append(f"第{rownum}行: 主客队不能相同")
             continue
-        try:
-            round_no = int(round_raw) if round_raw else 1
-        except ValueError:
-            errors.append(f"第{rownum}行: 轮次需为数字「{round_raw}」")
+        round_token = round_raw if round_raw else "1"
+        digits = re.sub(r"\D", "", round_token)
+        if not digits:
+            errors.append(f"第{rownum}行: 轮次需包含数字（如 9 / 顶级9 / 次级11）「{round_token}」")
             continue
-        if round_no < 1:
-            errors.append(f"第{rownum}行: 轮次需为正数")
+        if int(digits) < 1:
+            errors.append(f"第{rownum}行: 轮次需为正数「{round_token}」")
             continue
-        lines.append(f"{round_no} {home} {away}")
+        lines.append(f"{round_token} {home} {away}")
     return lines, errors
 
 

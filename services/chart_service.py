@@ -18,6 +18,14 @@ GRID = (205, 205, 205)
 BG = (255, 255, 255)
 ACCENT = (148, 120, 208)
 
+# 赛事配色（参照展示工作表三节）：
+# 次级联赛=薰衣草紫 #B19CD9｜顶级联赛=橙 #E97132｜其余（联赛/冠军杯/未知）=绿 #5CB48E
+COMPETITION_COLORS = {
+    "次级联赛": ((177, 156, 217), (249, 247, 255)),
+    "顶级联赛": ((233, 113, 50), (255, 248, 245)),
+}
+DEFAULT_COMPETITION_COLOR = ((92, 180, 142), (245, 255, 252))
+
 PALETTE = [
     (78, 121, 167), (242, 142, 43), (225, 87, 89), (118, 183, 178),
     (89, 161, 79), (237, 201, 72), (176, 122, 161), (255, 157, 167),
@@ -73,7 +81,8 @@ def _draw_cell_text(dr, text, x, y, w, h, font, fill, align: str) -> None:
     dr.text((tx, ty), text, font=font, fill=fill)
 
 
-def _draw_table(title: str, subtitle: str, headers, rows, totals, out_path: str) -> str:
+def _draw_table(title: str, subtitle: str, headers, rows, totals, out_path: str,
+                header_fill=HEADER_FILL, header_text=HEADER_TEXT) -> str:
     """headers/rows/totals: 每格为 (文本, 列宽, 对齐 l/c/r)。"""
     from PIL import Image, ImageDraw
 
@@ -102,10 +111,10 @@ def _draw_table(title: str, subtitle: str, headers, rows, totals, out_path: str)
     dr.text((pad + 2, y), subtitle, font=f_sub, fill=(120, 120, 120))
     y += sub_h + gap
 
-    # 表头（薰衣草紫底白字粗体）
-    dr.rectangle([pad, y, width - pad, y + header_h], fill=HEADER_FILL)
+    # 表头（赛事底色白字粗体）
+    dr.rectangle([pad, y, width - pad, y + header_h], fill=header_fill)
     for i, (cell, (_, w, align)) in enumerate(zip([h[0] for h in headers], headers)):
-        _draw_cell_text(dr, cell, col_x[i], y, w, header_h, f_head, HEADER_TEXT, align)
+        _draw_cell_text(dr, cell, col_x[i], y, w, header_h, f_head, header_text, align)
     y += header_h
 
     # 数据行（细网格线）
@@ -115,10 +124,10 @@ def _draw_table(title: str, subtitle: str, headers, rows, totals, out_path: str)
             _draw_cell_text(dr, cell, col_x[i], y, w, row_h, f_row, TEXT_DARK, align)
         y += row_h
 
-    # 合计行（薰衣草紫底白字粗体）
-    dr.rectangle([pad, y, width - pad, y + total_h], fill=HEADER_FILL)
+    # 合计行（赛事底色白字粗体）
+    dr.rectangle([pad, y, width - pad, y + total_h], fill=header_fill)
     for i, (cell, (_, w, align)) in enumerate(zip(totals, headers)):
-        _draw_cell_text(dr, cell, col_x[i], y, w, total_h, f_tot, HEADER_TEXT, align)
+        _draw_cell_text(dr, cell, col_x[i], y, w, total_h, f_tot, header_text, align)
     y += total_h
     dr.rectangle([pad, y, width - pad, y + 3], fill=ACCENT)
 
@@ -254,14 +263,14 @@ class ChartService:
 
     # ─── 轮次表格图（展示工作表风格） ─────────────────────
 
-    async def render_round_chart(self, round_no: int) -> str:
+    async def render_round_chart(self, round_no: int, competition: str = "联赛") -> str:
         state = await self._dao.get_league_state()
         season = state["season_number"] if state else 1
         window_seq = state["window_seq"] if state else 1
-        matches = await self._dao.get_round_matches(season, window_seq, round_no)
+        matches = await self._dao.get_round_matches(season, window_seq, round_no, competition)
         played = [m for m in matches if m["attendance"] is not None]
         if not played:
-            raise ChartError(f"第 {round_no} 轮还没有已录入赛果的比赛")
+            raise ChartError(f"第 {round_no} 轮({competition})还没有已录入赛果的比赛")
         rows, total = [], 0
         for m in played:
             st = await self._dao.get_stadium(m["home_team"])
@@ -280,16 +289,18 @@ class ChartService:
             ])
         avg = total / len(played)
         subtitle = f"第 {season} 赛季 · 窗口 {window_seq} · 共 {len(played)} 场"
-        title = f"WHL 第 {season} 赛季 第 {round_no} 轮 现场观众统计"
+        title = f"WHL 第{season}赛季{competition}现场观众统计（第{round_no}轮）"
+        header_fill, header_text = COMPETITION_COLORS.get(competition, DEFAULT_COMPETITION_COLOR)
         headers = [
             ("天气", 110, "c"), ("主队", 200, "l"), ("赛果", 90, "c"),
             ("客队", 200, "l"), ("球场", 300, "l"),
             ("观众人数", 160, "r"), ("上座率", 130, "r"),
         ]
         totals = ["合计", "", "", "", "", f"{total:,}", f"场均 {avg:,.0f}"]
-        out = self.charts_dir / f"round_s{season}_w{window_seq}_r{round_no}.png"
+        out = self.charts_dir / f"round_s{season}_w{window_seq}_{competition}_r{round_no}.png"
         try:
-            _draw_table(title, subtitle, headers, rows, totals, str(out))
+            _draw_table(title, subtitle, headers, rows, totals, str(out),
+                        header_fill=header_fill, header_text=header_text)
         except ChartError:
             raise
         except Exception as e:

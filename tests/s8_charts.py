@@ -20,6 +20,23 @@ def _png_ok(path) -> bool:
     return data[:8] == _PNG_MAGIC and len(data) > 4000
 
 
+def _color_count(path, target, tol=14) -> int:
+    from PIL import Image
+
+    im = Image.open(path).convert("RGB")
+    w, h = im.size
+    px = im.load()
+    return sum(1 for y in range(0, h, 3) for x in range(0, w, 3)
+               if abs(px[x, y][0] - target[0]) < tol
+               and abs(px[x, y][1] - target[1]) < tol
+               and abs(px[x, y][2] - target[2]) < tol)
+
+
+PURPLE = (177, 156, 217)
+ORANGE = (233, 113, 50)
+GREEN = (92, 180, 142)
+
+
 async def _seed_round(env, round_no: int = 1, with_two: bool = False):
     for team, inf in [("利物浦", 150.0), ("巴塞罗那", 120.0),
                       ("纽卡斯尔联", 130.0), ("勒沃库森", 110.0)]:
@@ -87,6 +104,41 @@ async def test_chart_no_data_errors():
             assert False, "赛季无数据应报错"
         except ChartError as e:
             assert "还没有已录赛果" in str(e)
+    finally:
+        await env.teardown()
+
+
+async def test_chart_competition_colors():
+    env = await TestEnv().setup()
+    try:
+        for team, inf in [("利物浦", 150.0), ("巴塞罗那", 120.0),
+                          ("纽卡斯尔联", 130.0), ("勒沃库森", 110.0)]:
+            await env.stadium_service.import_attributes(team, influence=inf)
+        r = await env.fixture_service.import_fixtures(
+            "顶级9 利物浦 巴塞罗那\n次级9 纽卡斯尔联 勒沃库森\n冠军3 利物浦 勒沃库森\n"
+        )
+        assert r["imported"] == 3, r
+        for rnd, comp, line in [
+            (9, "顶级联赛", "利物浦 胜"),
+            (9, "次级联赛", "纽卡斯尔联 平"),
+            (3, "冠军杯", "利物浦 负"),
+        ]:
+            await env.fixture_service.set_weather(rnd, line.split()[0], "晴", comp)
+            await env.fixture_service.record_results(rnd, line, comp)
+        svc = ChartService(env.db, env.dao, env.cfg)
+        p_top = await svc.render_round_chart(9, "顶级联赛")
+        p_sub = await svc.render_round_chart(9, "次级联赛")
+        p_cup = await svc.render_round_chart(3, "冠军杯")
+        assert _color_count(p_top, ORANGE) > 200, "顶级联赛应为橙色表头"
+        assert _color_count(p_sub, PURPLE) > 200, "次级联赛应为紫色表头"
+        assert _color_count(p_cup, GREEN) > 200, "冠军杯应为绿色表头"
+        assert _color_count(p_top, PURPLE) == 0, "顶级图不应出现紫色"
+        assert _color_count(p_sub, ORANGE) == 0, "次级图不应出现橙色"
+        # 默认联赛（无前缀）用绿色
+        await env.fixture_service.import_fixtures("1 利物浦 巴塞罗那")
+        await env.fixture_service.record_results(1, "利物浦 胜")
+        p_league = await svc.render_round_chart(1)
+        assert _color_count(p_league, GREEN) > 200, "默认联赛应为绿色表头"
     finally:
         await env.teardown()
 

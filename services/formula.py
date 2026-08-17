@@ -5,6 +5,7 @@
 """
 
 import random
+import re
 
 from ..config.defaults import parse_json_object, parse_float_list
 
@@ -21,7 +22,48 @@ WX_CLOUDY = "多云"
 WX_RAIN = "雨"
 WX_SNOW = "雪"
 
+DEFAULT_COMPETITION = "联赛"
+
+DEFAULT_COMPETITION_ALIASES = {
+    "次级联赛": ["次级", "次"],
+    "顶级联赛": ["顶级", "顶", "超级"],
+    "冠军杯": ["冠军杯", "冠军", "冠", "小组", "欧冠", "杯"],
+}
+
 _RESULT_PTS = {"W": 3, "D": 1, "L": 0}
+
+
+def competition_aliases(cfg: dict) -> dict:
+    aliases = parse_json_object(cfg.get("competition_aliases", {}))
+    return aliases if aliases else DEFAULT_COMPETITION_ALIASES
+
+
+def parse_round_token(cfg: dict, token) -> tuple[str, int]:
+    """轮次支持文字，按前缀识别赛事：如「顶级9」「次级11」「冠军3」「小组赛第3轮」。
+
+    返回 (赛事, 轮次号)；无前缀命中则赛事为「联赛」，轮次取其中的数字。
+    """
+    s = str(token or "").strip()
+    if not s:
+        raise ValueError("轮次不能为空")
+    comp = DEFAULT_COMPETITION
+    aliases = competition_aliases(cfg)
+    for name, prefixes in aliases.items():
+        for p in prefixes:
+            p = str(p)
+            if s.startswith(p):
+                comp = name
+                s = s[len(p):]
+                break
+        if comp != DEFAULT_COMPETITION:
+            break
+    digits = re.sub(r"\D", "", s)
+    if not digits:
+        raise ValueError(f"轮次需包含数字: {token}")
+    round_no = int(digits)
+    if round_no < 1:
+        raise ValueError(f"轮次需为正数: {token}")
+    return comp, round_no
 
 
 def tier_config(cfg: dict, tier: int) -> dict:

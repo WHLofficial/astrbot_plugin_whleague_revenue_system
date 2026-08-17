@@ -1,6 +1,6 @@
 from astrbot.api import logger
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 SQL_CREATE_TABLES = r"""
 
@@ -51,6 +51,7 @@ CREATE TABLE IF NOT EXISTS matches (
     season_number INTEGER NOT NULL,
     window_seq INTEGER NOT NULL,
     round_no INTEGER NOT NULL,
+    competition TEXT NOT NULL DEFAULT '联赛',
     home_team TEXT NOT NULL,
     away_team TEXT NOT NULL,
     weather TEXT,
@@ -60,7 +61,7 @@ CREATE TABLE IF NOT EXISTS matches (
     commercial REAL,
     broadcast REAL,
     created_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
-    UNIQUE(season_number, window_seq, round_no, home_team)
+    UNIQUE(season_number, window_seq, round_no, competition, home_team)
 );
 
 CREATE INDEX IF NOT EXISTS idx_matches_round ON matches(season_number, window_seq, round_no);
@@ -237,3 +238,42 @@ async def _migrate(db, current_version: int):
             "INSERT OR IGNORE INTO league_state (id, season_number, window_seq, current_round) VALUES (1, 1, 1, 0)"
         )
         await db.commit()
+    if current_version < 2:
+        cols = await _table_columns(db, "matches")
+        if "competition" not in cols:
+            # 重建 matches 表：新增 competition 列并纳入唯一键（同轮次多赛事可共存）
+            await db.executescript(
+                """
+                ALTER TABLE matches RENAME TO matches_old;
+                CREATE TABLE matches (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    season_number INTEGER NOT NULL,
+                    window_seq INTEGER NOT NULL,
+                    round_no INTEGER NOT NULL,
+                    competition TEXT NOT NULL DEFAULT '联赛',
+                    home_team TEXT NOT NULL,
+                    away_team TEXT NOT NULL,
+                    weather TEXT,
+                    result TEXT,
+                    attendance INTEGER,
+                    ticket_revenue REAL,
+                    commercial REAL,
+                    broadcast REAL,
+                    created_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+                    UNIQUE(season_number, window_seq, round_no, competition, home_team)
+                );
+                INSERT INTO matches
+                    (id, season_number, window_seq, round_no, competition, home_team,
+                     away_team, weather, result, attendance, ticket_revenue,
+                     commercial, broadcast, created_at)
+                SELECT id, season_number, window_seq, round_no, '联赛', home_team,
+                       away_team, weather, result, attendance, ticket_revenue,
+                       commercial, broadcast, created_at
+                FROM matches_old;
+                DROP TABLE matches_old;
+                CREATE INDEX IF NOT EXISTS idx_matches_round ON matches(season_number, window_seq, round_no);
+                CREATE INDEX IF NOT EXISTS idx_matches_home ON matches(home_team);
+                """
+            )
+            await db.commit()
+            logger.info("Migrated matches table: added competition column.")

@@ -219,15 +219,28 @@ class StadiumDAO:
     # ─── 赛程/赛果 ────────────────────────────────────────
 
     async def add_match(
-        self, season: int, window_seq: int, round_no: int, home_team: str, away_team: str
+        self, season: int, window_seq: int, round_no: int, home_team: str, away_team: str,
+        competition: str = "联赛",
     ) -> None:
         await self._db.execute(
-            "INSERT OR IGNORE INTO matches (season_number, window_seq, round_no, home_team, away_team) "
-            "VALUES (?, ?, ?, ?, ?)",
-            (season, window_seq, round_no, home_team, away_team),
+            "INSERT OR IGNORE INTO matches (season_number, window_seq, round_no, competition, home_team, away_team) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (season, window_seq, round_no, competition, home_team, away_team),
         )
 
-    async def get_round_matches(self, season: int, window_seq: int, round_no: int) -> list:
+    async def get_round_matches(
+        self, season: int, window_seq: int, round_no: int, competition: str | None = None
+    ) -> list:
+        if competition:
+            return await self._db.fetchall(
+                "SELECT * FROM matches WHERE season_number=? AND window_seq=? AND round_no=? "
+                "AND competition=? ORDER BY id",
+                (season, window_seq, round_no, competition),
+            )
+        return await self._db.fetchall(
+            "SELECT * FROM matches WHERE season_number=? AND window_seq=? AND round_no=? ORDER BY id",
+            (season, window_seq, round_no),
+        )
         return await self._db.fetchall(
             "SELECT * FROM matches WHERE season_number=? AND window_seq=? AND round_no=? ORDER BY id",
             (season, window_seq, round_no),

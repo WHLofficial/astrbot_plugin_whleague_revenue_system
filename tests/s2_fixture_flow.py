@@ -127,3 +127,45 @@ async def test_parse_result_aliases():
 
     rows = parse_result_lines("利物浦 W\n巴塞罗那 平\n纽卡 负")
     assert rows == [("利物浦", "W"), ("巴塞罗那", "D"), ("纽卡", "L")]
+
+
+async def test_competitions_share_round_numbers():
+    env = await TestEnv().setup()
+    try:
+        # 顶级9 与 次级9 同窗口同轮次可共存，互不干扰
+        r = await env.fixture_service.import_fixtures(
+            "顶级9 利物浦 巴塞罗那\n次级9 纽卡斯尔联 勒沃库森\n冠军3 利物浦 勒沃库森\n"
+        )
+        assert r["imported"] == 3, r
+        top = await env.dao.get_round_matches(1, 1, 9, "顶级联赛")
+        sub = await env.dao.get_round_matches(1, 1, 9, "次级联赛")
+        assert len(top) == 1 and top[0]["competition"] == "顶级联赛"
+        assert len(sub) == 1 and sub[0]["competition"] == "次级联赛"
+        # 不带赛事过滤：同一轮次全是两赛事的比赛
+        all9 = await env.dao.get_round_matches(1, 1, 9)
+        assert len(all9) == 2
+        # 同名主队不同赛事可共存（利物浦在顶级9 和 冠军3 均主场）
+        assert len(await env.dao.get_round_matches(1, 1, 3, "冠军杯")) == 1
+
+        # 预报/天气/赛果/统计按赛事隔离
+        fc_top = await env.fixture_service.forecast_round(9, "顶级联赛")
+        assert len(fc_top["matches"]) == 1 and fc_top["matches"][0]["home"] == "利物浦"
+        fc_sub = await env.fixture_service.forecast_round(9, "次级联赛")
+        assert len(fc_sub["matches"]) == 1
+        await env.fixture_service.set_weather(9, "利物浦", "晴", "顶级联赛")
+        top_m = await env.dao.get_round_matches(1, 1, 9, "顶级联赛")
+        assert top_m[0]["weather"] == "晴"
+        # 次级联赛的天气未被污染
+        sub_m = await env.dao.get_round_matches(1, 1, 9, "次级联赛")
+        assert sub_m[0]["weather"] in ("晴", "多云", "雨", "雪")
+
+        rec = await env.fixture_service.record_results(9, "利物浦 胜\n", "顶级联赛")
+        assert rec["count"] == 1
+        rs = await env.fixture_service.round_stats(9, "顶级联赛")
+        assert rs["totals"]["attendance"] > 0
+        assert rs["totals"]["ticket"] > 0
+        # 次级9 尚无赛果
+        rs_sub = await env.fixture_service.round_stats(9, "次级联赛")
+        assert rs_sub["totals"]["attendance"] == 0
+    finally:
+        await env.teardown()
