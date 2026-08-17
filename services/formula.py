@@ -24,6 +24,89 @@ WX_SNOW = "雪"
 
 DEFAULT_COMPETITION = "联赛"
 
+_WEEKDAY_CHARS = ("一", "二", "三", "四", "五", "六", "日")
+
+_TIME_RE = re.compile(r"^(\d{1,2}):(\d{2})$")
+_WEEK_TOKEN_RE = re.compile(r"^[Ww]?(\d+)$")
+
+
+def weekday_name(day_no) -> str:
+    """星期单字：1→一 … 7→日；非法返回空。"""
+    try:
+        idx = int(day_no) - 1
+    except (TypeError, ValueError):
+        return ""
+    if 0 <= idx < len(_WEEKDAY_CHARS):
+        return _WEEKDAY_CHARS[idx]
+    return ""
+
+
+def norm_time(raw) -> str:
+    """开球时间归一化为 HH:MM；非法抛 ValueError。"""
+    m = _TIME_RE.match(str(raw).strip())
+    if not m:
+        raise ValueError(f"时间需为 HH:MM: {raw}")
+    h, minute = int(m.group(1)), int(m.group(2))
+    if h > 23 or minute > 59:
+        raise ValueError(f"时间非法: {raw}")
+    return f"{h:02d}:{minute:02d}"
+
+
+def parse_schedule_fields(extra) -> tuple[int | None, int | None, str | None]:
+    """解析日程字段序列：周 天 时间（顺序固定，非法抛 ValueError）。
+
+    周：W12 或 纯数字；天：D6 或 纯数字 1-7；时间：HH:MM。
+    仅一个字段且为 HH:MM 时视为只有时间；D 前缀可跳过周直接写天。
+    """
+    tokens = [str(t).strip() for t in extra if str(t).strip()]
+    if not tokens:
+        return None, None, None
+    if len(tokens) == 1 and _TIME_RE.match(tokens[0]):
+        return None, None, norm_time(tokens[0])
+
+    week = day = time = None
+    i = 0
+    t0 = tokens[0]
+    if t0[:1].lower() == "d" and t0[1:].isdigit():
+        day = int(t0[1:])
+        i = 1
+    else:
+        m = _WEEK_TOKEN_RE.match(t0)
+        if not m:
+            raise ValueError(f"周需为 W+数字 或数字: {t0}")
+        week = int(m.group(1))
+        i = 1
+        if i < len(tokens) and tokens[i][:1].lower() == "d" and tokens[i][1:].isdigit():
+            day = int(tokens[i][1:])
+            i += 1
+    if i < len(tokens):
+        t = tokens[i]
+        if _TIME_RE.match(t):
+            time = norm_time(t)
+            i += 1
+        elif day is None and _WEEK_TOKEN_RE.match(t):
+            val = int(_WEEK_TOKEN_RE.match(t).group(1))
+            if not (1 <= val <= 7):
+                raise ValueError(f"天需为 1-7: {t}")
+            day = val
+            i += 1
+        else:
+            raise ValueError(f"无法解析的日程字段: {t}")
+    if i < len(tokens):
+        t = tokens[i]
+        if _TIME_RE.match(t):
+            time = norm_time(t)
+            i += 1
+        else:
+            raise ValueError(f"无法解析的日程字段: {t}")
+    if i < len(tokens):
+        raise ValueError(f"多余字段: {' '.join(tokens[i:])}")
+    if week is not None and week < 1:
+        raise ValueError(f"周需为正数: {week}")
+    if day is not None and not (1 <= day <= 7):
+        raise ValueError(f"天需为 1-7: {day}")
+    return week, day, time
+
 DEFAULT_COMPETITION_ALIASES = {
     "次级联赛": ["次级", "次"],
     "顶级联赛": ["顶级", "顶", "超级"],

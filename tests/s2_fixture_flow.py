@@ -126,7 +126,49 @@ async def test_parse_result_aliases():
     )
 
     rows = parse_result_lines("利物浦 W\n巴塞罗那 平\n纽卡 负")
-    assert rows == [("利物浦", "W"), ("巴塞罗那", "D"), ("纽卡", "L")]
+    assert rows == [("利物浦", "W", None), ("巴塞罗那", "D", None), ("纽卡", "L", None)]
+    rows2 = parse_result_lines("利物浦 胜 2-1\n纽卡 负 0-0PK2-4")
+    assert rows2 == [("利物浦", "W", "2-1"), ("纽卡", "L", "0-0PK2-4")]
+
+
+async def test_schedule_fields_and_score():
+    env = await TestEnv().setup()
+    try:
+        r = await env.fixture_service.import_fixtures(
+            "1 利物浦 巴塞罗那 W12 D6 15:00\n2 利物浦 巴塞罗那 15:00\n3 利物浦 巴塞罗那\n"
+        )
+        assert r["imported"] == 3, r
+        m1 = (await env.dao.get_round_matches(1, 1, 1))[0]
+        assert m1["week_no"] == 12 and m1["day_no"] == 6 and m1["match_time"] == "15:00"
+        m2 = (await env.dao.get_round_matches(1, 1, 2))[0]
+        assert m2["week_no"] is None and m2["match_time"] == "15:00"
+        m3 = (await env.dao.get_round_matches(1, 1, 3))[0]
+        assert m3["week_no"] is None and m3["day_no"] is None and m3["match_time"] is None
+
+        # 非法天/时间拒绝
+        for bad in ("4 利物浦 巴塞罗那 D9 15:00", "5 利物浦 巴塞罗那 25:00"):
+            try:
+                await env.fixture_service.import_fixtures(bad)
+                raise AssertionError(f"应拒绝: {bad}")
+            except FixtureError:
+                pass
+
+        # 赛果带比分
+        await env.fixture_service.set_weather(1, "利物浦", "晴")
+        rec = await env.fixture_service.record_results(1, "利物浦 胜 2-1")
+        assert rec["results"][0]["score"] == "2-1"
+        m1b = (await env.dao.get_round_matches(1, 1, 1))[0]
+        assert m1b["score"] == "2-1"
+
+        # 星期单字
+        from astrbot_plugin_whleague_revenue_system.services import formula
+
+        assert formula.weekday_name(1) == "一"
+        assert formula.weekday_name(6) == "六"
+        assert formula.weekday_name(7) == "日"
+        assert formula.weekday_name(0) == "" and formula.weekday_name(8) == ""
+    finally:
+        await env.teardown()
 
 
 async def test_competitions_share_round_numbers():

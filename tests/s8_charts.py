@@ -24,12 +24,15 @@ def _color_count(path, target, tol=14) -> int:
     from PIL import Image
 
     im = Image.open(path).convert("RGB")
-    w, h = im.size
-    px = im.load()
-    return sum(1 for y in range(0, h, 3) for x in range(0, w, 3)
-               if abs(px[x, y][0] - target[0]) < tol
-               and abs(px[x, y][1] - target[1]) < tol
-               and abs(px[x, y][2] - target[2]) < tol)
+    try:
+        w, h = im.size
+        px = im.load()
+        return sum(1 for y in range(0, h, 3) for x in range(0, w, 3)
+                   if abs(px[x, y][0] - target[0]) < tol
+                   and abs(px[x, y][1] - target[1]) < tol
+                   and abs(px[x, y][2] - target[2]) < tol)
+    finally:
+        im.close()
 
 
 PURPLE = (177, 156, 217)
@@ -104,6 +107,29 @@ async def test_chart_no_data_errors():
             assert False, "赛季无数据应报错"
         except ChartError as e:
             assert "还没有已录赛果" in str(e)
+    finally:
+        await env.teardown()
+
+
+async def test_round_chart_full_columns():
+    env = await TestEnv().setup()
+    try:
+        await env.stadium_service.import_attributes("利物浦", influence=150.0)
+        await env.stadium_service.import_attributes("巴塞罗那", influence=120.0)
+        await env.fixture_service.import_fixtures("顶级9 利物浦 巴塞罗那 W12 D6 15:00")
+        await env.fixture_service.set_weather(9, "利物浦", "晴", "顶级联赛")
+        await env.fixture_service.record_results(9, "利物浦 胜 2-1", "顶级联赛")
+        svc = ChartService(env.db, env.dao, env.cfg)
+        path = await svc.render_round_chart(9, "顶级联赛")
+        assert _png_ok(path), path
+        from PIL import Image
+
+        im = Image.open(path)
+        try:
+            w, h = im.size
+        finally:
+            im.close()
+        assert w > 1400, f"11 列图表应更宽: {w}x{h}"
     finally:
         await env.teardown()
 

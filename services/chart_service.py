@@ -10,6 +10,8 @@ from pathlib import Path
 
 from astrbot.api import logger
 
+from . import formula
+
 # 展示工作表配色
 HEADER_FILL = (177, 156, 217)
 HEADER_TEXT = (249, 247, 255)
@@ -272,16 +274,23 @@ class ChartService:
         if not played:
             raise ChartError(f"第 {round_no} 轮({competition})还没有已录入赛果的比赛")
         rows, total = [], 0
-        for m in played:
+        for raw in played:
+            m = dict(raw)
             st = await self._dao.get_stadium(m["home_team"])
             capacity = int(st["capacity"]) if st else 0
             name = st["name"] if st else f"{m['home_team']}主场"
             total += int(m["attendance"])
             rate = f"{int(m['attendance']) / capacity * 100:.1f}%" if capacity else "—"
+            result_cn = _RESULT_CN.get(m["result"], "?")
+            score_text = f"{m['score']} {result_cn}" if m.get("score") else result_cn
             rows.append([
+                f"W{m['week_no']}" if m.get("week_no") else "",
+                f"D{m['day_no']}" if m.get("day_no") else "",
+                formula.weekday_name(m.get("day_no")),
+                m.get("match_time") or "",
                 m["weather"] or "？",
                 m["home_team"],
-                _RESULT_CN.get(m["result"], "?"),
+                score_text,
                 m["away_team"],
                 name,
                 f"{int(m['attendance']):,}",
@@ -292,11 +301,12 @@ class ChartService:
         title = f"WHL 第{season}赛季{competition}现场观众统计（第{round_no}轮）"
         header_fill, header_text = COMPETITION_COLORS.get(competition, DEFAULT_COMPETITION_COLOR)
         headers = [
-            ("天气", 110, "c"), ("主队", 200, "l"), ("赛果", 90, "c"),
-            ("客队", 200, "l"), ("球场", 300, "l"),
-            ("观众人数", 160, "r"), ("上座率", 130, "r"),
+            ("周", 90, "c"), ("天", 70, "c"), ("星期", 80, "c"), ("时间", 110, "c"),
+            ("天气", 90, "c"), ("主队", 180, "l"), ("比分", 130, "c"),
+            ("客队", 180, "l"), ("球场", 250, "l"),
+            ("观众人数", 140, "r"), ("上座率", 110, "r"),
         ]
-        totals = ["合计", "", "", "", "", f"{total:,}", f"场均 {avg:,.0f}"]
+        totals = ["合计", "", "", "", "", "", "", "", "", f"{total:,}", f"场均 {avg:,.0f}"]
         out = self.charts_dir / f"round_s{season}_w{window_seq}_{competition}_r{round_no}.png"
         try:
             _draw_table(title, subtitle, headers, rows, totals, str(out),

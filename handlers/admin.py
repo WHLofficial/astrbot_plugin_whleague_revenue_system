@@ -77,7 +77,7 @@ class AdminHandler:
         path = await self._get_attachment(event)
         parts = event.get_message_str().split(maxsplit=1)
         if path is None and len(parts) < 2:
-            yield event.plain_result("用法: /主场赛程导入\n每行：轮次 主队 客队（或附带 xlsx/csv 文件）")
+            yield event.plain_result("用法: /主场赛程导入\n每行：轮次 主队 客队 [周] [天] [时间]\n例：1 利物浦 巴塞罗那 W12 D6 15:00（或附带 xlsx/csv 文件）")
             return
         if path:
             try:
@@ -138,7 +138,7 @@ class AdminHandler:
             return
         parts = event.get_message_str().split(maxsplit=2)
         if len(parts) < 2:
-            yield event.plain_result("用法: /主场赛果 <轮次>\n每行：主队 胜/平/负（或附带 xlsx/csv 文件）\n轮次支持前缀：顶级9/次级11/冠军3（默认联赛）")
+            yield event.plain_result("用法: /主场赛果 <轮次>\n每行：主队 胜/平/负 [比分]（如 利物浦 胜 2-1；或附带 xlsx/csv 文件）\n轮次支持前缀：顶级9/次级11/冠军3（默认联赛）")
             return
         try:
             competition, round_no = formula.parse_round_token(self._plugin.config_cache, parts[1])
@@ -147,7 +147,7 @@ class AdminHandler:
             return
         path = await self._get_attachment(event)
         if path is None and len(parts) < 3:
-            yield event.plain_result("用法: /主场赛果 <轮次>\n每行：主队 胜/平/负（或附带 xlsx/csv 文件）\n轮次支持前缀：顶级9/次级11/冠军3（默认联赛）")
+            yield event.plain_result("用法: /主场赛果 <轮次>\n每行：主队 胜/平/负 [比分]（如 利物浦 胜 2-1；或附带 xlsx/csv 文件）\n轮次支持前缀：顶级9/次级11/冠军3（默认联赛）")
             return
         if path:
             try:
@@ -166,8 +166,9 @@ class AdminHandler:
         lines = [f"⚽ 第 {round_no} 轮({competition})赛果已录入（{result['count']} 场）"]
         for r in result["results"]:
             wx = {"晴": "☀️", "多云": "⛅", "雨": "🌧️", "雪": "❄️"}.get(r["weather"] or "", "")
+            score_txt = f" {r['score']}" if r.get("score") else ""
             lines.append(
-                f"· {r['home']} {r['result']} {r['away']} {wx} | 上座 {r['attendance']:,}"
+                f"· {r['home']} {r['result']}{score_txt} {r['away']} {wx} | 上座 {r['attendance']:,}"
                 f" | 票 {r['ticket']:.2f}M 商 {r['commercial']:.2f}M 转 {r['broadcast']:.2f}M"
             )
         for e in result.get("file_errors", []):

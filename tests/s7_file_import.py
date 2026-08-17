@@ -267,6 +267,33 @@ async def test_results_file_e2e():
         await env.teardown()
 
 
+async def test_fixture_file_schedule_and_result_score():
+    env = await TestEnv().setup()
+    try:
+        p = Path(os.path.join(os.path.dirname(os.path.abspath(__file__)), "tmp_fix_sched.csv"))
+        p.write_text("轮次,主队,客队,周,天,时间\n1,利物浦,巴塞罗那,W12,D6,15:00\n",
+                     encoding="utf-8")
+        try:
+            result = await env.fixture_service.import_fixtures_file(str(p))
+            assert result["imported"] == 1, result
+            assert result["file_errors"] == [], result
+            m = (await env.dao.get_round_matches(1, 1, 1))[0]
+            assert m["week_no"] == 12 and m["day_no"] == 6 and m["match_time"] == "15:00"
+        finally:
+            p.unlink(missing_ok=True)
+
+        await env.fixture_service.set_weather(1, "利物浦", "晴")
+        p2 = Path(os.path.join(os.path.dirname(os.path.abspath(__file__)), "tmp_res_score.csv"))
+        p2.write_text("主队,赛果,比分\n利物浦,胜,2-1\n", encoding="utf-8")
+        try:
+            r2 = await env.fixture_service.record_results_file(1, str(p2))
+            assert r2["count"] == 1 and r2["results"][0]["score"] == "2-1", r2
+        finally:
+            p2.unlink(missing_ok=True)
+    finally:
+        await env.teardown()
+
+
 async def test_attributes_file_e2e():
     env = await TestEnv().setup()
     try:

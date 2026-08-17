@@ -1,6 +1,6 @@
 from astrbot.api import logger
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 SQL_CREATE_TABLES = r"""
 
@@ -56,6 +56,10 @@ CREATE TABLE IF NOT EXISTS matches (
     away_team TEXT NOT NULL,
     weather TEXT,
     result TEXT,
+    score TEXT,
+    week_no INTEGER,
+    day_no INTEGER,
+    match_time TEXT,
     attendance INTEGER,
     ticket_revenue REAL,
     commercial REAL,
@@ -255,6 +259,10 @@ async def _migrate(db, current_version: int):
                     away_team TEXT NOT NULL,
                     weather TEXT,
                     result TEXT,
+                    score TEXT,
+                    week_no INTEGER,
+                    day_no INTEGER,
+                    match_time TEXT,
                     attendance INTEGER,
                     ticket_revenue REAL,
                     commercial REAL,
@@ -277,3 +285,15 @@ async def _migrate(db, current_version: int):
             )
             await db.commit()
             logger.info("Migrated matches table: added competition column.")
+    if current_version < 3:
+        cols = await _table_columns(db, "matches")
+        for col, ddl in (
+            ("score", "ALTER TABLE matches ADD COLUMN score TEXT"),
+            ("week_no", "ALTER TABLE matches ADD COLUMN week_no INTEGER"),
+            ("day_no", "ALTER TABLE matches ADD COLUMN day_no INTEGER"),
+            ("match_time", "ALTER TABLE matches ADD COLUMN match_time TEXT"),
+        ):
+            if col not in cols:
+                await db.execute(ddl)
+        await db.commit()
+        logger.info("Migrated matches table: added score/week/day/time columns.")

@@ -18,6 +18,10 @@ _ALLOWED_EXTS = (".csv", ".xlsx")
 
 _HEADER_KEYWORDS = {
     "round": ("轮次", "round", "轮"),
+    "week": ("周", "周次", "week", "w"),
+    "day": ("天", "日", "day", "d"),
+    "weekday": ("星期", "weekday"),
+    "time": ("时间", "开赛时间", "time"),
     "home": ("主队", "主场", "home", "主"),
     "away": ("客队", "客场", "away", "客"),
     "team": ("队名", "球队", "team", "队伍", "名称"),
@@ -25,6 +29,7 @@ _HEADER_KEYWORDS = {
     "capacity": ("容量", "座位", "capacity", "cap", "座"),
     "tier": ("等级", "级别", "tier", "level", "lv", "grade"),
     "result": ("赛果", "结果", "result", "res", "胜平负"),
+    "score": ("比分", "score"),
 }
 
 _RESULT_ALIASES = {
@@ -141,7 +146,9 @@ def _cell(row: list[str], col_map: dict | None, kind: str,
 
 
 def build_fixture_lines(rows: list[list[str]]) -> tuple[list[str], list[str]]:
-    """归一化为「轮次 主队 客队」文本行。返回 (lines, errors)。"""
+    """归一化为「轮次 主队 客队 [周] [天] [时间]」文本行。返回 (lines, errors)。"""
+    from . import formula
+
     data, col_map = _detect_header(rows)
     lines, errors = [], []
     start = 2 if col_map else 1
@@ -150,10 +157,13 @@ def build_fixture_lines(rows: list[list[str]]) -> tuple[list[str], list[str]]:
         round_raw = _cell(row, col_map, "round", 0 if not col_map else None)
         home = _cell(row, col_map, "home", 1 if not col_map else None)
         away = _cell(row, col_map, "away", 2 if not col_map else None)
+        week_raw = _cell(row, col_map, "week", 3 if not col_map else None)
+        day_raw = _cell(row, col_map, "day", 4 if not col_map else None)
+        time_raw = _cell(row, col_map, "time", 5 if not col_map else None)
         if not home or not away:
-            if not home and not away:
-                continue  # 整行空白，跳过
-            errors.append(f"第{rownum}行: 主客队缺失，需为「轮次 主队 客队」")
+            if all(not str(c).strip() for c in row):
+                continue  # 整行空白
+            errors.append(f"第{rownum}行: 主客队缺失，需为「轮次 主队 客队 [周] [天] [时间]」")
             continue
         if home == away:
             errors.append(f"第{rownum}行: 主客队不能相同")
@@ -166,12 +176,43 @@ def build_fixture_lines(rows: list[list[str]]) -> tuple[list[str], list[str]]:
         if int(digits) < 1:
             errors.append(f"第{rownum}行: 轮次需为正数「{round_token}」")
             continue
-        lines.append(f"{round_token} {home} {away}")
+        ok = True
+        week = day = time = None
+        if week_raw:
+            m = re.match(r"^[Ww]?(\d+)$", week_raw)
+            if not m or int(m.group(1)) < 1:
+                errors.append(f"第{rownum}行: 周需为 W+数字 或数字「{week_raw}」")
+                ok = False
+            else:
+                week = int(m.group(1))
+        if day_raw:
+            m = re.match(r"^[Dd]?(\d+)$", day_raw)
+            if not m or not (1 <= int(m.group(1)) <= 7):
+                errors.append(f"第{rownum}行: 天需为 1-7「{day_raw}」")
+                ok = False
+            else:
+                day = int(m.group(1))
+        if time_raw:
+            try:
+                time = formula.norm_time(time_raw)
+            except ValueError as e:
+                errors.append(f"第{rownum}行: {e}")
+                ok = False
+        if not ok:
+            continue
+        parts = [round_token, home, away]
+        if week is not None:
+            parts.append(f"W{week}")
+        if day is not None:
+            parts.append(f"D{day}")
+        if time is not None:
+            parts.append(time)
+        lines.append(" ".join(parts))
     return lines, errors
 
 
 def build_result_lines(rows: list[list[str]]) -> tuple[list[str], list[str]]:
-    """归一化为「主队 胜/平/负」文本行。返回 (lines, errors)。"""
+    """归一化为「主队 胜/平/负 [比分]」文本行。返回 (lines, errors)。"""
     data, col_map = _detect_header(rows)
     lines, errors = [], []
     start = 2 if col_map else 1
@@ -180,17 +221,24 @@ def build_result_lines(rows: list[list[str]]) -> tuple[list[str], list[str]]:
         if col_map:
             home = _cell(row, col_map, "home", None) or _cell(row, col_map, "team", None)
             res_raw = _cell(row, col_map, "result", None)
+            score_raw = _cell(row, col_map, "score", None)
         else:
             home = str(row[0]).strip() if row else ""
-            res_raw = str(row[-1]).strip() if row else ""
+            res_raw = str(row[1]).strip() if len(row) >= 2 else ""
+            score_raw = " ".join(str(c).strip() for c in row[2:] if str(c).strip()).strip() or None
         if not home:
+            if all(not str(c).strip() for c in row):
+                continue  # 整行空白
             errors.append(f"第{rownum}行: 主队缺失")
             continue
         result = _RESULT_ALIASES.get(res_raw.strip().lower())
         if result is None:
             errors.append(f"第{rownum}行: 赛果需为 胜/平/负（W/D/L）「{res_raw}」")
             continue
-        lines.append(f"{home} {result}")
+        line = f"{home} {result}"
+        if score_raw:
+            line += f" {score_raw}"
+        lines.append(line)
     return lines, errors
 
 

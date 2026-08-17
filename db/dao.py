@@ -220,12 +220,15 @@ class StadiumDAO:
 
     async def add_match(
         self, season: int, window_seq: int, round_no: int, home_team: str, away_team: str,
-        competition: str = "联赛",
+        competition: str = "联赛", week_no: int | None = None,
+        day_no: int | None = None, match_time: str | None = None,
     ) -> None:
         await self._db.execute(
-            "INSERT OR IGNORE INTO matches (season_number, window_seq, round_no, competition, home_team, away_team) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            (season, window_seq, round_no, competition, home_team, away_team),
+            "INSERT OR IGNORE INTO matches (season_number, window_seq, round_no, competition, "
+            "home_team, away_team, week_no, day_no, match_time) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (season, window_seq, round_no, competition, home_team, away_team,
+             week_no, day_no, match_time),
         )
 
     async def get_round_matches(
@@ -283,11 +286,11 @@ class StadiumDAO:
 
     async def set_match_result(
         self, match_id: int, result: str, attendance: int,
-        ticket_revenue: float, commercial: float, broadcast: float,
+        ticket_revenue: float, commercial: float, broadcast: float, score: str | None = None,
     ) -> None:
         await self._db.execute(
-            "UPDATE matches SET result=?, attendance=?, ticket_revenue=?, commercial=?, broadcast=? WHERE id=?",
-            (result, attendance, ticket_revenue, commercial, broadcast, match_id),
+            "UPDATE matches SET result=?, score=?, attendance=?, ticket_revenue=?, commercial=?, broadcast=? WHERE id=?",
+            (result, score, attendance, ticket_revenue, commercial, broadcast, match_id),
         )
 
     # ─── 影响力历史 ───────────────────────────────────────

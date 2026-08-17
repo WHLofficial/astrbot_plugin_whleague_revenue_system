@@ -36,15 +36,23 @@ _RESULT_ALIASES = {
     "loss": "L",
 }
 
+def _parse_schedule_extra(extra) -> tuple[int | None, int | None, str | None]:
+    """解析赛程行末可选字段：周 天 时间（顺序固定，见 formula.parse_schedule_fields）。"""
+    try:
+        return formula.parse_schedule_fields(extra)
+    except ValueError as e:
+        raise FixtureError(str(e))
+
 
 class FixtureError(Exception):
     pass
 
 
-def parse_fixture_lines(text: str, cfg: dict) -> list[tuple[int, str, str, str]]:
-    """解析赛程文本行。每行三字段：轮次 主队 客队（| 逗号 空白分隔）。
+def parse_fixture_lines(text: str, cfg: dict) -> list[tuple]:
+    """解析赛程文本行。每行：轮次 主队 客队 [周] [天] [时间]。
 
-    轮次支持文字前缀识别赛事（formula.parse_round_token），返回 (轮次, 赛事, 主队, 客队)。
+    轮次支持文字前缀识别赛事（formula.parse_round_token）。
+    返回 (轮次, 赛事, 主队, 客队, 周, 天, 时间)。
     """
     out = []
     for raw_line in str(text or "").splitlines():
@@ -55,7 +63,7 @@ def parse_fixture_lines(text: str, cfg: dict) -> list[tuple[int, str, str, str]]
         if len(parts) < 3:
             parts = line.split()
         if len(parts) < 3:
-            raise FixtureError(f"无法解析行: {line}（需为：轮次 主队 客队）")
+            raise FixtureError(f"无法解析行: {line}（需为：轮次 主队 客队 [周] [天] [时间]）")
         try:
             competition, round_no = formula.parse_round_token(cfg, parts[0].strip())
         except ValueError as e:
@@ -64,12 +72,16 @@ def parse_fixture_lines(text: str, cfg: dict) -> list[tuple[int, str, str, str]]
         away = parts[2].strip()
         if not home or not away or home == away:
             raise FixtureError(f"主客队非法: {line}")
-        out.append((round_no, competition, home, away))
+        try:
+            week, day, match_time = _parse_schedule_extra(parts[3:])
+        except FixtureError as e:
+            raise FixtureError(f"{line}: {e}")
+        out.append((round_no, competition, home, away, week, day, match_time))
     return out
 
 
-def parse_result_lines(text: str) -> list[tuple[str, str]]:
-    """解析赛果文本行。每行：主队 胜/平/负（或 W/D/L）。"""
+def parse_result_lines(text: str) -> list[tuple[str, str, str | None]]:
+    """解析赛果文本行。每行：主队 胜/平/负（或 W/D/L）[比分]。"""
     out = []
     for raw_line in str(text or "").splitlines():
         line = raw_line.strip()
@@ -77,13 +89,14 @@ def parse_result_lines(text: str) -> list[tuple[str, str]]:
             continue
         parts = re.split(r"[\s|\t,，]+", line)
         if len(parts) < 2:
-            raise FixtureError(f"无法解析行: {line}（需为：主队 胜/平/负）")
+            raise FixtureError(f"无法解析行: {line}（需为：主队 胜/平/负 [比分]）")
         home = parts[0].strip()
-        result_key = parts[-1].strip().lower()
+        result_key = parts[1].strip().lower()
         result = _RESULT_ALIASES.get(result_key)
         if result is None:
             raise FixtureError(f"赛果需为 胜/平/负（W/D/L）: {line}")
-        out.append((home, result))
+        score = " ".join(p.strip() for p in parts[2:] if p.strip()).strip() or None
+        out.append((home, result, score))
     return out
 
 
@@ -127,14 +140,15 @@ class FixtureService:
         known = await self._stadium_service.list_known_teams()
         errors = []
         imported, skipped = 0, 0
-        for round_no, competition, home, away in rows:
+        for round_no, competition, home, away, week, day, match_time in rows:
             if home not in known or away not in known:
                 errors.append(f"第{round_no}轮({competition}) {home} vs {away}: 未知球队（先导入属性或已建队）")
                 skipped += 1
                 continue
             for team in (home, away):
                 await self._stadium_service.ensure_stadium(team)
-            await self._dao.add_match(season, window_seq, round_no, home, away, competition)
+            await self._dao.add_match(season, window_seq, round_no, home, away, competition,
+                                      week_no=week, day_no=day, match_time=match_time)
             imported += 1
         return {"imported": imported, "skipped": skipped, "errors": errors[:10],
                 "season": season, "window_seq": window_seq}
@@ -198,13 +212,13 @@ class FixtureService:
             raise FixtureError(f"第 {round_no} 轮({competition or '联赛'})没有赛程")
 
         results = []
-        for home, result in rows:
+        for home, result, score in rows:
             m = by_home.get(home)
             if m is None:
                 raise FixtureError(f"第{round_no}轮无主队「{home}」的比赛")
             if m["result"]:
                 raise FixtureError(f"第{round_no}轮「{home}」赛果已录入，不能重复")
-            detail = await self._record_one(m, result, season, window_seq)
+            detail = await self._record_one(m, result, season, window_seq, score)
             results.append(detail)
         return {"round_no": round_no, "count": len(results), "results": results}
 
@@ -219,7 +233,8 @@ class FixtureService:
         result["file_errors"] = parsed["errors"]
         return result
 
-    async def _record_one(self, match, result: str, season: int, window_seq: int) -> dict:
+    async def _record_one(self, match, result: str, season: int, window_seq: int,
+                          score: str | None = None) -> dict:
         home, away = match["home_team"], match["away_team"]
         stadium = await self._stadium_service.ensure_stadium(home)
         away_stadium = await self._dao.get_stadium(away)
@@ -250,7 +265,7 @@ class FixtureService:
         ticket, commercial, broadcast = formula.match_revenues(
             self._cfg, att, commercial_level, broadcast_level
         )
-        await self._dao.set_match_result(match["id"], result, att, ticket, commercial, broadcast)
+        await self._dao.set_match_result(match["id"], result, att, ticket, commercial, broadcast, score)
         if stadium["next_attendance_mod"] != 1.0:
             await self._dao.reset_attendance_mod(home)
 
@@ -265,7 +280,8 @@ class FixtureService:
                 note=f"第{match['round_no']}轮 主{home} vs 客{away}", round_no=match["round_no"],
             )
         return {
-            "home": home, "away": away, "result": result, "weather": match["weather"],
+            "home": home, "away": away, "result": result, "score": score,
+            "weather": match["weather"],
             "form_pts": form_pts, "attendance": att,
             "ticket": ticket, "commercial": commercial, "broadcast": broadcast, "total": round(total, 4),
         }
