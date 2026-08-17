@@ -46,7 +46,9 @@ async def test_plugin_import_and_commands():
         "主场赛程导入", "主场天气", "主场赛果", "主场轮次统计",
         "主场推进窗口", "主场推进赛季", "主场属性", "主场属性导入",
         "主场设施", "主场发放", "主场事件", "主场事件生成", "主场事件列表",
-        "主场事件采纳", "主场事件丢弃", "主场事件写", "主场品牌生成",
+        "主场事件采纳", "主场事件丢弃", "主场事件写",
+        "主场事件选择", "主场事件选择导入", "主场事件选择列表",
+        "主场品牌生成",
         "主场品牌列表", "主场品牌采纳", "主场品牌丢弃", "主场结算",
         "主场设置", "主场查看配置", "主场添加管理", "主场删除管理",
         "主场", "主场信息", "主场赛季统计", "球场命名", "球场活动",
@@ -101,5 +103,52 @@ async def test_handler_smoke():
         event4 = _FakeEvent("/主场添加管理 不是数字", sender="admin", is_admin=True)
         results4 = [r async for r in handler.add_admin(event4)]
         assert results4 and "QQ" in results4[0], results4
+    finally:
+        await env.teardown()
+
+
+async def test_choice_handlers_flow():
+    env = await TestEnv().setup()
+    try:
+        await env.stadium_service.import_attributes("利物浦", influence=150.0)
+        from astrbot_plugin_whleague_revenue_system.handlers.admin import AdminHandler
+
+        handler = AdminHandler(env.__class__ and type("P", (), {
+            "dao": env.dao,
+            "config_cache": env.cfg,
+            "fixture_service": env.fixture_service,
+            "stadium_service": env.stadium_service,
+            "event_engine": env.event_engine,
+            "brand_service": env.brand_service,
+            "window_service": env.window_service,
+            "bridge": env.bridge,
+            "_persist_config": lambda k, v: None,
+        })())
+
+        # 触发单队选择型事件（强制指定事件）→ 广播含选项
+        ev = _FakeEvent("/主场事件 利物浦 merch_hit", sender="admin", is_admin=True)
+        out = [r async for r in handler.trigger_event(ev)]
+        assert out and "①" in out[0] and "周边爆款" in out[0], out
+
+        # 单条录入选择
+        ev2 = _FakeEvent("/主场事件选择 利物浦 周边爆款 1", sender="admin", is_admin=True)
+        out2 = [r async for r in handler.set_choice(ev2)]
+        assert out2 and "已选" in out2[0], out2
+
+        # 列表展示已选状态
+        ev3 = _FakeEvent("/主场事件选择列表", sender="admin", is_admin=True)
+        out3 = [r async for r in handler.list_choices(ev3)]
+        assert out3 and "已选" in out3[0] and "周边爆款" in out3[0], out3
+
+        # 批量导入（重置为未定再导入②）
+        await env.dao.set_event_choice("利物浦", 1, 1, "merch_hit", None)
+        ev4 = _FakeEvent("/主场事件选择导入\n利物浦 周边爆款 ②", sender="admin", is_admin=True)
+        out4 = [r async for r in handler.import_choices(ev4)]
+        assert out4 and "已导入 1 条" in out4[0], out4
+
+        # 无参数提示用法
+        ev5 = _FakeEvent("/主场事件选择列表 0", sender="admin", is_admin=True)
+        out5 = [r async for r in handler.list_choices(ev5)]
+        assert out5 and "正整数" in out5[0], out5
     finally:
         await env.teardown()

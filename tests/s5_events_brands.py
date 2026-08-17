@@ -403,3 +403,28 @@ async def test_add_custom_choice_event():
         assert c is not None and c["resolved"] == 0
     finally:
         await env.teardown()
+
+
+async def test_choice_import_batch_and_validation():
+    env = await TestEnv().setup()
+    try:
+        await env.stadium_service.import_attributes("利物浦", influence=150.0)
+        await env.stadium_service.import_attributes("巴塞罗那", influence=150.0)
+        await env.event_engine.trigger_team("利物浦", 1, 1, event_id="merch_hit")
+        await env.event_engine.trigger_team("巴塞罗那", 1, 1, event_id="derby_buzz")
+        r = await env.event_engine.import_choices(
+            "利物浦 周边爆款 ①\n巴塞罗那 德比热度 999\n不存在队 周边爆款 1"
+        )
+        # ① 被解析为 1；越界选项号与不存在事件被逐条拒绝
+        assert r[0]["ok"] is True and r[0]["choice_no"] == 1, r
+        assert r[1]["ok"] is False and "选项号需在" in r[1]["error"], r
+        assert r[2]["ok"] is False and "待定选择事件" in r[2]["error"], r
+        # 结算后不可再改
+        await env.event_engine.settle_choices(1, 1)
+        try:
+            await env.event_engine.record_choice("利物浦", 1, 1, "周边爆款", 2)
+            raise AssertionError("已结算选择应拒绝修改")
+        except Exception:
+            pass
+    finally:
+        await env.teardown()

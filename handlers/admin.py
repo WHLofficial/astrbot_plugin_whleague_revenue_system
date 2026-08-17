@@ -359,14 +359,21 @@ class AdminHandler:
         season = state["season_number"] if state else 1
         window_seq = state["window_seq"] if state else 1
         if len(parts) >= 2:
+            event_id = parts[2] if len(parts) >= 3 else None
             result = await self._run(
-                event, self._plugin.event_engine.trigger_team(parts[1], season, window_seq)
+                event,
+                self._plugin.event_engine.trigger_team(parts[1], season, window_seq, event_id=event_id),
             )
             if "error" in result:
                 yield event.plain_result(result["error"])
                 return
             hit = result["hits"][0]
-            yield event.plain_result(f"🎲 {hit['team']} 触发事件：{hit['text'] or hit['event']}（{'；'.join(hit['notes'])}）")
+            if hit.get("type") == "choice":
+                yield event.plain_result(
+                    (hit.get("broadcast") or hit["event"]) + "\n📤 请收集球员回应后，用 /主场事件选择导入 统一录入"
+                )
+            else:
+                yield event.plain_result(self._format_hit(hit))
             return
         result = await self._run(
             event, self._plugin.event_engine.trigger_all(season, window_seq)
@@ -379,7 +386,101 @@ class AdminHandler:
             return
         lines = [f"🎲 事件触发：{result['triggered']} 队命中"]
         for hit in result["hits"]:
-            lines.append(f"· {hit['team']}: {hit['text'] or hit['event']}（{'；'.join(hit['notes'])}）")
+            lines.append(self._format_hit(hit))
+        lines.append("📤 选择型事件请收集球员回应后，用 /主场事件选择导入 统一录入（/主场事件选择列表 查看待定）")
+        yield event.plain_result("\n".join(lines))
+
+    @staticmethod
+    def _format_hit(hit) -> str:
+        """渲染一条命中：选择型返回多行广播，即发型返回单行简述。"""
+        if hit.get("type") == "choice":
+            return hit.get("broadcast") or hit["event"]
+        notes = hit.get("notes") or []
+        line = f"🎲 {hit['team']} 触发事件：{hit.get('text') or hit['event']}"
+        if notes:
+            line += f"（{'；'.join(notes)}）"
+        return line
+
+    async def set_choice(self, event) -> AsyncGenerator[MessageEventResult, None]:
+        deny = await self._guard(event)
+        if deny:
+            yield event.plain_result(deny)
+            return
+        parts = event.get_message_str().split()
+        if len(parts) < 4:
+            yield event.plain_result("用法: /主场事件选择 <队名> <事件名> <选项号>\n（选项号见 /主场事件选择列表 的广播文案）")
+            return
+        try:
+            choice_no = int(parts[3])
+        except ValueError:
+            yield event.plain_result("选项号需为正整数")
+            return
+        state = await self._plugin.dao.get_league_state()
+        season = state["season_number"] if state else 1
+        window_seq = state["window_seq"] if state else 1
+        result = await self._run(
+            event,
+            self._plugin.event_engine.record_choice(parts[1], season, window_seq, parts[2], choice_no),
+        )
+        if "error" in result:
+            yield event.plain_result(result["error"])
+            return
+        yield event.plain_result(f"✅ {result['team']}「{result['event']}」已选 {result['choice_no']} {result['option']}")
+
+    async def import_choices(self, event) -> AsyncGenerator[MessageEventResult, None]:
+        deny = await self._guard(event)
+        if deny:
+            yield event.plain_result(deny)
+            return
+        parts = event.get_message_str().split(maxsplit=1)
+        if len(parts) < 2:
+            yield event.plain_result("用法: /主场事件选择导入\n每行：队名 事件名 选项号\n例：\n利物浦 周边爆款 1\n巴塞罗那 草皮病害 ②")
+            return
+        results = await self._run(event, self._plugin.event_engine.import_choices(parts[1]))
+        if "error" in results:
+            yield event.plain_result(results["error"])
+            return
+        ok = [r for r in results if r["ok"]]
+        bad = [r for r in results if not r["ok"]]
+        lines = [f"📥 已导入 {len(ok)} 条选择"]
+        for r in ok:
+            lines.append(f"✅ {r['team']} {r['event']} → 选{r['choice_no']} {r['option']}")
+        for r in bad:
+            lines.append(f"⚠️ {r['team']} {r['event']}: {r['error']}")
+        if not ok and not bad:
+            lines.append("（没有可解析的行）")
+        yield event.plain_result("\n".join(lines))
+
+    async def list_choices(self, event) -> AsyncGenerator[MessageEventResult, None]:
+        deny = await self._guard(event)
+        if deny:
+            yield event.plain_result(deny)
+            return
+        parts = event.get_message_str().split()
+        state = await self._plugin.dao.get_league_state()
+        season = state["season_number"] if state else 1
+        window_seq = state["window_seq"] if state else 1
+        if len(parts) >= 2:
+            try:
+                window_seq = parse_int(parts[1], min_val=1)
+            except ValueError:
+                yield event.plain_result("窗口需为正整数")
+                return
+        rows = await self._run(event, self._plugin.event_engine.choices_summary(season, window_seq))
+        if "error" in rows:
+            yield event.plain_result(rows["error"])
+            return
+        if not rows:
+            yield event.plain_result(f"窗口 {window_seq} 没有选择型事件（可用 /主场事件 触发分配）")
+            return
+        lines = [f"📋 第 {season} 赛季窗口 {window_seq} 事件选择（{len(rows)} 条）"]
+        for r in rows:
+            if r["resolved"]:
+                lines.append(f"· {r['team']} {r['event']}：✅ 已结算")
+            elif r["choice_no"] is not None:
+                lines.append(f"· {r['team']} {r['event']}：已选 {r['choice_no']} {r['option']}")
+            else:
+                lines.append(f"· {r['team']} {r['event']}：⏳ 未定（收集回应用 /主场事件选择导入）")
         yield event.plain_result("\n".join(lines))
 
     async def generate_events(self, event) -> AsyncGenerator[MessageEventResult, None]:
@@ -417,7 +518,8 @@ class AdminHandler:
             return
         lines = [f"事件池（{'待定' if status else '全部'} {len(rows)} 条）"]
         for r in rows[-30:]:
-            lines.append(f"· {r['id']} [{r['status']}] {r['name']}（{r['category']} w{r['weight']}）{r['effects_json']}")
+            kind = "选择" if r["event_type"] == "choice" else "即发"
+            lines.append(f"· {r['id']} [{r['status']}][{kind}] {r['name']}（{r['category']} w{r['weight']}）")
         yield event.plain_result("\n".join(lines))
 
     async def adopt_event(self, event) -> AsyncGenerator[MessageEventResult, None]:
@@ -463,19 +565,29 @@ class AdminHandler:
         if deny:
             yield event.plain_result(deny)
             return
-        parts = event.get_message_str().split(maxsplit=4)
+        parts = event.get_message_str().split(maxsplit=6)
         if len(parts) < 5:
-            yield event.plain_result("用法: /主场事件写 <名称> <类别> <权重> <effectsJSON> [模板文案]")
+            yield event.plain_result("用法: /主场事件写 <名称> <类别> <权重> <effectsJSON> [模板文案]\n或 /主场事件写 <名称> <类别> <权重> choice <选项JSON>\n选项JSON：{\"name\":\"操作\",\"desc\":\"…\",\"outcomes\":[{\"w\":60,\"effects\":{\"money\":1}},{\"w\":40,\"effects\":{\"money\":-1}}]}（2~4 个操作）")
             return
         try:
             weight = parse_int(parts[3], min_val=1, max_val=100)
         except ValueError:
             yield event.plain_result("权重需为 1-100 整数")
             return
-        result = await self._run(
-            event,
-            self._plugin.event_engine.add_custom(parts[1], parts[2], weight, parts[4]),
-        )
+        if parts[4].lower() in ("choice", "选择"):
+            if len(parts) < 6:
+                yield event.plain_result("选择事件缺少 <选项JSON>（见用法）")
+                return
+            result = await self._run(
+                event,
+                self._plugin.event_engine.add_custom(
+                    parts[1], parts[2], weight, "{}", event_type="choice", options_text=parts[5],
+                ),
+            )
+        else:
+            result = await self._run(
+                event, self._plugin.event_engine.add_custom(parts[1], parts[2], weight, parts[4])
+            )
         if "error" in result:
             yield event.plain_result(result["error"])
             return

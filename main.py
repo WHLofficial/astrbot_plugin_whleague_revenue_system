@@ -249,6 +249,21 @@ class StadiumPlugin(Star):
         async for r in self._admin_cmd(event, self.admin_handler.trigger_event):
             yield r
 
+    @filter.command("主场事件选择")
+    async def cmd_set_choice(self, event: AstrMessageEvent) -> AsyncGenerator[MessageEventResult, None]:
+        async for r in self._admin_cmd(event, self.admin_handler.set_choice):
+            yield r
+
+    @filter.command("主场事件选择导入")
+    async def cmd_import_choices(self, event: AstrMessageEvent) -> AsyncGenerator[MessageEventResult, None]:
+        async for r in self._admin_cmd(event, self.admin_handler.import_choices):
+            yield r
+
+    @filter.command("主场事件选择列表")
+    async def cmd_list_choices(self, event: AstrMessageEvent) -> AsyncGenerator[MessageEventResult, None]:
+        async for r in self._admin_cmd(event, self.admin_handler.list_choices):
+            yield r
+
     @filter.command("主场事件生成")
     async def cmd_generate_events(self, event: AstrMessageEvent) -> AsyncGenerator[MessageEventResult, None]:
         async for r in self._admin_cmd(event, self.admin_handler.generate_events):

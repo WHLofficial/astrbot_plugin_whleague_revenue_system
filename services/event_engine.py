@@ -15,6 +15,17 @@ class EventError(Exception):
     pass
 
 
+_CIRCLE_NO = {"①": 1, "②": 2, "③": 3, "④": 4}
+
+
+def _parse_choice_no(raw: str) -> int:
+    """解析选项号：支持 1/2/3/4 与 ①②③④。"""
+    raw = str(raw).strip()
+    if raw in _CIRCLE_NO:
+        return _CIRCLE_NO[raw]
+    return int(raw)
+
+
 # 默认事件库（22 条：6 即发 + 16 选择）。
 # · 即发型（event_type=instant）：触发即按 effects 记账。
 # · 选择型（event_type=choice）：触发只广播选项进入待定，玩家任选一项操作；
@@ -527,6 +538,74 @@ class EventEngine:
             resolved.append({"team": c["team_name"], "event": event["name"],
                              "option": opt["name"], "auto": auto, "notes": notes})
         return {"resolved": resolved, "tx_ids": tx_ids}
+
+    # ─── 选择录入（管理员收集球员回应后导入） ───────────────
+
+    async def record_choice(self, team_name: str, season: int, window_seq: int,
+                            event_name: str, choice_no: int) -> dict:
+        """为指定球队的某个待定选择填入选项号（按事件名匹配）。"""
+        choices = await self._dao.list_event_choices(season, window_seq)
+        target = None
+        for c in choices:
+            if c["team_name"] != team_name:
+                continue
+            event = await self._dao.fetch_event_by_id(c["event_id"])
+            if event is not None and event["name"] == event_name:
+                target, event_row = c, event
+                break
+        if target is None:
+            raise EventError(f"球队「{team_name}」在当前窗口没有名为「{event_name}」的待定选择事件")
+        if target["resolved"]:
+            raise EventError(f"「{event_name}」已完成结算，无法修改选择")
+        options = self._event_options(event_row)
+        if not (1 <= choice_no <= len(options)):
+            raise EventError(f"选项号需在 1~{len(options)} 之间（{event_name} 共 {len(options)} 项）")
+        await self._dao.set_event_choice(team_name, season, window_seq, target["event_id"], choice_no)
+        opt = next(o for o in options if o["no"] == choice_no)
+        return {"team": team_name, "event": event_name, "choice_no": choice_no,
+                "option": opt["name"]}
+
+    async def import_choices(self, text: str) -> list[dict]:
+        """批量导入选择：每行「队名 事件名 选项号」，逐条记结果（含错误行）。"""
+        state = await self._dao.get_league_state()
+        season = state["season_number"] if state else 1
+        window_seq = state["window_seq"] if state else 1
+        results = []
+        for raw in text.splitlines():
+            fields = raw.strip().split()
+            if len(fields) < 3:
+                continue
+            team, ev_name, opt_raw = fields[0], fields[1], fields[2]
+            try:
+                choice_no = _parse_choice_no(opt_raw)
+            except ValueError:
+                results.append({"team": team, "event": ev_name, "ok": False,
+                                "error": "选项号需为数字或 ①②③④"})
+                continue
+            try:
+                r = await self.record_choice(team, season, window_seq, ev_name, choice_no)
+                results.append({"team": team, "event": ev_name, "choice_no": choice_no,
+                                "option": r["option"], "ok": True})
+            except EventError as e:
+                results.append({"team": team, "event": ev_name, "ok": False, "error": str(e)})
+        return results
+
+    async def choices_summary(self, season: int, window_seq: int) -> list[dict]:
+        """当前窗口全部选择事件的状态（含事件名/已选操作/是否结算）。"""
+        out = []
+        for c in await self._dao.list_event_choices(season, window_seq):
+            event = await self._dao.fetch_event_by_id(c["event_id"])
+            name = event["name"] if event else c["event_id"]
+            opt_name = ""
+            if c["choice_no"] is not None and event is not None:
+                for o in self._event_options(event):
+                    if o["no"] == c["choice_no"]:
+                        opt_name = o["name"]
+                        break
+            out.append({"team": c["team_name"], "event": name,
+                        "choice_no": c["choice_no"], "option": opt_name,
+                        "resolved": bool(c["resolved"]), "outcome": c["outcome"]})
+        return out
 
     # ─── LLM 设计 ─────────────────────────────────────────
 
