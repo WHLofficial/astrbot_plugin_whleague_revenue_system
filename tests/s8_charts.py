@@ -134,6 +134,63 @@ async def test_round_chart_full_columns():
         await env.teardown()
 
 
+async def test_preview_chart_renders():
+    env = await TestEnv().setup()
+    try:
+        for team, inf in [("利物浦", 150.0), ("巴塞罗那", 120.0),
+                          ("纽卡斯尔联", 130.0), ("勒沃库森", 110.0)]:
+            await env.stadium_service.import_attributes(team, influence=inf)
+        await env.fixture_service.import_fixtures(
+            "顶级9 利物浦 巴塞罗那 W12 D6 15:00\n顶级9 纽卡斯尔联 勒沃库森 W12 D6 20:00\n"
+        )
+        # 只预报第一场，第二场留「待预报」
+        await env.fixture_service.set_weather(9, "利物浦", "晴", "顶级联赛")
+        svc = ChartService(env.db, env.dao, env.cfg)
+        path = await svc.render_round_preview_chart(9, "顶级联赛")
+        assert _png_ok(path), path
+        from PIL import Image
+
+        im = Image.open(path)
+        try:
+            w, h = im.size
+        finally:
+            im.close()
+        assert h > 400, f"两块堆叠应更高: {w}x{h}"
+        # 命令路径
+        from astrbot_plugin_whleague_revenue_system.handlers.player import PlayerHandler
+
+        ph = PlayerHandler(type("P", (), {
+            "dao": env.dao,
+            "config_cache": env.cfg,
+            "fixture_service": env.fixture_service,
+            "stadium_service": env.stadium_service,
+            "brand_service": env.brand_service,
+            "bridge": env.bridge,
+            "chart_service": svc,
+        })())
+        ev = _FakeEvent("/主场轮次预告图 顶级9")
+        out = [r async for r in ph.preview_chart(ev)]
+        assert out and isinstance(out[0], str) and _png_ok(out[0]), out
+        ev2 = _FakeEvent("/主场轮次预告图")
+        out2 = [r async for r in ph.preview_chart(ev2)]
+        assert out2 and "用法" in out2[0], out2
+    finally:
+        await env.teardown()
+
+
+async def test_preview_chart_no_fixtures():
+    env = await TestEnv().setup()
+    try:
+        svc = ChartService(env.db, env.dao, env.cfg)
+        try:
+            await svc.render_round_preview_chart(1)
+            assert False, "无赛程应报错"
+        except ChartError as e:
+            assert "还没有赛程" in str(e)
+    finally:
+        await env.teardown()
+
+
 async def test_chart_competition_colors():
     env = await TestEnv().setup()
     try:

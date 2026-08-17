@@ -379,6 +379,11 @@ class StadiumPlugin(Star):
         async for r in self._player_cmd(event, self.player_handler.season_chart):
             yield r
 
+    @filter.command("主场轮次预告图")
+    async def cmd_preview_chart(self, event: AstrMessageEvent) -> AsyncGenerator[MessageEventResult, None]:
+        async for r in self._player_cmd(event, self.player_handler.preview_chart):
+            yield r
+
     # ═══════════════════════════════════════════════════════
     # Teardown
     # ═══════════════════════════════════════════════════════

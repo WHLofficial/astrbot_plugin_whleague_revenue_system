@@ -83,58 +83,81 @@ def _draw_cell_text(dr, text, x, y, w, h, font, fill, align: str) -> None:
     dr.text((tx, ty), text, font=font, fill=fill)
 
 
-def _draw_table(title: str, subtitle: str, headers, rows, totals, out_path: str,
-                header_fill=HEADER_FILL, header_text=HEADER_TEXT) -> str:
-    """headers/rows/totals: 每格为 (文本, 列宽, 对齐 l/c/r)。"""
-    from PIL import Image, ImageDraw
+def _draw_table_block(dr, y_base: int, width: int, title: str, subtitle: str,
+                      headers, rows, totals, header_fill, header_text,
+                      row_colors=None) -> int:
+    """在画布 (0, y_base) 起绘制一个表格区块，返回区块结束的 y。
 
-    pad = 24
-    title_h, sub_h, gap = 48, 30, 8
+    headers: (文本, 列宽, 对齐 l/c/r)；totals 可为 None（不画合计行）；
+    row_colors: 与 rows 同构的每格颜色（None 用默认深色）。
+    """
+    pad, title_h, sub_h, gap = 24, 48, 30, 8
     header_h, row_h, total_h = 46, 42, 46
     col_x = []
     x = pad
     for _, w, _ in headers:
         col_x.append(x)
         x += w
-    width = x + pad
-    height = pad + title_h + sub_h + gap + header_h + len(rows) * row_h + total_h + pad
-
-    img = Image.new("RGB", (width, height), BG)
-    dr = ImageDraw.Draw(img)
     f_title = _font(32, bold=True)
     f_sub = _font(20)
     f_head = _font(22, bold=True)
     f_row = _font(22)
     f_tot = _font(22, bold=True)
 
-    y = pad
+    y = y_base + pad
     dr.text((pad, y), title, font=f_title, fill=TEXT_DARK)
     y += title_h
     dr.text((pad + 2, y), subtitle, font=f_sub, fill=(120, 120, 120))
     y += sub_h + gap
 
-    # 表头（赛事底色白字粗体）
     dr.rectangle([pad, y, width - pad, y + header_h], fill=header_fill)
     for i, (cell, (_, w, align)) in enumerate(zip([h[0] for h in headers], headers)):
         _draw_cell_text(dr, cell, col_x[i], y, w, header_h, f_head, header_text, align)
     y += header_h
 
-    # 数据行（细网格线）
-    for row in rows:
+    for ri, row in enumerate(rows):
         dr.rectangle([pad, y, width - pad, y + row_h], outline=GRID)
+        colors = row_colors[ri] if row_colors else None
         for i, (cell, (_, w, align)) in enumerate(zip(row, headers)):
-            _draw_cell_text(dr, cell, col_x[i], y, w, row_h, f_row, TEXT_DARK, align)
+            fill = (colors[i] if colors and colors[i] else TEXT_DARK)
+            _draw_cell_text(dr, cell, col_x[i], y, w, row_h, f_row, fill, align)
         y += row_h
 
-    # 合计行（赛事底色白字粗体）
-    dr.rectangle([pad, y, width - pad, y + total_h], fill=header_fill)
-    for i, (cell, (_, w, align)) in enumerate(zip(totals, headers)):
-        _draw_cell_text(dr, cell, col_x[i], y, w, total_h, f_tot, header_text, align)
-    y += total_h
-    dr.rectangle([pad, y, width - pad, y + 3], fill=ACCENT)
+    if totals is not None:
+        dr.rectangle([pad, y, width - pad, y + total_h], fill=header_fill)
+        for i, (cell, (_, w, align)) in enumerate(zip(totals, headers)):
+            _draw_cell_text(dr, cell, col_x[i], y, w, total_h, f_tot, header_text, align)
+        y += total_h
+        dr.rectangle([pad, y, width - pad, y + 3], fill=ACCENT)
+    return y
 
+
+def _draw_table(title: str, subtitle: str, headers, rows, totals, out_path: str,
+                header_fill=HEADER_FILL, header_text=HEADER_TEXT) -> str:
+    """单表格图（headers/rows/totals: (文本, 列宽, 对齐 l/c/r)）。"""
+    from PIL import Image, ImageDraw
+
+    pad, title_h, sub_h, gap = 24, 48, 30, 8
+    header_h, row_h, total_h = 46, 42, 46
+    width = sum(w for _, w, _ in headers) + pad * 2
+    has_totals = totals is not None
+    height = pad + title_h + sub_h + gap + header_h + len(rows) * row_h \
+        + (total_h + 3 if has_totals else 0) + pad
+
+    img = Image.new("RGB", (width, height), BG)
+    dr = ImageDraw.Draw(img)
+    _draw_table_block(dr, 0, width, title, subtitle, headers, rows, totals,
+                      header_fill, header_text)
     img.save(out_path)
     return out_path
+
+
+WEATHER_COLORS = {
+    "晴": (230, 120, 30),
+    "多云": (120, 120, 120),
+    "雨": (70, 110, 200),
+    "雪": (90, 150, 220),
+}
 
 
 def _fmt_k(v: int) -> str:
@@ -315,6 +338,76 @@ class ChartService:
             raise
         except Exception as e:
             logger.error(f"Round chart render error: {e}")
+            raise ChartError("图表生成失败，已记录错误")
+        self._cleanup_oldest()
+        return str(out)
+
+    # ─── 轮次对阵 + 天气预报合成图（上半对阵、下半天气） ─────
+
+    async def render_round_preview_chart(self, round_no: int, competition: str = "联赛") -> str:
+        state = await self._dao.get_league_state()
+        season = state["season_number"] if state else 1
+        window_seq = state["window_seq"] if state else 1
+        matches = await self._dao.get_round_matches(season, window_seq, round_no, competition)
+        if not matches:
+            raise ChartError(f"第 {round_no} 轮({competition})还没有赛程")
+        header_fill, header_text = COMPETITION_COLORS.get(competition, DEFAULT_COMPETITION_COLOR)
+
+        sched_rows, wx_rows, wx_colors = [], [], []
+        for raw in matches:
+            m = dict(raw)
+            st = await self._dao.get_stadium(m["home_team"])
+            name = st["name"] if st else f"{m['home_team']}主场"
+            sched_rows.append([
+                f"W{m['week_no']}" if m.get("week_no") else "",
+                f"D{m['day_no']}" if m.get("day_no") else "",
+                formula.weekday_name(m.get("day_no")),
+                m.get("match_time") or "",
+                m["home_team"], m["away_team"], name,
+            ])
+            weather = m["weather"] or "待预报"
+            wx_rows.append([m.get("match_time") or "", m["home_team"], m["away_team"], weather])
+            color = WEATHER_COLORS.get(m["weather"]) if m["weather"] else (150, 150, 150)
+            wx_colors.append([None, None, None, color])
+
+        sched_headers = [
+            ("周", 90, "c"), ("天", 70, "c"), ("星期", 80, "c"), ("时间", 110, "c"),
+            ("主队", 200, "l"), ("客队", 200, "l"), ("球场", 260, "l"),
+        ]
+        wx_headers = [
+            ("时间", 110, "c"), ("主队", 200, "l"), ("客队", 200, "l"), ("天气", 200, "c"),
+        ]
+        pad, title_h, sub_h, gap = 24, 48, 30, 8
+        header_h, row_h = 46, 42
+        n = len(matches)
+        width = max(
+            sum(w for _, w, _ in sched_headers) + pad * 2,
+            sum(w for _, w, _ in wx_headers) + pad * 2,
+        )
+        h1 = pad + title_h + sub_h + gap + header_h + n * row_h + pad
+        h2 = pad + title_h + sub_h + gap + header_h + n * row_h + pad
+        height = h1 + 10 + h2
+
+        from PIL import Image, ImageDraw
+
+        img = Image.new("RGB", (width, height), BG)
+        dr = ImageDraw.Draw(img)
+        title1 = f"WHL 第{season}赛季{competition} 第{round_no}轮 对阵表"
+        subtitle1 = f"第 {season} 赛季 · 窗口 {window_seq} · 共 {n} 场"
+        y = _draw_table_block(dr, 0, width, title1, subtitle1, sched_headers,
+                              sched_rows, None, header_fill, header_text)
+        title2 = "天气预报"
+        subtitle2 = f"第 {round_no} 轮({competition}) · 未预报显示灰色「待预报」"
+        _draw_table_block(dr, y + 10, width, title2, subtitle2, wx_headers,
+                          wx_rows, None, header_fill, header_text, row_colors=wx_colors)
+
+        out = self.charts_dir / f"preview_s{season}_w{window_seq}_{competition}_r{round_no}.png"
+        try:
+            img.save(out)
+        except ChartError:
+            raise
+        except Exception as e:
+            logger.error(f"Preview chart render error: {e}")
             raise ChartError("图表生成失败，已记录错误")
         self._cleanup_oldest()
         return str(out)

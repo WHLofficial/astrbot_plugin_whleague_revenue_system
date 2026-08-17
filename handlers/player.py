@@ -147,6 +147,24 @@ class PlayerHandler:
             return
         yield event.image_result(result)
 
+    async def preview_chart(self, event) -> AsyncGenerator[MessageEventResult, None]:
+        parts = event.get_message_str().split(maxsplit=1)
+        if len(parts) < 2:
+            yield event.plain_result("用法: /主场轮次预告图 <轮次>\n上半为对阵、下半为天气预报\n轮次支持前缀：顶级9/次级11/冠军3（默认联赛）")
+            return
+        try:
+            competition, round_no = formula.parse_round_token(self._plugin.config_cache, parts[1])
+        except ValueError as e:
+            yield event.plain_result(str(e))
+            return
+        result = await self._run(
+            event, self._plugin.chart_service.render_round_preview_chart(round_no, competition)
+        )
+        if "error" in result:
+            yield event.plain_result(result["error"])
+            return
+        yield event.image_result(result)
+
     # ─── 改名 ─────────────────────────────────────────────
 
     async def rename(self, event) -> AsyncGenerator[MessageEventResult, None]:
