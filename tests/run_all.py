@@ -8,6 +8,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from tests.common import run_module  # noqa: E402
 
 MODULES = [
+    "tests.s0_schema",
     "tests.s1_formula",
     "tests.s2_fixture_flow",
     "tests.s3_stadium_attr",

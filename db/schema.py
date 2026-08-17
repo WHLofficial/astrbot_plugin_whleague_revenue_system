@@ -1,6 +1,6 @@
 from astrbot.api import logger
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 SQL_CREATE_TABLES = r"""
 
@@ -146,6 +146,8 @@ CREATE TABLE IF NOT EXISTS event_pool (
     weight INTEGER NOT NULL DEFAULT 10,
     conditions_json TEXT NOT NULL DEFAULT '{}',
     effects_json TEXT NOT NULL DEFAULT '{}',
+    options_json TEXT NOT NULL DEFAULT '{}',
+    event_type TEXT NOT NULL DEFAULT 'instant',
     template TEXT NOT NULL DEFAULT '',
     source TEXT NOT NULL DEFAULT 'builtin',
     status TEXT NOT NULL DEFAULT 'adopted',
@@ -164,6 +166,21 @@ CREATE TABLE IF NOT EXISTS events_log (
 );
 
 CREATE INDEX IF NOT EXISTS idx_events_log ON events_log(team_name, season_number, window_seq);
+
+CREATE TABLE IF NOT EXISTS event_choices (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    team_name TEXT NOT NULL,
+    season_number INTEGER NOT NULL,
+    window_seq INTEGER NOT NULL,
+    event_id TEXT NOT NULL,
+    choice_no INTEGER,
+    resolved INTEGER NOT NULL DEFAULT 0,
+    outcome TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+    UNIQUE(team_name, season_number, window_seq, event_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_event_choices ON event_choices(season_number, window_seq);
 
 CREATE TABLE IF NOT EXISTS window_summaries (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -307,3 +324,31 @@ async def _migrate(db, current_version: int):
             )
         await db.commit()
         logger.info("Migrated window_summaries table: added tx_ids column.")
+    if current_version < 5:
+        cols = await _table_columns(db, "event_pool")
+        for col, ddl in (
+            ("event_type", "ALTER TABLE event_pool ADD COLUMN event_type TEXT NOT NULL DEFAULT 'instant'"),
+            ("options_json", "ALTER TABLE event_pool ADD COLUMN options_json TEXT NOT NULL DEFAULT '{}'"),
+        ):
+            if col not in cols:
+                await db.execute(ddl)
+        # 选择型事件的玩家决策表（choice_no=NULL 表示尚未定夺，结算按最差兜底）
+        await db.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS event_choices (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                team_name TEXT NOT NULL,
+                season_number INTEGER NOT NULL,
+                window_seq INTEGER NOT NULL,
+                event_id TEXT NOT NULL,
+                choice_no INTEGER,
+                resolved INTEGER NOT NULL DEFAULT 0,
+                outcome TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+                UNIQUE(team_name, season_number, window_seq, event_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_event_choices ON event_choices(season_number, window_seq);
+            """
+        )
+        await db.commit()
+        logger.info("Migrated event tables: event_type/options_json + event_choices table.")

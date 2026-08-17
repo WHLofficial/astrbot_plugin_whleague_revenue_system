@@ -402,11 +402,14 @@ class StadiumDAO:
 
     async def upsert_event(self, event_id: str, name: str, category: str, weight: int,
                            conditions_json: str, effects_json: str, template: str,
-                           source: str, status: str) -> None:
+                           source: str, status: str,
+                           event_type: str = "instant", options_json: str = "{}") -> None:
         await self._db.execute(
             "INSERT OR REPLACE INTO event_pool (event_id, name, category, weight, conditions_json, "
-            "effects_json, template, source, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (event_id, name, category, weight, conditions_json, effects_json, template, source, status),
+            "effects_json, options_json, event_type, template, source, status) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (event_id, name, category, weight, conditions_json, effects_json,
+             options_json, event_type, template, source, status),
         )
 
     async def list_events(self, status: str | None = None) -> list:
@@ -454,6 +457,63 @@ class StadiumDAO:
         return await self._db.fetchone(
             "SELECT * FROM event_pool WHERE event_id=?", (event_id,)
         )
+
+    # ─── 事件选择（玩家决策） ─────────────────────────────
+
+    async def add_event_choice(self, team_name: str, season: int, window_seq: int,
+                               event_id: str) -> None:
+        """记录一条待定选择（同队同窗口同事件幂等）。"""
+        await self._db.execute(
+            "INSERT OR IGNORE INTO event_choices (team_name, season_number, window_seq, event_id) "
+            "VALUES (?, ?, ?, ?)",
+            (team_name, season, window_seq, event_id),
+        )
+
+    async def get_event_choice(self, team_name: str, season: int, window_seq: int,
+                               event_id: str):
+        return await self._db.fetchone(
+            "SELECT * FROM event_choices WHERE team_name=? AND season_number=? AND window_seq=? AND event_id=?",
+            (team_name, season, window_seq, event_id),
+        )
+
+    async def set_event_choice(self, team_name: str, season: int, window_seq: int,
+                               event_id: str, choice_no: int) -> None:
+        await self._db.execute(
+            "UPDATE event_choices SET choice_no=? "
+            "WHERE team_name=? AND season_number=? AND window_seq=? AND event_id=?",
+            (choice_no, team_name, season, window_seq, event_id),
+        )
+
+    async def list_event_choices(self, season: int, window_seq: int) -> list:
+        return await self._db.fetchall(
+            "SELECT * FROM event_choices WHERE season_number=? AND window_seq=? ORDER BY team_name, id",
+            (season, window_seq),
+        )
+
+    async def get_unresolved_choices(self, season: int, window_seq: int) -> list:
+        return await self._db.fetchall(
+            "SELECT * FROM event_choices WHERE season_number=? AND window_seq=? AND resolved=0 "
+            "ORDER BY team_name, id",
+            (season, window_seq),
+        )
+
+    async def mark_choice_resolved(self, choice_id: int, outcome_json: str) -> None:
+        await self._db.execute(
+            "UPDATE event_choices SET resolved=1, outcome=? WHERE id=?",
+            (outcome_json, choice_id),
+        )
+
+    async def reset_choices_for_redo(self, season: int, window_seq: int) -> int:
+        """强制重算：把该窗口已结算的选择重置为待定（保留玩家已导入的 choice_no）。"""
+        cur = await self._db.execute(
+            "UPDATE event_choices SET resolved=0, outcome='' "
+            "WHERE season_number=? AND window_seq=? AND resolved=1",
+            (season, window_seq),
+        )
+        try:
+            return cur.rowcount or 0
+        finally:
+            await cur.close()
 
     async def next_event_counter(self) -> int:
         """生成唯一草稿 ID 序号：基于 MAX(id)，避免 REPLACE 后 COUNT 复用撞号。"""
