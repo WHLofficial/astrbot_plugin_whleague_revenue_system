@@ -147,9 +147,12 @@ class FixtureService:
                 continue
             for team in (home, away):
                 await self._stadium_service.ensure_stadium(team)
-            await self._dao.add_match(season, window_seq, round_no, home, away, competition,
-                                      week_no=week, day_no=day, match_time=match_time)
-            imported += 1
+            inserted = await self._dao.add_match(season, window_seq, round_no, home, away,
+                                                 competition, week_no=week, day_no=day,
+                                                 match_time=match_time)
+            imported += inserted
+            if not inserted:
+                errors.append(f"第{round_no}轮({competition}) {home} vs {away}: 重复赛程，已忽略")
         return {"imported": imported, "skipped": skipped, "errors": errors[:10],
                 "season": season, "window_seq": window_seq}
 

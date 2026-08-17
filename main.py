@@ -1,4 +1,3 @@
-import asyncio
 from collections.abc import AsyncGenerator
 
 from astrbot.api import logger

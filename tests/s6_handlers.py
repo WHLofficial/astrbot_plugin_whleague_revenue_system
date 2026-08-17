@@ -96,5 +96,10 @@ async def test_handler_smoke():
         event3 = _FakeEvent("/主场", sender="10001")
         results3 = [r async for r in ph.my_stadium(event3)]
         assert results3 and "利物浦" in results3[0], results3
+
+        # 添加管理：非法 QQ 应返回提示而非抛异常
+        event4 = _FakeEvent("/主场添加管理 不是数字", sender="admin", is_admin=True)
+        results4 = [r async for r in handler.add_admin(event4)]
+        assert results4 and "QQ" in results4[0], results4
     finally:
         await env.teardown()

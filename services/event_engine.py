@@ -182,7 +182,7 @@ class EventEngine:
                 team_name, season, window_seq, "event", -maintenance,
                 note=f"{event['name']}（维护）",
             )
-            notes.append(f"维护 +{maintenance:.1f}M")
+            notes.append(f"维护 −{maintenance:.1f}M")
         if fans_pct:
             fans = min(max(stadium["fans_diehards"] * (1.0 + fans_pct), 0.0),
                        float(self._cfg.get("fans_cap", 10000)))

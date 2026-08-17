@@ -621,7 +621,11 @@ class AdminHandler:
         if len(parts) < 2:
             yield event.plain_result("用法: /主场添加管理 <QQ>")
             return
-        qq = parse_qq_arg(parts[1]) or parse_qq(parts[1])
+        try:
+            qq = parse_qq_arg(parts[1]) or parse_qq(parts[1])
+        except ValueError as e:
+            yield event.plain_result(str(e))
+            return
         await self._plugin.dao.add_admin(qq, event.get_sender_id())
         yield event.plain_result(f"✅ 已添加管理 {qq}")
 
@@ -634,6 +638,10 @@ class AdminHandler:
         if len(parts) < 2:
             yield event.plain_result("用法: /主场删除管理 <QQ>")
             return
-        qq = parse_qq_arg(parts[1]) or parse_qq(parts[1])
+        try:
+            qq = parse_qq_arg(parts[1]) or parse_qq(parts[1])
+        except ValueError as e:
+            yield event.plain_result(str(e))
+            return
         await self._plugin.dao.remove_admin(qq)
         yield event.plain_result(f"✅ 已删除管理 {qq}")

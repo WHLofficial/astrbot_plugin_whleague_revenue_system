@@ -96,6 +96,57 @@ async def test_settle_fans_evolution_asymmetric():
         await env.teardown()
 
 
+async def test_evolve_once_per_settle():
+    env = await TestEnv().setup()
+    try:
+        # 4 队均离目标、无已录赛果（上座率中性 1.0、战绩修正 ×0.95）
+        for team, infl in (("利物浦", 150.0), ("巴塞罗那", 100.0),
+                           ("纽卡斯尔联", 120.0), ("勒沃库森", 120.0)):
+            await env.stadium_service.import_attributes(team, influence=infl)
+        await env.window_service.settle()
+        from astrbot_plugin_whleague_revenue_system.services import formula
+
+        fans = (await env.dao.get_stadium("利物浦"))["fans_diehards"]
+        # 单轮演化：1800 + 1200×0.5×(0.6+0.4×1.0) = 2400，再 ×0.95 = 2280；
+        # 旧实现会按球队数重复演化（4 队 → 约 2668）
+        assert abs(fans - 2280.0) < 0.01, f"应仅演化一轮: {fans}"
+    finally:
+        await env.teardown()
+
+
+async def test_settle_force_idempotent():
+    env = await TestEnv().setup()
+    try:
+        await _seed_window(env)
+        await env.dao.add_booking("利物浦", 1, 1, 1, "esports", "")
+        await env.brand_service.sign("利物浦", "亚马逊", 1, 1)
+        import random
+
+        random.seed(42)
+        await env.window_service.settle()
+        balance1 = (await env.dao.get_balance("利物浦"))["balance"]
+        txs1 = await env.dao.list_transactions("利物浦", season=1, window_seq=1)
+        fans1 = (await env.dao.get_stadium("利物浦"))["fans_diehards"]
+
+        # 固定随机种子：档期收入等随机项两次结算掷出相同结果
+        random.seed(42)
+        await env.window_service.settle(force=True)
+        balance2 = (await env.dao.get_balance("利物浦"))["balance"]
+        txs2 = await env.dao.list_transactions("利物浦", season=1, window_seq=1)
+        fans2 = (await env.dao.get_stadium("利物浦"))["fans_diehards"]
+        assert abs(balance2 - balance1) < 1e-6, f"余额应一致: {balance1} vs {balance2}"
+        assert len(txs2) == len(txs1), f"流水条数应一致: {len(txs1)} vs {len(txs2)}"
+        assert sorted(t["kind"] for t in txs2) == sorted(t["kind"] for t in txs1)
+        assert abs(fans2 - fans1) < 1e-6, "强制重算不应重复演化"
+        # 冠名窗口数不应重复扣减（4 窗口 → 3）
+        naming = await env.dao.get_active_naming("利物浦")
+        assert naming["windows_remaining"] == 3, naming["windows_remaining"]
+        # 赛果门票流水（非结算创建）不应被撤销
+        assert any(t["kind"] == "ticket" for t in txs2), txs2
+    finally:
+        await env.teardown()
+
+
 async def test_brand_terminate_on_fan_drop():
     env = await TestEnv().setup()
     try:

@@ -132,6 +132,44 @@ async def test_brand_pool_and_sign():
         await env.teardown()
 
 
+async def test_event_draft_ids_unique_and_no_overwrite():
+    env = await TestEnv().setup()
+    try:
+        env.provider.set_response(
+            '[{"name":"A","category":"c","weight":5,"effects":{"money":1},"template":"t"}]'
+        )
+        d1 = await env.event_engine.generate_drafts(1)
+        d2 = await env.event_engine.generate_drafts(1)
+        assert d1[0]["id"] != d2[0]["id"], "两次生成的草稿 ID 不得复用"
+        # 第一次草稿采纳后，第二次生成不得占用同一 event_id 覆盖它
+        pending = await env.dao.list_events("pending")
+        first = next(p for p in pending if p["event_id"] == d1[0]["id"])
+        await env.event_engine.adopt(first["id"])
+        adopted = await env.dao.list_events("adopted")
+        ev = [e for e in adopted if e["event_id"] == d1[0]["id"]]
+        assert ev and ev[0]["name"] == "A" and ev[0]["status"] == "adopted"
+        pending2 = await env.dao.list_events("pending")
+        assert all(p["event_id"] != d1[0]["id"] for p in pending2), "新草稿不得占用已采纳 ID"
+    finally:
+        await env.teardown()
+
+
+async def test_llm_maintenance_no_refund():
+    env = await TestEnv().setup()
+    try:
+        env.provider.set_response(
+            '[{"name":"负维护","category":"c","weight":5,'
+            '"effects":{"maintenance":-9},"template":"t"}]'
+        )
+        drafts = await env.event_engine.generate_drafts(1)
+        assert len(drafts) == 1, drafts
+        pending = await env.dao.list_events("pending")
+        effects = json.loads(pending[0]["effects_json"])
+        assert effects["maintenance"] == 0.0, "负维护应钳制为 0（不允许退款）"
+    finally:
+        await env.teardown()
+
+
 async def test_llm_flavor_text_fallback():
     env = await TestEnv().setup()
     try:

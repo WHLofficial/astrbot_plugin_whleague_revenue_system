@@ -1,6 +1,6 @@
 from astrbot.api import logger
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 SQL_CREATE_TABLES = r"""
 
@@ -169,6 +169,7 @@ CREATE TABLE IF NOT EXISTS window_summaries (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     season_number INTEGER NOT NULL,
     window_seq INTEGER NOT NULL,
+    tx_ids TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
     UNIQUE(season_number, window_seq)
 );
@@ -297,3 +298,12 @@ async def _migrate(db, current_version: int):
                 await db.execute(ddl)
         await db.commit()
         logger.info("Migrated matches table: added score/week/day/time columns.")
+    if current_version < 4:
+        cols = await _table_columns(db, "window_summaries")
+        if "tx_ids" not in cols:
+            # 记录结算创建的流水 ID，供强制重算时精确撤销
+            await db.execute(
+                "ALTER TABLE window_summaries ADD COLUMN tx_ids TEXT NOT NULL DEFAULT ''"
+            )
+        await db.commit()
+        logger.info("Migrated window_summaries table: added tx_ids column.")

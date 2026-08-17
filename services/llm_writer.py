@@ -140,7 +140,8 @@ def _clamp_event(d, money_clamp: float, fans_clamp: float, maintenance_clamp: fl
     maintenance = float(effects.get("maintenance", 0.0))
     money = max(-money_clamp, min(money_clamp, money))
     fans_pct = max(-fans_clamp, min(fans_clamp, fans_pct))
-    maintenance = max(-maintenance_clamp, min(maintenance_clamp, maintenance))
+    # 维护只允许支出（0 ~ 上限），不允许负维护退款
+    maintenance = max(0.0, min(maintenance_clamp, maintenance))
     weight = max(1, min(100, int(d.get("weight", 10))))
     template = str(d.get("template", "")).strip() or f"{name}：{team} 的球场发生了趣事。"
     return {

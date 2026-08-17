@@ -193,12 +193,17 @@ class StadiumDAO:
     async def add_transaction(
         self, team_name: str, season: int, window_seq: int, kind: str,
         amount: float, note: str = "", round_no: int | None = None,
-    ) -> None:
-        await self._db.execute(
+    ) -> int:
+        """写入流水并返回其 id（供结算强制重算时精确撤销）。"""
+        cur = await self._db.execute(
             "INSERT INTO revenue_transactions (team_name, season_number, window_seq, round_no, kind, amount, note) "
             "VALUES (?, ?, ?, ?, ?, ?, ?)",
             (team_name, season, window_seq, round_no, kind, amount, note),
         )
+        try:
+            return cur.lastrowid or 0
+        finally:
+            await cur.close()
 
     async def list_transactions(
         self, team_name: str, season: int | None = None, window_seq: int | None = None,
@@ -222,14 +227,19 @@ class StadiumDAO:
         self, season: int, window_seq: int, round_no: int, home_team: str, away_team: str,
         competition: str = "联赛", week_no: int | None = None,
         day_no: int | None = None, match_time: str | None = None,
-    ) -> None:
-        await self._db.execute(
+    ) -> int:
+        """插入赛程行；重复导入（同轮次同赛事同主队）被忽略，返回实际插入数。"""
+        cur = await self._db.execute(
             "INSERT OR IGNORE INTO matches (season_number, window_seq, round_no, competition, "
             "home_team, away_team, week_no, day_no, match_time) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (season, window_seq, round_no, competition, home_team, away_team,
              week_no, day_no, match_time),
         )
+        try:
+            return cur.rowcount or 0
+        finally:
+            await cur.close()
 
     async def get_round_matches(
         self, season: int, window_seq: int, round_no: int, competition: str | None = None
@@ -446,10 +456,12 @@ class StadiumDAO:
         )
 
     async def next_event_counter(self) -> int:
+        """生成唯一草稿 ID 序号：基于 MAX(id)，避免 REPLACE 后 COUNT 复用撞号。"""
         row = await self._db.fetchone(
-            "SELECT COUNT(*) AS n FROM event_pool"
+            "SELECT MAX(id) AS n FROM event_pool"
         )
-        return (row["n"] if row else 0) + 1
+        n = row["n"] if row and row["n"] is not None else 0
+        return n + 1
 
     # ─── 窗口结算 ─────────────────────────────────────────
 
@@ -463,4 +475,48 @@ class StadiumDAO:
         await self._db.execute(
             "INSERT OR IGNORE INTO window_summaries (season_number, window_seq) VALUES (?, ?)",
             (season, window_seq),
+        )
+
+    async def get_window_summary(self, season: int, window_seq: int):
+        return await self._db.fetchone(
+            "SELECT * FROM window_summaries WHERE season_number=? AND window_seq=?",
+            (season, window_seq),
+        )
+
+    async def save_window_summary_tx_ids(self, season: int, window_seq: int,
+                                         tx_ids_json: str) -> None:
+        await self._db.execute(
+            "UPDATE window_summaries SET tx_ids=? WHERE season_number=? AND window_seq=?",
+            (tx_ids_json, season, window_seq),
+        )
+
+    async def delete_transactions_by_ids(self, tx_ids: list[int]) -> int:
+        """按流水 ID 精确删除（结算强制重算撤销用），返回删除条数。"""
+        ids = [i for i in tx_ids if i]
+        if not ids:
+            return 0
+        placeholders = ", ".join("?" * len(ids))
+        cur = await self._db.execute(
+            f"DELETE FROM revenue_transactions WHERE id IN ({placeholders})", ids
+        )
+        try:
+            return cur.rowcount or 0
+        finally:
+            await cur.close()
+
+    async def recompute_balance(self, team_name: str) -> None:
+        """按流水重算余额（建设券流水不影响余额，故排除 credit 类）。"""
+        await self._db.execute(
+            "INSERT OR IGNORE INTO club_balance (team_name, balance, build_credit) VALUES (?, 0, 0)",
+            (team_name,),
+        )
+        row = await self._db.fetchone(
+            "SELECT COALESCE(SUM(amount), 0.0) AS s FROM revenue_transactions "
+            "WHERE team_name=? AND kind != 'credit'",
+            (team_name,),
+        )
+        total = row["s"] if row else 0.0
+        await self._db.execute(
+            "UPDATE club_balance SET balance=?, updated_at=datetime('now','localtime') WHERE team_name=?",
+            (total, team_name),
         )
