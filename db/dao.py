@@ -251,6 +251,13 @@ class StadiumDAO:
             (team_name,),
         )
 
+    async def get_home_matches_season(self, team_name: str, season: int) -> list:
+        return await self._db.fetchall(
+            "SELECT * FROM matches WHERE home_team=? AND season_number=? "
+            "ORDER BY window_seq, round_no, id",
+            (team_name, season),
+        )
+
     async def get_last_results(self, team_name: str, limit: int = 3) -> list:
         return await self._db.fetchall(
             "SELECT * FROM matches WHERE home_team=? AND result IS NOT NULL "

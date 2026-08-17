@@ -50,7 +50,7 @@ async def test_plugin_import_and_commands():
         "主场品牌列表", "主场品牌采纳", "主场品牌丢弃", "主场结算",
         "主场设置", "主场查看配置", "主场添加管理", "主场删除管理",
         "主场", "主场信息", "主场赛季统计", "球场命名", "球场活动",
-        "冠名", "退冠名", "主场财务",
+        "冠名", "退冠名", "主场财务", "主场轮次统计图", "主场赛季走势图",
     ]
     for cmd in expected_commands:
         assert f'@filter.command("{cmd}")' in src, f"缺少命令注册: {cmd}"

@@ -6,8 +6,9 @@ from astrbot.api import logger
 from astrbot.api.event import MessageEventResult
 
 from ..services.brand_service import BrandError
+from ..services.chart_service import ChartError
 from ..services.stadium_service import StadiumError
-from ..utils.security import format_m
+from ..utils.security import format_m, parse_int
 
 _FACILITY_DISPLAY = {
     "commercial": "商业区",
@@ -29,7 +30,7 @@ class PlayerHandler:
     async def _run(self, event, coro):
         try:
             return await coro
-        except (StadiumError, BrandError, ValueError, IndexError) as e:
+        except (StadiumError, BrandError, ChartError, ValueError, IndexError) as e:
             return {"error": str(e)}
         except Exception as e:
             logger.error(f"Player handler error: {e}")
@@ -117,6 +118,33 @@ class PlayerHandler:
         g = stats["grand"]
         lines.append(f"合计: {g['attendance']:,} 人次 / {g['ticket']:.2f}M 票房")
         yield event.plain_result("\n".join(lines))
+
+    # ─── 统计图（全体群友可查） ───────────────────────────
+
+    async def round_chart(self, event) -> AsyncGenerator[MessageEventResult, None]:
+        parts = event.get_message_str().split()
+        if len(parts) < 2:
+            yield event.plain_result("用法: /主场轮次统计图 <轮次>")
+            return
+        try:
+            round_no = parse_int(parts[1], min_val=1)
+        except ValueError:
+            yield event.plain_result("轮次需为正整数")
+            return
+        result = await self._run(
+            event, self._plugin.chart_service.render_round_chart(round_no)
+        )
+        if "error" in result:
+            yield event.plain_result(result["error"])
+            return
+        yield event.image_result(result)
+
+    async def season_chart(self, event) -> AsyncGenerator[MessageEventResult, None]:
+        result = await self._run(event, self._plugin.chart_service.render_season_chart())
+        if "error" in result:
+            yield event.plain_result(result["error"])
+            return
+        yield event.image_result(result)
 
     # ─── 改名 ─────────────────────────────────────────────
 

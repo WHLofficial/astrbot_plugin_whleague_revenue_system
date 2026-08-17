@@ -42,6 +42,7 @@ class StadiumPlugin(Star):
 
         from .services.backup_service import BackupService
         from .services.brand_service import BrandService
+        from .services.chart_service import ChartService
         from .services.event_engine import EventEngine
         from .services.fans_service import FansService
         from .services.fixture_service import FixtureService
@@ -63,6 +64,7 @@ class StadiumPlugin(Star):
             self.db, self.dao, self.config_cache, self.fans_service, self.brand_service
         )
         self.backup_service = BackupService(self.db, self.config_cache)
+        self.chart_service = ChartService(self.db, self.dao, self.config_cache)
 
         await self.brand_service.init_brand_pool()
         await self.event_engine.init_defaults()
@@ -365,6 +367,16 @@ class StadiumPlugin(Star):
     @filter.command("主场财务")
     async def cmd_my_finance(self, event: AstrMessageEvent) -> AsyncGenerator[MessageEventResult, None]:
         async for r in self._player_cmd(event, self.player_handler.my_finance):
+            yield r
+
+    @filter.command("主场轮次统计图")
+    async def cmd_round_chart(self, event: AstrMessageEvent) -> AsyncGenerator[MessageEventResult, None]:
+        async for r in self._player_cmd(event, self.player_handler.round_chart):
+            yield r
+
+    @filter.command("主场赛季走势图")
+    async def cmd_season_chart(self, event: AstrMessageEvent) -> AsyncGenerator[MessageEventResult, None]:
+        async for r in self._player_cmd(event, self.player_handler.season_chart):
             yield r
 
     # ═══════════════════════════════════════════════════════
