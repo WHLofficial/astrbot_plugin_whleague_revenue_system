@@ -1,0 +1,266 @@
+"""主场系统全部数值公式（配置驱动，纯函数，无 I/O）。
+
+所有阈值/系数均来自 config.defaults.DEFAULT_CONFIG / _conf_schema.json，
+管理员可通过 /主场设置 调整而不改代码。
+"""
+
+import random
+
+from ..config.defaults import parse_json_object, parse_float_list
+
+# 子设施固定键名
+FACILITY_COMMERCIAL = "commercial"
+FACILITY_BROADCAST = "broadcast"
+FACILITY_PITCH = "pitch"
+FACILITY_YOUTH = "youth"
+FACILITY_MEDICAL = "medical"
+
+# 天气键（对应 weather_ranges / weather_probabilities）
+WX_SUNNY = "晴"
+WX_CLOUDY = "多云"
+WX_RAIN = "雨"
+WX_SNOW = "雪"
+
+_RESULT_PTS = {"W": 3, "D": 1, "L": 0}
+
+
+def tier_config(cfg: dict, tier: int) -> dict:
+    """读取等级表配置（JSON 字符串 -> dict）。"""
+    table = parse_json_object(cfg.get("tier_table", {}))
+    entry = table.get(str(tier))
+    if not isinstance(entry, dict):
+        raise ValueError(f"等级 {tier} 不存在于等级表配置")
+    return entry
+
+
+def tier_attend_coef(cfg: dict, tier: int) -> float:
+    return float(tier_config(cfg, tier).get("attend_coef", 1.0))
+
+
+def tier_maintenance(cfg: dict, tier: int, capacity: int, home_matches: int) -> float:
+    """半赛季维护费 = 基础 + 每万座每场费率 × 容量(万) × 场次（S9 公式）。"""
+    t = tier_config(cfg, tier)
+    base = float(t.get("base_maintenance", 0.0))
+    rate = float(t.get("per_10k_rate", 0.0))
+    return base + rate * (capacity / 10000.0) * home_matches
+
+
+def tier_upgrade_cost(cfg: dict, tier: int) -> float:
+    """升到 tier 级所需的单级升级费。"""
+    return float(tier_config(cfg, tier).get("upgrade_cost", 0.0))
+
+
+def weather_ranges(cfg: dict) -> dict:
+    return parse_json_object(cfg.get("weather_ranges", {}))
+
+
+def weather_probabilities(cfg: dict) -> dict:
+    return parse_json_object(cfg.get("weather_probabilities", {}))
+
+
+def roll_weather(cfg: dict) -> str:
+    """按配置概率掷一种天气。"""
+    probs = weather_probabilities(cfg)
+    items = list(probs.items())
+    total = sum(float(v) for _, v in items)
+    if total <= 0:
+        return WX_CLOUDY
+    r = random.uniform(0, total)
+    acc = 0.0
+    for name, p in items:
+        acc += float(p)
+        if r <= acc:
+            return name
+    return items[-1][0] if items else WX_CLOUDY
+
+
+def weather_coef(cfg: dict, weather: str | None) -> float:
+    """天气系数：S8 表比例拉伸到 0.75-1.25，区间内均匀。"""
+    ranges = weather_ranges(cfg)
+    bounds = ranges.get(weather or "")
+    if not bounds:
+        return 1.0
+    lo, hi = float(bounds[0]), float(bounds[1])
+    if hi <= lo:
+        return lo
+    return random.uniform(lo, hi)
+
+
+def form_coef_table(cfg: dict) -> dict:
+    return parse_json_object(cfg.get("form_coef_table", {}))
+
+
+def form_pts(results: list) -> int:
+    """近 3 场 Pts（胜3平1负0），results 为最近几场的 result 字符串列表。"""
+    pts = 0
+    for r in results[:3]:
+        pts += _RESULT_PTS.get(str(r).strip().upper(), 0)
+    return pts
+
+
+def form_coef(cfg: dict, pts: int) -> float:
+    """近 3 场 Pts → 上座系数（S8 表）。"""
+    table = form_coef_table(cfg)
+    key = str(min(max(pts, 0), 9))
+    return float(table.get(key, 1.0))
+
+
+def opponent_coef(home_influence: float, away_influence: float) -> float:
+    """对手系数 = 1 + 5%×客队影响力/主队影响力（S8 真实拉力）。"""
+    if home_influence <= 0:
+        return 1.0
+    ratio = max(away_influence, 0.0) / home_influence
+    return 1.0 + 0.05 * ratio
+
+
+def attendance_multiplier(cfg: dict, tier: int) -> float:
+    """上座倍数 = 基准 × (1 + 每级系数×等级)，0 级 = 基准（开局不变）。"""
+    base = float(cfg.get("attendance_multiplier_base", 4.0))
+    per_tier = float(cfg.get("attendance_multiplier_per_tier", 0.35))
+    return base * (1.0 + per_tier * tier)
+
+
+def diehard_target(cfg: dict, influence: float) -> float:
+    """死忠目标 = 影响力 × 死忠系数。"""
+    return influence * float(cfg.get("fans_per_influence", 20.0))
+
+
+def attendance(
+    cfg: dict,
+    fans: float,
+    capacity: int,
+    tier: int,
+    weather: str | None,
+    form_pts_value: int,
+    home_influence: float,
+    away_influence: float,
+    next_attendance_mod: float = 1.0,
+) -> int:
+    """计算实际上座 = min(容量, 死忠 × 上座倍数 × 等级系数 × 战绩 × 天气 × 对手 × 扰动)。
+
+    扰动 ±3%，调用方可用 random 直接注入（本函数固定为确定性种子之外的随机）。
+    """
+    multiplier = attendance_multiplier(cfg, tier)
+    tier_coef = tier_attend_coef(cfg, tier)
+    form = form_coef(cfg, form_pts_value)
+    wx = weather_coef(cfg, weather)
+    opp = opponent_coef(home_influence, away_influence)
+    perturbation = random.uniform(0.97, 1.03)
+    demand = fans * multiplier * tier_coef * form * wx * opp * perturbation * next_attendance_mod
+    return int(min(capacity, max(0, demand)))
+
+
+def match_revenues(
+    cfg: dict, attendance_num: int, commercial_level: int, broadcast_level: int
+) -> tuple[float, float, float]:
+    """单场收入：票房 + 商业 + 转播（M）。"""
+    attendance_wan = attendance_num / 10000.0
+    ticket = attendance_wan * float(cfg.get("ticket_revenue_per_10k", 1.5))
+    commercial = attendance_wan * float(cfg.get("commercial_per_10k_per_level", 0.1)) * commercial_level
+    broadcast = float(cfg.get("broadcast_per_match_per_level", 0.3)) * broadcast_level
+    return round(ticket, 4), round(commercial, 4), round(broadcast, 4)
+
+
+def expansion_cost(cfg: dict, old_capacity: int, new_capacity: int) -> float:
+    """扩建费用 = 差量座位 × 单价（0.1M/100座）。"""
+    delta = max(0, new_capacity - old_capacity)
+    return delta / 100.0 * float(cfg.get("expansion_cost_per_100", 0.1))
+
+
+def facility_upgrade_costs(cfg: dict) -> list[float]:
+    return parse_float_list(cfg.get("facility_upgrade_costs", "3,5,8,12,16"))
+
+
+def facility_cost_to_level(cfg: dict, level: int) -> float:
+    """子设施升到 N 级的累计费用。"""
+    costs = facility_upgrade_costs(cfg)
+    return sum(costs[:level])
+
+
+def facility_effects(cfg: dict) -> dict:
+    return parse_json_object(cfg.get("facility_effects", {}))
+
+
+def fans_grow_coef(cfg: dict, attend_rate: float) -> float:
+    """涨粉系数 = 速率 × (基准 + 跨度×上座率)。"""
+    rate = float(cfg.get("fans_grow_rate", 0.5))
+    base = float(cfg.get("fans_grow_heat_base", 0.6))
+    span = float(cfg.get("fans_grow_heat_span", 0.4))
+    return rate * (base + span * attend_rate)
+
+
+def fans_drop_coef(cfg: dict, attend_rate: float) -> float:
+    """掉粉系数 = 速率 × (1 + 加速×(1−上座率))，上座率越差跑得越快。"""
+    rate = float(cfg.get("fans_drop_rate", 0.5))
+    extra = float(cfg.get("fans_drop_heat_extra", 0.8))
+    return rate * (1.0 + extra * (1.0 - attend_rate))
+
+
+def evolve_fans(
+    cfg: dict, fans: float, target: float, attend_rate: float,
+    youth_level: int = 0, form_pts_value: int = 4,
+) -> float:
+    """死忠演化（非对称）。
+
+    涨粉方向：靠拢 = 差额 × 涨粉系数 × (1 + 3%×青训级)
+    掉粉方向：靠拢 = 差额 × 掉粉系数
+    随后叠加战绩修正（Pts≥7 +5%，≤1 −5%），最后钳到 [0, 上限]。
+    """
+    cap = float(cfg.get("fans_cap", 10000))
+    diff = target - fans
+    if diff > 0:
+        coef = fans_grow_coef(cfg, attend_rate)
+        coef *= 1.0 + 0.03 * youth_level
+        new_fans = fans + diff * coef
+    else:
+        coef = fans_drop_coef(cfg, attend_rate)
+        new_fans = fans + diff * coef
+
+    if form_pts_value >= 7:
+        new_fans *= 1.05
+    elif form_pts_value <= 1:
+        new_fans *= 0.95
+    return min(max(new_fans, 0.0), cap)
+
+
+def naming_fee(cfg: dict, capacity: int, fans: float, heat: float) -> float:
+    """冠名报价/窗口 = (基准 + 容量系数×容量万 + 死忠系数×死忠万) × 热度。"""
+    base = float(cfg.get("naming_base", 0.5))
+    per_cap = float(cfg.get("naming_per_capacity_wan", 0.3))
+    per_fans = float(cfg.get("naming_per_fans_wan", 0.12))
+    return round((base + per_cap * (capacity / 10000.0) + per_fans * (fans / 10000.0)) * heat, 3)
+
+
+def activity_income(cfg: dict, activity_type: str, pitch_level: int = 0, youth_level: int = 0) -> dict:
+    """档期活动结算；返回 {income, extra_maintenance}（演唱会草皮损坏概率受草皮级影响）。"""
+    config = parse_json_object(cfg.get("activity_config", {}))
+    act = config.get(activity_type, {})
+    if not act:
+        return {"income": 0.0, "extra_maintenance": 0.0}
+    income = float(act.get("income", 0.0))
+    if "income_min" in act and "income_max" in act:
+        income = random.uniform(float(act["income_min"]), float(act["income_max"]))
+    extra = 0.0
+    prob = float(act.get("pitch_damage_prob", 0.0))
+    if prob > 0:
+        effects = facility_effects(cfg)
+        pitch = effects.get(FACILITY_PITCH, {})
+        reduction = float(pitch.get("damage_reduction_per_level", 0.15))
+        prob = max(0.0, prob * (1.0 - reduction * pitch_level))
+        if random.random() < prob:
+            extra = random.uniform(float(act.get("damage_min", 0.0)), float(act.get("damage_max", 0.0)))
+    if activity_type == "concert":
+        effects = facility_effects(cfg)
+        pitch = effects.get(FACILITY_PITCH, {})
+        boost = float(pitch.get("concert_boost_per_level", 0.1))
+        income *= 1.0 + boost * pitch_level
+    if activity_type == "youth_camp":
+        factor = float(act.get("youth_level_factor", 0.0))
+        income = income * (1.0 + factor * youth_level)
+    return {"income": round(income, 3), "extra_maintenance": round(extra, 3)}
+
+
+def activity_names(cfg: dict) -> dict[str, str]:
+    """活动类型 → 展示名。"""
+    config = parse_json_object(cfg.get("activity_config", {}))
+    return {k: str(v.get("name", k)) for k, v in config.items()}

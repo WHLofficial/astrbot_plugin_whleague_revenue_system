@@ -1,0 +1,284 @@
+{
+  "group_whitelist": {
+    "description": "群白名单",
+    "hint": "允许使用本插件的群 ID 列表（JSON 数组或逗号分隔），为空表示所有群可用。",
+    "type": "list",
+    "default": []
+  },
+  "negotiation_db_path": {
+    "description": "谈判系统数据库路径",
+    "hint": "只读谈判系统数据库用于球队/绑定校验；留空则自动探测 AstrBot 数据目录。",
+    "type": "string",
+    "default": ""
+  },
+  "tier_table": {
+    "description": "球场等级表",
+    "hint": "内部参数，请勿修改。JSON：等级→{名称,座位下限,座位上限,半赛季基础维护,每万座每场维护,上座系数,升级费}。",
+    "type": "string",
+    "default": "{\"0\":{\"name\":\"社区级\",\"min_seats\":12000,\"max_seats\":25000,\"base_maintenance\":2.0,\"per_10k_rate\":0.8,\"attend_coef\":1.0,\"upgrade_cost\":3.0},\"1\":{\"name\":\"地区级\",\"min_seats\":20000,\"max_seats\":35000,\"base_maintenance\":5.0,\"per_10k_rate\":0.55,\"attend_coef\":1.1,\"upgrade_cost\":4.5},\"2\":{\"name\":\"大区级\",\"min_seats\":25000,\"max_seats\":45000,\"base_maintenance\":8.0,\"per_10k_rate\":0.35,\"attend_coef\":1.2,\"upgrade_cost\":6.0},\"3\":{\"name\":\"国家级\",\"min_seats\":35000,\"max_seats\":60000,\"base_maintenance\":11.0,\"per_10k_rate\":0.28,\"attend_coef\":1.3,\"upgrade_cost\":10.0},\"4\":{\"name\":\"国际级\",\"min_seats\":50000,\"max_seats\":100000,\"base_maintenance\":14.0,\"per_10k_rate\":0.2,\"attend_coef\":1.4,\"upgrade_cost\":0.0}}"
+  },
+  "weather_probabilities": {
+    "description": "天气概率",
+    "hint": "内部参数，请勿修改。JSON：天气→概率（需加和为 1）。",
+    "type": "string",
+    "default": "{\"晴\":0.35,\"多云\":0.30,\"雨\":0.25,\"雪\":0.10}"
+  },
+  "weather_ranges": {
+    "description": "天气系数区间",
+    "hint": "内部参数，请勿修改。JSON：天气→[下限,上限]，区间内均匀取值。",
+    "type": "string",
+    "default": "{\"晴\":[1.05,1.25],\"多云\":[0.90,1.04],\"雨\":[0.80,0.89],\"雪\":[0.75,0.79]}"
+  },
+  "form_coef_table": {
+    "description": "近3场战绩系数表",
+    "hint": "内部参数，请勿修改。JSON：Pts→上座系数。",
+    "type": "string",
+    "default": "{\"0\":0.7,\"1\":0.74,\"2\":0.85,\"3\":0.94,\"4\":1.0,\"5\":1.04,\"6\":1.1,\"7\":1.19,\"8\":1.22,\"9\":1.25}"
+  },
+  "default_influence": {
+    "description": "默认影响力",
+    "hint": "球队无影响力记录时使用的默认值（管理员未导入前）。",
+    "type": "float",
+    "default": 90.0
+  },
+  "fans_per_influence": {
+    "description": "死忠系数",
+    "hint": "死忠目标 = 影响力 × 该系数。",
+    "type": "float",
+    "default": 20.0
+  },
+  "fans_cap": {
+    "description": "死忠上限",
+    "hint": "死忠球迷人数上限（防御事件刷爆）。",
+    "type": "int",
+    "default": 10000
+  },
+  "fans_grow_rate": {
+    "description": "涨粉速率",
+    "hint": "涨粉方向每窗口向目标靠拢的基础比例。",
+    "type": "float",
+    "default": 0.5
+  },
+  "fans_grow_heat_base": {
+    "description": "涨粉热度基准",
+    "hint": "涨粉系数 = 速率 × (基准 + 跨度×上座率)。",
+    "type": "float",
+    "default": 0.6
+  },
+  "fans_grow_heat_span": {
+    "description": "涨粉热度跨度",
+    "hint": "涨粉系数 = 速率 × (基准 + 跨度×上座率)。",
+    "type": "float",
+    "default": 0.4
+  },
+  "fans_drop_rate": {
+    "description": "掉粉速率",
+    "hint": "掉粉方向每窗口向目标靠拢的基础比例。",
+    "type": "float",
+    "default": 0.5
+  },
+  "fans_drop_heat_extra": {
+    "description": "掉粉空场加速",
+    "hint": "掉粉系数 = 速率 × (1 + 加速×(1−上座率))，上座率越差跑得越快。",
+    "type": "float",
+    "default": 0.8
+  },
+  "attendance_multiplier_base": {
+    "description": "上座倍数基准",
+    "hint": "上座倍数 = 基准 × (1 + 每级系数×等级)。",
+    "type": "float",
+    "default": 4.0
+  },
+  "attendance_multiplier_per_tier": {
+    "description": "上座倍数每级系数",
+    "hint": "上座倍数 = 基准 × (1 + 每级系数×等级)。",
+    "type": "float",
+    "default": 0.35
+  },
+  "ticket_revenue_per_10k": {
+    "description": "票收基准",
+    "hint": "每万上座每场门票收入（M）。",
+    "type": "float",
+    "default": 1.5
+  },
+  "commercial_per_10k_per_level": {
+    "description": "商业区单级加成",
+    "hint": "商业区每级每万上座的额外收入（M）。",
+    "type": "float",
+    "default": 0.1
+  },
+  "broadcast_per_match_per_level": {
+    "description": "转播单级加成",
+    "hint": "灯光转播每级每主场的转播收入（M）。",
+    "type": "float",
+    "default": 0.3
+  },
+  "expansion_cost_per_100": {
+    "description": "扩建单价",
+    "hint": "每 100 座位的扩建费用（M）。",
+    "type": "float",
+    "default": 0.1
+  },
+  "facility_upgrade_costs": {
+    "description": "子设施升级费用",
+    "hint": "每级费用（M），逗号分隔：1级,2级,3级,4级,5级。",
+    "type": "string",
+    "default": "3,5,8,12,16"
+  },
+  "facility_effects": {
+    "description": "子设施效果参数",
+    "hint": "内部参数，请勿修改。JSON。",
+    "type": "string",
+    "default": "{\"commercial\":{\"per_10k_per_level\":0.1},\"broadcast\":{\"per_match_per_level\":0.3},\"pitch\":{\"damage_reduction_per_level\":0.15,\"concert_boost_per_level\":0.1},\"youth\":{\"growth_boost_per_level\":0.03},\"medical\":{\"negative_event_reduction_per_level\":0.05}}"
+  },
+  "naming_base": {
+    "description": "冠名报价基准",
+    "hint": "冠名报价/窗口 = (基准 + 容量系数×容量万 + 球迷系数×死忠万) × 品牌热度。",
+    "type": "float",
+    "default": 0.5
+  },
+  "naming_per_capacity_wan": {
+    "description": "冠名容量系数",
+    "hint": "冠名报价中的容量项系数（每万座）。",
+    "type": "float",
+    "default": 0.3
+  },
+  "naming_per_fans_wan": {
+    "description": "冠名球迷系数",
+    "hint": "冠名报价中的死忠项系数（每万死忠）。",
+    "type": "float",
+    "default": 0.12
+  },
+  "naming_windows": {
+    "description": "冠名合同窗口数",
+    "hint": "冠名合同默认持续窗口数。",
+    "type": "int",
+    "default": 4
+  },
+  "naming_terminate_penalty": {
+    "description": "冠名解约赔偿比例",
+    "hint": "提前解约需赔付剩余窗口费用的比例。",
+    "type": "float",
+    "default": 0.3
+  },
+  "naming_fans_drop_threshold": {
+    "description": "品牌解约球迷跌幅阈值",
+    "hint": "单窗口死忠跌幅达到该比例时品牌有概率主动解约。",
+    "type": "float",
+    "default": 0.3
+  },
+  "naming_terminate_probability": {
+    "description": "品牌主动解约概率",
+    "hint": "触发球迷暴跌条件后品牌主动解约的概率。",
+    "type": "float",
+    "default": 0.3
+  },
+  "event_hit_probability": {
+    "description": "事件命中概率",
+    "hint": "主场事件触发时每队抽到事件的最大概率（每队最多一条）。",
+    "type": "float",
+    "default": 0.4
+  },
+  "event_money_clamp": {
+    "description": "事件金额钳制",
+    "hint": "LLM 设计事件时单次金钱效果绝对值上限（M）。",
+    "type": "float",
+    "default": 8.0
+  },
+  "event_fans_clamp": {
+    "description": "事件球迷钳制",
+    "hint": "LLM 设计事件时死忠百分比效果绝对值上限。",
+    "type": "float",
+    "default": 0.05
+  },
+  "event_maintenance_clamp": {
+    "description": "事件维护钳制",
+    "hint": "LLM 设计事件时维护支出绝对值上限（M）。",
+    "type": "float",
+    "default": 5.0
+  },
+  "activity_slots": {
+    "description": "档期数量",
+    "hint": "每窗口非比赛日档期数量。",
+    "type": "int",
+    "default": 2
+  },
+  "activity_config": {
+    "description": "档期活动参数",
+    "hint": "内部参数，请勿修改。JSON：活动类型→参数。",
+    "type": "string",
+    "default": "{\"concert\":{\"name\":\"演唱会\",\"income_min\":3.0,\"income_max\":8.0,\"pitch_damage_prob\":0.15,\"damage_min\":2.0,\"damage_max\":5.0},\"esports\":{\"name\":\"电竞赛事\",\"income_min\":2.0,\"income_max\":4.0},\"open_day\":{\"name\":\"球迷开放日\",\"income\":0.5,\"fans_pct\":0.05},\"youth_camp\":{\"name\":\"青训夏令营\",\"income\":1.0,\"youth_level_factor\":0.1},\"idle\":{\"name\":\"空置\",\"income\":0.0}}"
+  },
+  "rename_fee": {
+    "description": "改名费用",
+    "hint": "球场改名费用（M），首次免费。",
+    "type": "float",
+    "default": 2.0
+  },
+  "start_funds": {
+    "description": "启动资金",
+    "hint": "球场初始化时发放的余额（M）。",
+    "type": "float",
+    "default": 50.0
+  },
+  "build_credit_enabled": {
+    "description": "建设券返还",
+    "hint": "是否启用建设券（扩建/升级支出返还比例）。",
+    "type": "bool",
+    "default": true
+  },
+  "build_credit_ratio": {
+    "description": "建设券返还比例",
+    "hint": "扩建/升级支出的返还比例，返还部分仅可抵扣后续建设支出。",
+    "type": "float",
+    "default": 0.25
+  },
+  "max_open_tier": {
+    "description": "可导入最高等级",
+    "hint": "管理员可导入的球场等级上限（等级推进节奏控制）。",
+    "type": "int",
+    "default": 1
+  },
+  "llm_flavor_enabled": {
+    "description": "LLM 事件文案",
+    "hint": "是否用 LLM 生成事件播报文案（失败自动回退模板文案）。",
+    "type": "bool",
+    "default": true
+  },
+  "llm_design_enabled": {
+    "description": "LLM 事件/品牌设计",
+    "hint": "是否允许 LLM 起草事件与品牌（管理员采纳后才生效）。",
+    "type": "bool",
+    "default": true
+  },
+  "llm_max_calls": {
+    "description": "单次结算 LLM 调用上限",
+    "hint": "单次事件触发中最多调用 LLM 的次数，超限部分使用模板文案。",
+    "type": "int",
+    "default": 8
+  },
+  "llm_timeout_seconds": {
+    "description": "LLM 超时秒数",
+    "hint": "单次 LLM 调用超时时间，超时回退模板。",
+    "type": "int",
+    "default": 15
+  },
+  "backup_enabled": {
+    "description": "自动备份",
+    "hint": "是否启用每日自动备份。",
+    "type": "bool",
+    "default": true
+  },
+  "backup_time": {
+    "description": "备份时间",
+    "hint": "每日自动备份时间（HH:MM，宿主本地时区）。",
+    "type": "string",
+    "default": "04:00"
+  },
+  "backup_keep_count": {
+    "description": "备份保留份数",
+    "hint": "备份目录最多保留的备份文件数，超限自动删除最旧。",
+    "type": "int",
+    "default": 30
+  }
+}

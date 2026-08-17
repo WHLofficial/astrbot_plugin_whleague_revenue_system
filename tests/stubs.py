@@ -1,0 +1,63 @@
+"""astrbot.api 桩：测试环境无 AstrBot 运行时，替换 logger/event/star 依赖。
+
+安全说明：本模块仅存在于 tests/ 目录，不随插件运行加载。
+"""
+
+import sys
+import types
+
+
+class _Logger:
+    def debug(self, *a, **k):
+        pass
+
+    def info(self, *a, **k):
+        pass
+
+    def warning(self, *a, **k):
+        pass
+
+    def error(self, *a, **k):
+        pass
+
+
+class _Star:
+    def __init__(self, context=None):
+        self.context = context
+
+
+def install_stubs():
+    if "astrbot" in sys.modules:
+        return
+    astrbot_pkg = types.ModuleType("astrbot")
+    astrbot_pkg.__path__ = []
+    api_pkg = types.ModuleType("astrbot.api")
+    api_pkg.logger = _Logger()
+
+    event_pkg = types.ModuleType("astrbot.api.event")
+    event_pkg.MessageEventResult = types.SimpleNamespace
+    event_pkg.MessageChain = types.SimpleNamespace
+    event_pkg.AstrMessageEvent = object
+
+    filter_mod = types.ModuleType("astrbot.api.event.filter")
+    filter_mod.regex = lambda *a, **k: (lambda fn: fn)
+    filter_mod.command = lambda *a, **k: (lambda fn: fn)
+    filter_mod.event_message_type = lambda *a, **k: (lambda fn: fn)
+    filter_mod.EventMessageType = types.SimpleNamespace(GROUP_MESSAGE="group_message")
+    event_pkg.filter = filter_mod
+    sys.modules["astrbot.api.event.filter"] = filter_mod
+
+    star_pkg = types.ModuleType("astrbot.api.star")
+    star_pkg.Context = object
+    star_pkg.Star = _Star
+    star_pkg.register = lambda *a, **k: (lambda cls: cls)
+    sys.modules["astrbot.api.star"] = star_pkg
+
+    mc_pkg = types.ModuleType("astrbot.api.message_components")
+    mc_pkg.File = object
+    mc_pkg.Plain = object
+    sys.modules["astrbot.api.message_components"] = mc_pkg
+
+    sys.modules["astrbot"] = astrbot_pkg
+    sys.modules["astrbot.api"] = api_pkg
+    sys.modules["astrbot.api.event"] = event_pkg
