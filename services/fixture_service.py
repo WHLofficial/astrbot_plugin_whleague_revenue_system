@@ -185,7 +185,8 @@ class FixtureService:
     async def resolve_round_arg(self, token) -> tuple[str, int]:
         """解析命令里的轮次参数：带数字走 parse_round_token；纯文字按登记表取轮次号。
 
-        纯文字轮次与导入时同名登记恒为同一号（同一赛季内），供天气/赛果/统计使用。
+        只读：纯文字轮次未登记（尚未导入）时直接报错，不自动创建登记（避免拼错留幽灵记录）；
+        登记只在导入时由 _normalize_round_tokens 建立。
         """
         s = str(token or "").strip()
         if not s:
@@ -198,7 +199,9 @@ class FixtureService:
                 raise ValueError(f"轮次需为正数: {token}")
             return comp, round_no
         season = (await self.get_state())["season_number"]
-        round_no = await self._dao.add_named_round(season, s)
+        round_no = await self._dao.get_named_round(season, s)
+        if round_no is None:
+            raise ValueError(f"命名轮次「{s}」尚未导入赛程，请先导入或改用数字轮次（如 顶级9）")
         return comp, round_no
 
     async def _normalize_round_tokens(self, text: str) -> str:

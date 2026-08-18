@@ -236,9 +236,18 @@ async def test_named_round_same_name_same_round():
         rs = await env.fixture_service.round_stats(round_no, comp)
         assert rs["totals"]["attendance"] > 0
 
-        # 不同名（次级）→ 递增分配新号
+        # 不同名（次级）→ 递增分配新号（先导入完成登记；命令侧只读）
+        r_sub = await env.fixture_service.import_fixtures("次级 巴塞罗那 利物浦")
+        assert r_sub["imported"] == 1, r_sub
         comp2, no2 = await env.fixture_service.resolve_round_arg("次级")
         assert (comp2, no2) == ("次级联赛", 2)
+
+        # 未登记的命名轮次（命令侧只读）应报错而非自动建号
+        try:
+            await env.fixture_service.resolve_round_arg("冠军")
+            assert False, "未登记的命名轮次应报错"
+        except ValueError as e:
+            assert "尚未导入" in str(e)
 
         # 与显式数字混排：数字不入登记表、纯文字稳定取登记号
         r2 = await env.fixture_service.import_fixtures("顶级9 利物浦 巴塞罗那\n")

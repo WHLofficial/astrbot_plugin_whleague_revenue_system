@@ -163,7 +163,12 @@ async def test_fixture_file_named_round_no_digit():
             assert {m["round_no"] for m in matches} == {1}
             assert {m["competition"] for m in matches} == {"顶级联赛"}
             assert await env.fixture_service.resolve_round_arg("顶级") == ("顶级联赛", 1)
-            assert await env.fixture_service.resolve_round_arg("次级") == ("次级联赛", 2)
+            # 未登记的命名轮次（命令侧只读）应报错而非自动建号
+            try:
+                await env.fixture_service.resolve_round_arg("次级")
+                assert False, "未登记的命名轮次应报错"
+            except ValueError as e:
+                assert "尚未导入" in str(e)
         finally:
             p.unlink(missing_ok=True)
     finally:
