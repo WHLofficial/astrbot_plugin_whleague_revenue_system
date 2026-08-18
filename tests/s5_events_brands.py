@@ -9,6 +9,45 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from tests.common import TestEnv  # noqa: E402
 
 
+class _RetryProvider:
+    """首次返回空（模拟空内容），第二次起返回预设 JSON。"""
+
+    def __init__(self, response: str):
+        self._response = response
+        self.calls = 0
+        self.prompts = []
+
+    async def text_chat(self, prompt, session_id=""):
+        self.calls += 1
+        self.prompts.append(prompt)
+        if self.calls == 1:
+            return type("R", (), {"result_str": ""})()
+        return type("R", (), {"result_str": self._response})()
+
+
+class _EmptyProvider:
+    def __init__(self):
+        self.calls = 0
+
+    async def text_chat(self, prompt, session_id=""):
+        self.calls += 1
+        return type("R", (), {"result_str": ""})()
+
+
+class _CaptureProvider:
+    """记录每次 prompt，便于断言 prompt 内容。"""
+
+    def __init__(self, response: str):
+        self._response = response
+        self.prompts = []
+        self.calls = 0
+
+    async def text_chat(self, prompt, session_id=""):
+        self.calls += 1
+        self.prompts.append(prompt)
+        return type("R", (), {"result_str": self._response})()
+
+
 async def test_default_event_pool():
     env = await TestEnv().setup()
     try:
@@ -426,5 +465,50 @@ async def test_choice_import_batch_and_validation():
             raise AssertionError("已结算选择应拒绝修改")
         except Exception:
             pass
+    finally:
+        await env.teardown()
+
+
+async def test_llm_design_retry_on_empty_once():
+    env = await TestEnv().setup()
+    try:
+        prov = _RetryProvider('[{"name":"雨天免费","category":"天气","weight":5,'
+                              '"event_type":"instant","effects":{"money":1},"template":"t"}]')
+        env.provider = prov
+        drafts = await env.event_engine.generate_drafts(1)
+        # 首次空内容自动重试一次后成功
+        assert len(drafts) == 1 and prov.calls == 2
+        # 持续为空 → 明确报「未返回内容」
+        empty = _EmptyProvider()
+        env.provider = empty
+        try:
+            await env.event_engine.generate_drafts(1)
+            raise AssertionError("持续空内容应报错")
+        except Exception as e:
+            assert "未返回内容" in str(e)
+        assert empty.calls == 2
+    finally:
+        await env.teardown()
+
+
+async def test_llm_design_prompt_uses_single_brace():
+    env = await TestEnv().setup()
+    try:
+        prov = _CaptureProvider('[{"name":"占位事件","category":"c","weight":5,'
+                                '"event_type":"choice","template":"","options":['
+                                '{"name":"甲","desc":"","outcomes":[{"w":60,"effects":{"money":1}},'
+                                '{"w":40,"effects":{"money":-1}}]},'
+                                '{"name":"乙","desc":"","outcomes":[{"w":60,"effects":{"money":1}},'
+                                '{"w":40,"effects":{"money":-1}}]}]}]')
+        env.provider = prov
+        drafts = await env.event_engine.generate_drafts(1)
+        assert len(drafts) == 1 and drafts[0]["event_type"] == "choice"
+        prompt = prov.prompts[0]
+        # 设计 prompt 中的占位符必须是单花括号（普通字符串非 f-string），不能出现双花括号
+        assert "{{team}}" not in prompt and "{{stadium}}" not in prompt
+        assert "{team}" in prompt and "{stadium}" in prompt
+        # 草稿持久化后 template 同样为单花括号（_fill_template 才能替换）
+        pending = await env.dao.list_events("pending")
+        assert "{team}" in pending[0]["template"] and "{{team}}" not in pending[0]["template"]
     finally:
         await env.teardown()

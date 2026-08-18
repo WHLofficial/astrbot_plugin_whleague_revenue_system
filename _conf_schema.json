@@ -271,9 +271,9 @@
   },
   "llm_timeout_seconds": {
     "description": "LLM 超时秒数",
-    "hint": "单次 LLM 调用超时时间，超时回退模板。",
+    "hint": "单次 LLM 调用超时时间（事件设计等长 prompt 建议 ≥60s），超时回退模板。",
     "type": "int",
-    "default": 15
+    "default": 60
   },
   "backup_enabled": {
     "description": "自动备份",

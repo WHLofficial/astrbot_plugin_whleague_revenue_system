@@ -24,19 +24,40 @@ class LlmWriter:
         return bool(self._cfg.get("llm_design_enabled", True))
 
     async def _ask(self, prompt: str) -> str | None:
+        """发起 LLM 调用；失败/空内容返回 None 并分类告警（便于归因）。"""
         try:
             provider = self._get_provider()
             if provider is None:
+                logger.warning(
+                    "LLM provider 不可用（未配置，或 AstrBot 未选用可用模型），"
+                    "本次调用跳过（prompt %d 字符）。",
+                    len(prompt),
+                )
                 return None
-            timeout = float(self._cfg.get("llm_timeout_seconds", 15))
-            result = await asyncio.wait_for(
-                provider.text_chat(prompt, session_id="whl_stadium_llm"),
-                timeout=timeout,
-            )
+            timeout = float(self._cfg.get("llm_timeout_seconds", 60))
+            try:
+                result = await asyncio.wait_for(
+                    provider.text_chat(prompt, session_id="whl_stadium_llm"),
+                    timeout=timeout,
+                )
+            except TimeoutError:
+                logger.warning(
+                    "LLM 调用超时（>%gs，可通过配置 llm_timeout_seconds 调大）。",
+                    timeout,
+                )
+                return None
             text = getattr(result, "result_str", None)
-            if not text:
+            if text is None:
+                logger.warning(
+                    "LLM 返回对象缺少 result_str 字段（prompt %d 字符），视为空内容。",
+                    len(prompt),
+                )
                 return None
-            return str(text).strip()
+            text = str(text).strip()
+            if not text:
+                logger.warning("LLM 返回空内容（prompt %d 字符）。", len(prompt))
+                return None
+            return text
         except Exception as e:
             logger.warning(f"LLM call failed: {e}")
             return None
@@ -59,6 +80,7 @@ class LlmWriter:
         )
         text = await self._ask(prompt)
         if not text:
+            logger.warning("事件文案 LLM 调用无内容，回退模板（%s·%s）。", team, name)
             return _fill_template(template, team, stadium_name)
         return _fill_template(text[:120], team, stadium_name)
 
@@ -75,18 +97,21 @@ class LlmWriter:
             f"主题：{topic or '不限'}。输出 JSON 数组，每个元素二选一：\n"
             "一、即发事件：{\"event_type\":\"instant\",\"name\":\"事件名\",\"category\":\"分类\","
             "\"weight\":权重整数1-100,\"effects\":{\"money\":金额M,\"fans_pct\":死忠比例小数如0.03,"
-            "\"maintenance\":维护额外支出M},\"template\":\"带{{team}}和{{stadium}}占位符的播报文案\"}\n"
+            "\"maintenance\":维护额外支出M},\"template\":\"带{team}和{stadium}占位符的播报文案\"}\n"
             "二、选择事件：{\"event_type\":\"choice\",\"name\":\"事件名\",\"category\":\"分类\","
             "\"weight\":权重整数1-100,\"template\":\"…\",\"options\":[{\"name\":\"操作1\","
             "\"desc\":\"简短说明\",\"outcomes\":[{\"w\":概率权重整数,\"effects\":{同上效果}},…]},…]}\n"
             "选择事件需要 2~4 个选项，每个选项 2 条以上概率结果，概率权重为相对大小（会自动归一化）；"
             "每个选项的高低概率路径应尽量一正一负。\n"
             f"金额绝对值不要超过 {money_clamp}M，死忠百分比绝对值不要超过 {fans_clamp}，"
-            f"维护不超过 {maintenance_clamp}M。只输出 JSON 数组。"
+            f"维护不超过 {maintenance_clamp}M。只输出 JSON 数组本身，不要任何解释或多余文字。"
         )
         text = await self._ask(prompt)
         if not text:
-            raise RuntimeError("LLM 未返回内容")
+            logger.warning("LLM 事件设计首次调用无内容，重试一次……")
+            text = await self._ask(prompt)
+        if not text:
+            raise RuntimeError("LLM 未返回内容（已重试 1 次，详见日志）")
         raw = _extract_json(text)
         if not isinstance(raw, list):
             raise RuntimeError("LLM 返回格式不是 JSON 数组")
@@ -113,7 +138,10 @@ class LlmWriter:
         )
         text = await self._ask(prompt)
         if not text:
-            raise RuntimeError("LLM 未返回内容")
+            logger.warning("LLM 品牌设计首次调用无内容，重试一次……")
+            text = await self._ask(prompt)
+        if not text:
+            raise RuntimeError("LLM 未返回内容（已重试 1 次，详见日志）")
         raw = _extract_json(text)
         if not isinstance(raw, list):
             raise RuntimeError("LLM 返回格式不是 JSON 数组")
@@ -148,10 +176,12 @@ def _clamp_effects(effects, money_clamp: float, fans_clamp: float, maintenance_c
     fans_pct = max(-fans_clamp, min(fans_clamp, float(effects.get("fans_pct", 0.0))))
     # 维护只允许支出（0 ~ 上限），不允许负维护退款
     maintenance = max(0.0, min(maintenance_clamp, float(effects.get("maintenance", 0.0))))
+    out = {"money": round(money, 3), "fans_pct": round(fans_pct, 4),
+           "maintenance": round(maintenance, 3)}
     attendance = float(effects.get("attendance_mod", 1.0))
-    attendance = 1.0 if attendance == 1.0 else max(0.5, min(2.0, attendance))
-    return {"money": round(money, 3), "fans_pct": round(fans_pct, 4),
-            "maintenance": round(maintenance, 3), "attendance_mod": round(attendance, 3)}
+    if attendance != 1.0:
+        out["attendance_mod"] = round(max(0.5, min(2.0, attendance)), 3)
+    return out
 
 
 def _clamp_choice_event(d, money_clamp: float, fans_clamp: float, maintenance_clamp: float) -> dict:
