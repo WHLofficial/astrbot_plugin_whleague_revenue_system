@@ -143,10 +143,10 @@ async def test_round_chart_full_columns():
         await env.stadium_service.import_attributes("利物浦", influence=150.0)
         await env.stadium_service.import_attributes("巴塞罗那", influence=120.0)
         await env.fixture_service.import_fixtures("顶级9 利物浦 巴塞罗那 W12 D6 15:00")
-        await env.fixture_service.set_weather(9, "利物浦", "晴", "顶级联赛")
-        await env.fixture_service.record_results(9, "利物浦 胜 2-1", "顶级联赛")
+        await env.fixture_service.set_weather(1, "利物浦", "晴", "顶级联赛")
+        await env.fixture_service.record_results(1, "利物浦 胜 2-1", "顶级联赛")
         svc = ChartService(env.db, env.dao, env.cfg)
-        path = await svc.render_round_chart(9, "顶级联赛")
+        path = await svc.render_round_chart(1, "顶级联赛")
         assert _png_ok(path), path
         from PIL import Image
 
@@ -170,9 +170,9 @@ async def test_preview_chart_renders():
             "顶级9 利物浦 巴塞罗那 W12 D6 15:00\n顶级9 纽卡斯尔联 勒沃库森 W12 D6 20:00\n"
         )
         # 只预报第一场，第二场留「待预报」
-        await env.fixture_service.set_weather(9, "利物浦", "晴", "顶级联赛")
+        await env.fixture_service.set_weather(1, "利物浦", "晴", "顶级联赛")
         svc = ChartService(env.db, env.dao, env.cfg)
-        path = await svc.render_round_preview_chart(9, "顶级联赛")
+        path = await svc.render_round_preview_chart(1, "顶级联赛")
         assert _png_ok(path), path
         from PIL import Image
 
@@ -227,17 +227,21 @@ async def test_chart_competition_colors():
             "顶级9 利物浦 巴塞罗那\n次级9 纽卡斯尔联 勒沃库森\n冠军3 利物浦 勒沃库森\n"
         )
         assert r["imported"] == 3, r
+        comp_top, rn_top = await env.fixture_service.resolve_round_arg("顶级9")
+        comp_sub, rn_sub = await env.fixture_service.resolve_round_arg("次级9")
+        comp_cup, rn_cup = await env.fixture_service.resolve_round_arg("冠军3")
+        assert (rn_top, rn_sub, rn_cup) == (1, 1, 1)
         for rnd, comp, line in [
-            (9, "顶级联赛", "利物浦 胜"),
-            (9, "次级联赛", "纽卡斯尔联 平"),
-            (3, "冠军杯", "利物浦 负"),
+            (rn_top, comp_top, "利物浦 胜"),
+            (rn_sub, comp_sub, "纽卡斯尔联 平"),
+            (rn_cup, comp_cup, "利物浦 负"),
         ]:
             await env.fixture_service.set_weather(rnd, line.split()[0], "晴", comp)
             await env.fixture_service.record_results(rnd, line, comp)
         svc = ChartService(env.db, env.dao, env.cfg)
-        p_top = await svc.render_round_chart(9, "顶级联赛")
-        p_sub = await svc.render_round_chart(9, "次级联赛")
-        p_cup = await svc.render_round_chart(3, "冠军杯")
+        p_top = await svc.render_round_chart(rn_top, comp_top)
+        p_sub = await svc.render_round_chart(rn_sub, comp_sub)
+        p_cup = await svc.render_round_chart(rn_cup, comp_cup)
         assert _color_count(p_top, ORANGE) > 200, "顶级联赛应为橙色表头"
         assert _color_count(p_sub, PURPLE) > 200, "次级联赛应为紫色表头"
         assert _color_count(p_cup, GREEN) > 200, "冠军杯应为绿色表头"
@@ -245,8 +249,10 @@ async def test_chart_competition_colors():
         assert _color_count(p_sub, ORANGE) == 0, "次级图不应出现橙色"
         # 默认联赛（无前缀）用绿色
         await env.fixture_service.import_fixtures("1 利物浦 巴塞罗那")
-        await env.fixture_service.record_results(1, "利物浦 胜")
-        p_league = await svc.render_round_chart(1)
+        comp_ln, rn_ln = await env.fixture_service.resolve_round_arg("1")
+        assert comp_ln == "联赛" and rn_ln == 1, (comp_ln, rn_ln)
+        await env.fixture_service.record_results(rn_ln, "利物浦 胜", "联赛")
+        p_league = await svc.render_round_chart(rn_ln, "联赛")
         assert _color_count(p_league, GREEN) > 200, "默认联赛应为绿色表头"
     finally:
         await env.teardown()
@@ -385,10 +391,10 @@ async def test_chart_long_team_names_and_preview_height():
         for team, inf in [(long_a, 150.0), (long_b, 130.0)]:
             await env.stadium_service.import_attributes(team, influence=inf)
         await env.fixture_service.import_fixtures(f"顶级9 {long_a} {long_b}\n")
-        await env.fixture_service.set_weather(9, long_a, "晴", "顶级联赛")
-        await env.fixture_service.record_results(9, f"{long_a} 胜 2-1", "顶级联赛")
+        await env.fixture_service.set_weather(1, long_a, "晴", "顶级联赛")
+        await env.fixture_service.record_results(1, f"{long_a} 胜 2-1", "顶级联赛")
         svc = ChartService(env.db, env.dao, env.cfg)
-        pv = await svc.render_round_preview_chart(9, "顶级联赛")
+        pv = await svc.render_round_preview_chart(1, "顶级联赛")
         assert _png_ok(pv), pv
         im = Image.open(pv)
         try:
@@ -397,7 +403,7 @@ async def test_chart_long_team_names_and_preview_height():
             im.close()
         # 单场预告图高度 = content*2 + 10（无底部多余 pad）
         assert h == 406, f"预告图高度应为紧致 406，实为 {w}x{h}"
-        rp = await svc.render_round_chart(9, "顶级联赛")
+        rp = await svc.render_round_chart(1, "顶级联赛")
         assert _png_ok(rp), rp
     finally:
         await env.teardown()
@@ -413,9 +419,9 @@ async def test_preview_chart_weather_block_present():
         await env.fixture_service.import_fixtures(
             "顶级9 利物浦 巴塞罗那 W12 D6 15:00\n顶级9 纽卡斯尔联 勒沃库森 W12 D6 20:00\n"
         )
-        await env.fixture_service.set_weather(9, "利物浦", "晴", "顶级联赛")
+        await env.fixture_service.set_weather(1, "利物浦", "晴", "顶级联赛")
         svc = ChartService(env.db, env.dao, env.cfg)
-        pv = await svc.render_round_preview_chart(9, "顶级联赛")
+        pv = await svc.render_round_preview_chart(1, "顶级联赛")
         assert _png_ok(pv), pv
         assert _header_band_count(pv, ORANGE) >= 2, "预告图应含对阵表 + 天气两个表头色带"
     finally:

@@ -128,8 +128,13 @@ async def test_fixture_file_competition_token():
             result = await env.fixture_service.import_fixtures_file(str(p))
             assert result["imported"] == 2, result
             assert result["file_errors"] == [], result
-            top = await env.dao.get_round_matches(1, 1, 9, "顶级联赛")
-            sub = await env.dao.get_round_matches(1, 1, 9, "次级联赛")
+            # 顶级9/次级9 是各自赛事首个轮次文本 → 各赛事内第 1 轮
+            comp_top, rn_top = await env.fixture_service.resolve_round_arg("顶级9")
+            comp_sub, rn_sub = await env.fixture_service.resolve_round_arg("次级9")
+            assert (comp_top, rn_top) == ("顶级联赛", 1)
+            assert (comp_sub, rn_sub) == ("次级联赛", 1)
+            top = await env.dao.get_round_matches(1, 1, rn_top, comp_top)
+            sub = await env.dao.get_round_matches(1, 1, rn_sub, comp_sub)
             assert len(top) == 1 and top[0]["competition"] == "顶级联赛"
             assert len(sub) == 1 and sub[0]["competition"] == "次级联赛"
         finally:

@@ -241,33 +241,35 @@ class StadiumDAO:
         finally:
             await cur.close()
 
-    # ─── 命名轮次登记（同名即为同一轮） ────────────────────
+    # ─── 命名轮次登记（同名即为同一轮，按（赛季,赛事）导入顺序定序） ──
 
-    async def get_named_round(self, season: int, token: str) -> int | None:
-        """查询命名轮次（纯文字轮次名）已登记的轮次号，未登记返回 None。"""
+    async def get_named_round(self, season: int, competition: str, token: str) -> int | None:
+        """查询命名轮次（轮次文本）已登记的轮次号，未登记返回 None。"""
         row = await self._db.fetchone(
-            "SELECT round_no FROM round_names WHERE season_number=? AND token=?",
-            (season, token),
+            "SELECT round_no FROM round_names WHERE season_number=? AND competition=? AND token=?",
+            (season, competition, token),
         )
         return int(row["round_no"]) if row else None
 
-    async def max_named_round_no(self, season: int) -> int:
-        """该赛季已登记的最大命名轮次号（无则 0）。"""
+    async def max_named_round_no(self, season: int, competition: str) -> int:
+        """该赛季该赛事已登记的最大轮次号（无则 0）。"""
         row = await self._db.fetchone(
-            "SELECT COALESCE(MAX(round_no), 0) AS m FROM round_names WHERE season_number=?",
-            (season,),
+            "SELECT COALESCE(MAX(round_no), 0) AS m FROM round_names "
+            "WHERE season_number=? AND competition=?",
+            (season, competition),
         )
         return int(row["m"]) if row else 0
 
-    async def add_named_round(self, season: int, token: str) -> int:
-        """登记命名轮次：已存在返回原号，否则分配下一个号并入库。"""
-        existing = await self.get_named_round(season, token)
+    async def add_named_round(self, season: int, competition: str, token: str) -> int:
+        """登记命名轮次：已存在返回原号，否则分配该赛事内下一个号并入库。"""
+        existing = await self.get_named_round(season, competition, token)
         if existing is not None:
             return existing
-        next_no = await self.max_named_round_no(season) + 1
+        next_no = await self.max_named_round_no(season, competition) + 1
         await self._db.execute(
-            "INSERT OR IGNORE INTO round_names (season_number, token, round_no) VALUES (?, ?, ?)",
-            (season, token, next_no),
+            "INSERT OR IGNORE INTO round_names (season_number, competition, token, round_no) "
+            "VALUES (?, ?, ?, ?)",
+            (season, competition, token, next_no),
         )
         return next_no
 

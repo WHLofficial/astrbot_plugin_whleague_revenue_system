@@ -176,40 +176,45 @@ async def test_schedule_fields_and_score():
 async def test_competitions_share_round_numbers():
     env = await TestEnv().setup()
     try:
-        # 顶级9 与 次级9 同窗口同轮次可共存，互不干扰
+        # 顶级9/次级9/冠军3 都是各自赛事的首个轮次文本 → 各赛事内均第 1 轮，同窗口共存互不干扰
         r = await env.fixture_service.import_fixtures(
             "顶级9 利物浦 巴塞罗那\n次级9 纽卡斯尔联 勒沃库森\n冠军3 利物浦 勒沃库森\n"
         )
         assert r["imported"] == 3, r
-        top = await env.dao.get_round_matches(1, 1, 9, "顶级联赛")
-        sub = await env.dao.get_round_matches(1, 1, 9, "次级联赛")
+        comp_top, rn_top = await env.fixture_service.resolve_round_arg("顶级9")
+        comp_sub, rn_sub = await env.fixture_service.resolve_round_arg("次级9")
+        comp_cup, rn_cup = await env.fixture_service.resolve_round_arg("冠军3")
+        assert (comp_top, rn_top) == ("顶级联赛", 1)
+        assert (comp_sub, rn_sub) == ("次级联赛", 1)
+        assert (comp_cup, rn_cup) == ("冠军杯", 1)
+        top = await env.dao.get_round_matches(1, 1, rn_top, comp_top)
+        sub = await env.dao.get_round_matches(1, 1, rn_sub, comp_sub)
         assert len(top) == 1 and top[0]["competition"] == "顶级联赛"
         assert len(sub) == 1 and sub[0]["competition"] == "次级联赛"
-        # 不带赛事过滤：同一轮次全是两赛事的比赛
-        all9 = await env.dao.get_round_matches(1, 1, 9)
-        assert len(all9) == 2
-        # 同名主队不同赛事可共存（利物浦在顶级9 和 冠军3 均主场）
-        assert len(await env.dao.get_round_matches(1, 1, 3, "冠军杯")) == 1
+        # 不带赛事过滤：同一轮次号下含三个赛事的比赛
+        assert len(await env.dao.get_round_matches(1, 1, 1)) == 3
+        # 同名主队不同赛事可共存（利物浦在顶级 和 冠军杯 均主场）
+        assert len(await env.dao.get_round_matches(1, 1, rn_cup, comp_cup)) == 1
 
         # 预报/天气/赛果/统计按赛事隔离
-        fc_top = await env.fixture_service.forecast_round(9, "顶级联赛")
+        fc_top = await env.fixture_service.forecast_round(rn_top, comp_top)
         assert len(fc_top["matches"]) == 1 and fc_top["matches"][0]["home"] == "利物浦"
-        fc_sub = await env.fixture_service.forecast_round(9, "次级联赛")
+        fc_sub = await env.fixture_service.forecast_round(rn_sub, comp_sub)
         assert len(fc_sub["matches"]) == 1
-        await env.fixture_service.set_weather(9, "利物浦", "晴", "顶级联赛")
-        top_m = await env.dao.get_round_matches(1, 1, 9, "顶级联赛")
+        await env.fixture_service.set_weather(rn_top, "利物浦", "晴", comp_top)
+        top_m = await env.dao.get_round_matches(1, 1, rn_top, comp_top)
         assert top_m[0]["weather"] == "晴"
         # 次级联赛的天气未被污染
-        sub_m = await env.dao.get_round_matches(1, 1, 9, "次级联赛")
+        sub_m = await env.dao.get_round_matches(1, 1, rn_sub, comp_sub)
         assert sub_m[0]["weather"] in ("晴", "多云", "雨", "雪")
 
-        rec = await env.fixture_service.record_results(9, "利物浦 胜\n", "顶级联赛")
+        rec = await env.fixture_service.record_results(rn_top, "利物浦 胜\n", comp_top)
         assert rec["count"] == 1
-        rs = await env.fixture_service.round_stats(9, "顶级联赛")
+        rs = await env.fixture_service.round_stats(rn_top, comp_top)
         assert rs["totals"]["attendance"] > 0
         assert rs["totals"]["ticket"] > 0
-        # 次级9 尚无赛果
-        rs_sub = await env.fixture_service.round_stats(9, "次级联赛")
+        # 次级 尚无赛果
+        rs_sub = await env.fixture_service.round_stats(rn_sub, comp_sub)
         assert rs_sub["totals"]["attendance"] == 0
     finally:
         await env.teardown()
@@ -236,11 +241,11 @@ async def test_named_round_same_name_same_round():
         rs = await env.fixture_service.round_stats(round_no, comp)
         assert rs["totals"]["attendance"] > 0
 
-        # 不同名（次级）→ 递增分配新号（先导入完成登记；命令侧只读）
+        # 不同名（次级）→ 各赛事从 1 起（先导入完成登记；命令侧只读）
         r_sub = await env.fixture_service.import_fixtures("次级 巴塞罗那 利物浦")
         assert r_sub["imported"] == 1, r_sub
         comp2, no2 = await env.fixture_service.resolve_round_arg("次级")
-        assert (comp2, no2) == ("次级联赛", 2)
+        assert (comp2, no2) == ("次级联赛", 1), (comp2, no2)
 
         # 未登记的命名轮次（命令侧只读）应报错而非自动建号
         try:
@@ -249,12 +254,13 @@ async def test_named_round_same_name_same_round():
         except ValueError as e:
             assert "尚未导入" in str(e)
 
-        # 与显式数字混排：数字不入登记表、纯文字稳定取登记号
+        # 与显式数字文本混排：「顶级9」是独立轮次文本，按（赛事,首现序）编号（不再按数字=9）
         r2 = await env.fixture_service.import_fixtures("顶级9 利物浦 巴塞罗那\n")
         assert r2["imported"] == 1, r2
-        assert await env.fixture_service.resolve_round_arg("顶级9") == ("顶级联赛", 9)
-        assert await env.dao.get_named_round(1, "顶级") == 1
-        assert await env.dao.get_named_round(1, "顶级9") is None
+        comp9, no9 = await env.fixture_service.resolve_round_arg("顶级9")
+        assert (comp9, no9) == ("顶级联赛", 2), (comp9, no9)
+        assert await env.dao.get_named_round(1, "顶级联赛", "顶级") == 1
+        assert await env.dao.get_named_round(1, "顶级联赛", "顶级9") == 2
     finally:
         await env.teardown()
 

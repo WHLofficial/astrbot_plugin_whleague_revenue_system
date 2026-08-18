@@ -1,6 +1,6 @@
 from astrbot.api import logger
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 SQL_CREATE_TABLES = r"""
 
@@ -197,14 +197,15 @@ CREATE TABLE IF NOT EXISTS plugin_config (
     updated_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
 );
 
--- 命名轮次登记：同一赛季内「轮次名」唯一对应一个轮次号（同名即为同一轮）
+-- 命名轮次登记：同一赛季内「赛事+轮次文本」唯一对应一个轮次号（同名即为同一轮，按（赛季,赛事）导入顺序定序）
 CREATE TABLE IF NOT EXISTS round_names (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     season_number INTEGER NOT NULL,
+    competition TEXT NOT NULL DEFAULT '联赛',
     token TEXT NOT NULL,
     round_no INTEGER NOT NULL,
     created_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
-    UNIQUE(season_number, token)
+    UNIQUE(season_number, competition, token)
 );
 
 """
@@ -445,3 +446,27 @@ async def _migrate(db, current_version: int):
             await db.rollback()
             raise
         logger.info("Migrated matches table: unique on full fixture (home+away).")
+    if current_version < 8:
+        # 轮次改为按（赛季, 赛事）导入顺序定序：round_names 增加 competition 列并纳入唯一键。
+        # 旧映射（全局编号）作废重建；已导入 matches 的轮次号不重算。事务包裹，失败回滚可重试。
+        await db.execute("BEGIN IMMEDIATE")
+        try:
+            await db.execute("DROP TABLE IF EXISTS round_names")
+            await db.execute(
+                """
+                CREATE TABLE round_names (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    season_number INTEGER NOT NULL,
+                    competition TEXT NOT NULL DEFAULT '联赛',
+                    token TEXT NOT NULL,
+                    round_no INTEGER NOT NULL,
+                    created_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+                    UNIQUE(season_number, competition, token)
+                )
+                """
+            )
+            await db.commit()
+        except BaseException:
+            await db.rollback()
+            raise
+        logger.info("Migrated round_names: per (season, competition) import-order numbering.")

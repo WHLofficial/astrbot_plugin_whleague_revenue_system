@@ -108,7 +108,7 @@ async def test_v4_to_latest_migration():
             row = await db.fetchone(
                 "SELECT value FROM plugin_config WHERE key='schema_version'"
             )
-            assert row["value"] == "7"
+            assert row["value"] == "8"
             # 事件池新增列
             cols = await _table_columns(db.conn, "event_pool")
             assert {"event_type", "options_json"} <= cols, cols
@@ -128,7 +128,7 @@ async def test_v4_to_latest_migration():
             row2 = await db.fetchone(
                 "SELECT value FROM plugin_config WHERE key='schema_version'"
             )
-            assert row2["value"] == "7"
+            assert row2["value"] == "8"
         finally:
             await db.close()
     finally:
@@ -148,13 +148,14 @@ async def test_v5_to_latest_migration():
             row = await db.fetchone(
                 "SELECT value FROM plugin_config WHERE key='schema_version'"
             )
-            assert row["value"] == "7"
+            assert row["value"] == "8"
             cols = await _table_columns(db.conn, "round_names")
-            assert {"season_number", "token", "round_no"} <= cols, cols
+            assert {"season_number", "competition", "token", "round_no"} <= cols, cols
             # 登记 API 可用：同名同号、递增分配
             n1 = await db.fetchone(
-                "INSERT INTO round_names (season_number, token, round_no) VALUES (1, '顶级', 1) "
-                "ON CONFLICT(season_number, token) DO NOTHING RETURNING round_no"
+                "INSERT INTO round_names (season_number, competition, token, round_no) "
+                "VALUES (1, '顶级联赛', '顶级', 1) "
+                "ON CONFLICT(season_number, competition, token) DO NOTHING RETURNING round_no"
             )
             assert n1 is not None and n1["round_no"] == 1
         finally:
@@ -228,7 +229,7 @@ async def test_v6_to_latest_migration():
             row = await db.fetchone(
                 "SELECT value FROM plugin_config WHERE key='schema_version'"
             )
-            assert row["value"] == "7"
+            assert row["value"] == "8"
             # 迁移后旧数据保留
             rows = await db.fetchall("SELECT * FROM matches")
             assert rows and rows[0]["home_team"] == "利物浦"
@@ -312,12 +313,15 @@ async def test_fresh_db_has_choice_schema():
         await env.dao.reset_choices_for_redo(1, 1)
         pending3 = await env.dao.get_unresolved_choices(1, 1)
         assert len(pending3) == 1 and pending3[0]["choice_no"] == 2
-        # 命名轮次登记：同名同号、不同名递增、跨赛季分离
-        a1 = await env.dao.add_named_round(1, "顶级")
-        a2 = await env.dao.add_named_round(1, "顶级")
-        b1 = await env.dao.add_named_round(1, "次级")
-        assert a1 == a2 == 1 and b1 == 2, (a1, a2, b1)
-        assert await env.dao.get_named_round(1, "顶级") == 1
-        assert await env.dao.get_named_round(2, "顶级") is None
+        # 命名轮次登记：按（赛季,赛事）编号——同赛事同名同号、异名递增、不同赛事各从 1 起、跨赛季归一
+        a1 = await env.dao.add_named_round(1, "顶级联赛", "顶级")
+        a2 = await env.dao.add_named_round(1, "顶级联赛", "顶级")
+        s1 = await env.dao.add_named_round(1, "次级联赛", "次级")
+        d1 = await env.dao.add_named_round(1, "顶级联赛", "顶级9")
+        assert a1 == a2 == 1 and s1 == 1, (a1, a2, s1)
+        assert d1 == 2, d1  # 同赛事不同文本递增
+        assert await env.dao.get_named_round(1, "顶级联赛", "顶级") == 1
+        assert await env.dao.get_named_round(1, "顶级联赛", "未导入") is None
+        assert await env.dao.add_named_round(2, "顶级联赛", "顶级") == 1  # 跨赛季归一
     finally:
         await env.teardown()

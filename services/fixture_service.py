@@ -183,31 +183,25 @@ class FixtureService:
     # ─── 命名轮次（同名即为同一轮） ────────────────────────
 
     async def resolve_round_arg(self, token) -> tuple[str, int]:
-        """解析命令里的轮次参数：带数字走 parse_round_token；纯文字按登记表取轮次号。
+        """解析命令里的轮次：轮次文本即身份，按（当前赛季, 赛事, 文本）只读查号。
 
-        只读：纯文字轮次未登记（尚未导入）时直接报错，不自动创建登记（避免拼错留幽灵记录）；
-        登记只在导入时由 _normalize_round_tokens 建立。
+        带数字的文本（顶级9 / 9）也按文本身份解析，不再把数字当轮次号；
+        未导入的文本报错，不自动登记（登记只在导入时建立）。
         """
         s = str(token or "").strip()
         if not s:
             raise ValueError("轮次不能为空")
-        comp, rest = formula.split_competition(self._cfg, s)
-        digits = re.sub(r"\D", "", rest)
-        if digits:
-            round_no = int(digits)
-            if round_no < 1:
-                raise ValueError(f"轮次需为正数: {token}")
-            return comp, round_no
+        comp, _rest = formula.split_competition(self._cfg, s)
         season = (await self.get_state())["season_number"]
-        round_no = await self._dao.get_named_round(season, s)
+        round_no = await self._dao.get_named_round(season, comp, s)
         if round_no is None:
-            raise ValueError(f"命名轮次「{s}」尚未导入赛程，请先导入或改用数字轮次（如 顶级9）")
+            raise ValueError(f"轮次「{s}」尚未导入赛程，请先导入该轮或核对轮次文本")
         return comp, round_no
 
     async def _normalize_round_tokens(self, text: str) -> str:
-        """赛程文本首列的纯文字轮次改写为「前缀+轮次号」（同名登记，跨导入恒同号）。
+        """赛程文本首列的轮次文本统一登记并改写为「前缀+轮次号」。
 
-        带数字的轮次原样保留；空 token 的行不动（沿用既有报错）。
+        轮次号按（赛季, 赛事）首次出现顺序分配——同名即为同一轮；文本里的数字不作轮次号解读。
         """
         season = (await self.get_state())["season_number"]
         out = []
@@ -220,11 +214,8 @@ class FixtureService:
                 out.append(raw_line)
                 continue
             token = parts[0].strip()
-            _comp, rest = formula.split_competition(self._cfg, token)
-            if re.sub(r"\D", "", rest):
-                out.append(raw_line)
-                continue
-            round_no = await self._dao.add_named_round(season, token)
+            comp, rest = formula.split_competition(self._cfg, token)
+            round_no = await self._dao.add_named_round(season, comp, token)
             prefix = token[: len(token) - len(rest)]
             parts[0] = f"{prefix}{round_no}" if prefix else str(round_no)
             out.append(" ".join(p.strip() for p in parts))
