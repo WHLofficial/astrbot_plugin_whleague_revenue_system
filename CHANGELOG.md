@@ -5,6 +5,13 @@
 
 ## [Unreleased]
 
+### Added
+
+- **事件广播叙述化**：选择型事件广播改为「LLM 叙述段 + 选项列表（**不显示概率**）」——管理员可整段转发给教练选择，概率只留到结算时掷骰。
+- **独立事件结算指令** `/主场事件结算 [全部]`：导入选择后可提前结算，不必等窗口结算（默认只结已导入选择；加「全部」连未定的一并按最差兜底；流水为普通 event 流水，窗口强制重算不会误删）。
+- **结算结果短文案**：每个已结选择事件由 LLM 生成 1~2 句结果播报并写入结算回顾（失败回退确定性摘要）。
+- **图表字体通用化**：插件内置 Noto Sans SC（OFL），字体按「`chart_font_path` 覆盖 → 跨平台已知名单（微软雅黑等）→ 内置 fonts/ → 系统目录扫描」四级兜底，云服务器/容器无需另装中文字体；内置变量字体自动取 Regular 字重。
+
 ### Fixed
 
 - **修复 LLM 空内容根因（适配新版 AstrBot `text_chat` 返回）**：v4.2x 的 `provider.text_chat` 返回 `LLMResponse`（文本在 `completion_text`），旧代码只读 `result_str` 恒为空；现按 `completion_text` → `result_str`（旧版）→ `result_chain.get_plain_text()` → 纯字符串的顺序容错提取。
