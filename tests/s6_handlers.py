@@ -47,7 +47,7 @@ async def test_plugin_import_and_commands():
         "主场推进窗口", "主场推进赛季", "主场属性", "主场属性导入",
         "主场设施", "主场发放", "主场事件", "主场事件生成", "主场事件列表",
         "主场事件采纳", "主场事件丢弃", "主场事件写",
-        "主场事件选择", "主场事件选择导入", "主场事件选择列表",
+        "主场事件选择", "主场事件选择导入", "主场事件选择列表", "主场事件结算",
         "主场品牌生成",
         "主场品牌列表", "主场品牌采纳", "主场品牌丢弃", "主场结算",
         "主场设置", "主场查看配置", "主场添加管理", "主场删除管理",
@@ -158,6 +158,14 @@ async def test_choice_handlers_flow():
         assert "[即发]" in joined and "[选择]" in joined, joined
         assert "个选项" in joined, joined
         assert "政府补贴" in joined and 'money' in joined, joined
+
+        # 独立事件结算：只结已导入选择；再走「全部」提示无待结算
+        ev8 = _FakeEvent("/主场事件结算", sender="admin", is_admin=True)
+        out8 = [r async for r in handler.settle_events_now(ev8)]
+        assert out8 and "事件结算" in out8[0], out8
+        ev9 = _FakeEvent("/主场事件结算 全部", sender="admin", is_admin=True)
+        out9 = [r async for r in handler.settle_events_now(ev9)]
+        assert out9 and ("事件结算" in out9[0] or "没有待结算" in out9[0]), out9
     finally:
         await env.teardown()
 

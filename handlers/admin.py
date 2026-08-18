@@ -487,6 +487,42 @@ class AdminHandler:
                 lines.append(f"· {r['team']} {r['event']}：⏳ 未定（收集回应用 /主场事件选择导入）")
         yield event.plain_result("\n".join(lines))
 
+    async def settle_events_now(self, event) -> AsyncGenerator[MessageEventResult, None]:
+        """独立事件结算：不等窗口结算，可直接结清已导入选择（加「全部」连未定一并兜底）。"""
+        deny = await self._guard(event)
+        if deny:
+            yield event.plain_result(deny)
+            return
+        parts = event.get_message_str().split()
+        state = await self._plugin.dao.get_league_state()
+        season = state["season_number"] if state else 1
+        window_seq = state["window_seq"] if state else 1
+        include = len(parts) >= 2 and parts[1] in ("全部", "all")
+        result = await self._run(
+            event,
+            self._plugin.event_engine.settle_now(season, window_seq, include_undecided=include),
+        )
+        if "error" in result:
+            yield event.plain_result(result["error"])
+            return
+        if not result["resolved"]:
+            hint = "没有待结算的选择事件" if include else "没有已导入选择的选择事件"
+            yield event.plain_result(f"窗口 {window_seq}：{hint}（用 /主场事件 触发、/主场事件选择导入 录入）")
+            return
+        lines = [f"🎲 第 {season} 赛季窗口 {window_seq} 事件结算 {len(result['resolved'])} 条"]
+        for r in result["resolved"]:
+            if r.get("skipped"):
+                lines.append(f"· {r['team']} {r['event']}：跳过（无选项信息）")
+                continue
+            how = "自动最差" if r["auto"] else "已选"
+            detail = "；".join(r["notes"]) if r["notes"] else "无变化"
+            lines.append(f"· {r['team']} {r['event']}（{how}）：{detail}")
+        if not include:
+            remaining = await self._plugin.dao.get_unresolved_choices(season, window_seq)
+            if remaining:
+                lines.append(f"⏳ 另有 {len(remaining)} 条未收到选择（可用 /主场事件结算 全部 按最差兜底，或留到窗口结算自动处理）")
+        yield event.plain_result("\n".join(lines))
+
     async def generate_events(self, event) -> AsyncGenerator[MessageEventResult, None]:
         deny = await self._guard(event)
         if deny:
