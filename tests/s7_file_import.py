@@ -217,6 +217,14 @@ async def test_result_lines_score_derived():
     assert len(errors3) == 1 and "赛果需为" in errors3[0], errors3
 
 
+async def test_result_lines_cancelled():
+    """文件赛果列写「取消」/「C」→ 归一化为 C。"""
+    rows = [["主队", "赛果"], ["利物浦", "取消"], ["巴塞罗那", "C"], ["纽卡斯尔联", "cancel"]]
+    lines, errors = fis.build_result_lines(rows)
+    assert errors == [], errors
+    assert lines == ["利物浦 C", "巴塞罗那 C", "纽卡斯尔联 C"], lines
+
+
 async def test_results_file_score_derived_e2e():
     """文件录入赛果：赛果列留空用比分推导、赛果列写比分也推导。"""
     env = await TestEnv().setup()

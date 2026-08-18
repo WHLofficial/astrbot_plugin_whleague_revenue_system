@@ -105,7 +105,7 @@ def set_font_override(path: str) -> None:
     _FONT_OVERRIDE = (path or "").strip()
 
 
-_RESULT_CN = {"W": "胜", "D": "平", "L": "负"}
+_RESULT_CN = {"W": "胜", "D": "平", "L": "负", "C": "取消"}
 
 # 超采样倍率：按 2x 画布绘制再 LANCZOS 缩回设计尺寸，文字边缘更清晰
 _SUPERSAMPLE = 2
@@ -455,33 +455,35 @@ class ChartService:
         season = state["season_number"] if state else 1
         window_seq = state["window_seq"] if state else 1
         matches = await self._dao.get_round_matches(season, window_seq, round_no, competition)
-        played = [m for m in matches if m["attendance"] is not None]
+        played = [m for m in matches if m["result"]]
         if not played:
             raise ChartError(f"第 {round_no} 轮({competition})还没有已录入赛果的比赛")
-        rows, total = [], 0
+        rows, total, counted = [], 0, 0
         for raw in played:
             m = dict(raw)
             st = await self._dao.get_stadium(m["home_team"])
             capacity = int(st["capacity"]) if st else 0
             name = st["name"] if st else f"{m['home_team']}主场"
-            total += int(m["attendance"])
-            rate = f"{int(m['attendance']) / capacity * 100:.1f}%" if capacity else "—"
-            result_cn = _RESULT_CN.get(m["result"], "?")
-            score_text = f"{m['score']} {result_cn}" if m.get("score") else result_cn
-            rows.append([
+            head = [
                 f"W{m['week_no']}" if m.get("week_no") else "",
                 f"D{m['day_no']}" if m.get("day_no") else "",
                 formula.weekday_name(m.get("day_no")),
                 m.get("match_time") or "",
                 m["weather"] or "？",
                 m["home_team"],
-                score_text,
-                m["away_team"],
-                name,
-                f"{int(m['attendance']):,}",
-                rate,
-            ])
-        avg = total / len(played)
+            ]
+            if m["result"] == "C":
+                # 比赛取消：观众/上座率显示 -，不计入合计与场均
+                rows.append(head + ["取消", m["away_team"], name, "-", "-"])
+                continue
+            total += int(m["attendance"])
+            counted += 1
+            rate = f"{int(m['attendance']) / capacity * 100:.1f}%" if capacity else "—"
+            result_cn = _RESULT_CN.get(m["result"], "?")
+            score_text = f"{m['score']} {result_cn}" if m.get("score") else result_cn
+            rows.append(head + [score_text, m["away_team"], name,
+                                f"{int(m['attendance']):,}", rate])
+        avg = total / counted if counted else 0
         subtitle = f"第 {season} 赛季 · 窗口 {window_seq} · 共 {len(played)} 场"
         title = f"WHL 第{season}赛季{competition}现场观众统计（第{round_no}轮）"
         header_fill, header_text = COMPETITION_COLORS.get(competition, DEFAULT_COMPETITION_COLOR)
@@ -585,9 +587,10 @@ class ChartService:
         series = []
         for s in stadiums:
             matches = await self._dao.get_home_matches_season(s["team_name"], season)
-            played = [m for m in matches if m["attendance"] is not None]
+            played = [m for m in matches if m["result"]]
             if played:
-                pts = [(i + 1, int(m["attendance"])) for i, m in enumerate(played)]
+                pts = [(i + 1, int(m["attendance"]) if m["attendance"] is not None else 0)
+                       for i, m in enumerate(played)]
                 series.append((s["team_name"], pts))
         if not series:
             raise ChartError("本赛季还没有已录赛果的上座数据")

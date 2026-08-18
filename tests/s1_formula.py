@@ -226,6 +226,14 @@ async def test_result_from_score():
         assert got == expect, f"{text}: {got!r} vs {expect!r}"
 
 
+async def test_form_pts_skips_cancelled():
+    """取消（C）不计入积分，也不占「近 3 场」名额。"""
+    assert formula.form_pts(["W", "W", "D"]) == 7
+    assert formula.form_pts(["C", "W"]) == 3
+    assert formula.form_pts(["W", "C", "W", "W"]) == 9  # 前 3 场非取消 = W,W,W
+    assert formula.form_pts(["C", "C", "C"]) == 0
+
+
 def run_all():
     import asyncio
 

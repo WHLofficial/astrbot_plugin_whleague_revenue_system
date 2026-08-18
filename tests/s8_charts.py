@@ -375,3 +375,32 @@ async def test_chart_long_team_names_and_preview_height():
         assert _png_ok(rp), rp
     finally:
         await env.teardown()
+
+
+async def test_chart_cancelled_match():
+    """取消场次：轮次图能出（观众 -、不算场均）、全取消场均=0；走势图含 0 点。"""
+    env = await TestEnv().setup()
+    try:
+        for team, inf in [("利物浦", 150.0), ("巴塞罗那", 120.0), ("纽卡斯尔联", 130.0)]:
+            await env.stadium_service.import_attributes(team, influence=inf)
+        await env.fixture_service.import_fixtures(
+            "1 利物浦 巴塞罗那\n1 纽卡斯尔联 勒沃库森"
+        )
+        await env.fixture_service.set_weather(1, "纽卡斯尔联", "晴")
+        await env.fixture_service.record_results(1, "利物浦 取消\n纽卡斯尔联 胜")
+        svc = ChartService(env.db, env.dao, env.cfg)
+        p1 = await svc.render_round_chart(1)
+        assert _png_ok(p1), p1
+        # 全取消轮次：场均 0、不除零，图仍能出
+        await env.fixture_service.import_fixtures("2 巴塞罗那 利物浦")
+        await env.fixture_service.record_results(2, "巴塞罗那 取消")
+        p2 = await svc.render_round_chart(2)
+        assert _png_ok(p2), p2
+        st2 = await env.fixture_service.round_stats(2)
+        assert any("取消" in ln for ln in st2["lines"]), st2
+        assert st2["totals"]["attendance"] == 0, st2["totals"]
+        # 走势图含取消（0 标记）
+        pt = await svc.render_season_chart()
+        assert _png_ok(pt), pt
+    finally:
+        await env.teardown()

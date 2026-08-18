@@ -45,6 +45,8 @@ async def test_record_results_full():
             "1 利物浦 巴塞罗那\n1 纽卡斯尔联 勒沃库森\n"
         )
         await env.fixture_service.forecast_round(1)
+        # 固定利物浦天气为晴：断言「坐满 12000」不受随机天气影响（随机流会被其他测试位移）
+        await env.fixture_service.set_weather(1, "利物浦", "晴")
 
         # 初始化属性（影响力不同，便于验证对手拉力；死忠演化在结算时进行）
         await env.stadium_service.import_attributes("利物浦", influence=180.0)
@@ -289,5 +291,53 @@ async def test_same_round_multiple_home_matches():
         r2 = await env.fixture_service.import_fixtures("1 利物浦 巴塞罗那")
         assert r2["imported"] == 0
         assert any("重复" in e for e in r2["errors"]), r2["errors"]
+    finally:
+        await env.teardown()
+
+
+async def test_record_cancelled_match():
+    """录入「主队 取消」：result=C、无观众/无收益、不记流水、不能重复录入。"""
+    from astrbot_plugin_whleague_revenue_system.services.fixture_service import FixtureError
+
+    env = await TestEnv().setup()
+    try:
+        await env.fixture_service.import_fixtures(
+            "1 利物浦 巴塞罗那\n1 纽卡斯尔联 勒沃库森"
+        )
+        r = await env.fixture_service.record_results(1, "利物浦 取消\n纽卡斯尔联 胜")
+        assert r["count"] == 2, r
+        by = {m["home_team"]: m for m in await env.dao.get_round_matches(1, 1, 1)}
+        m_c = by["利物浦"]
+        assert m_c["result"] == "C" and m_c["attendance"] is None
+        assert m_c["ticket_revenue"] == 0 and m_c["commercial"] == 0 and m_c["broadcast"] == 0
+        m_w = by["纽卡斯尔联"]
+        assert m_w["result"] == "W" and m_w["attendance"] is not None
+        assert await env.dao.list_transactions("利物浦", 1, 1) == []
+        # 取消场次也视为已录赛果，不能重复录入
+        try:
+            await env.fixture_service.record_results(1, "利物浦 取消")
+            assert False, "取消场次应拒绝重复录入"
+        except FixtureError as e:
+            assert "已录入" in str(e)
+    finally:
+        await env.teardown()
+
+
+async def test_cancelled_excluded_from_form_points():
+    """状态积分忽略取消场次：不占「近 3 场」窗口，往前补足 3 场已赛。"""
+    env = await TestEnv().setup()
+    try:
+        await env.fixture_service.import_fixtures(
+            "1 利物浦 巴塞罗那\n2 利物浦 巴塞罗那\n3 利物浦 巴塞罗那\n"
+            "4 利物浦 巴塞罗那\n5 利物浦 巴塞罗那\n"
+        )
+        await env.fixture_service.record_results(1, "利物浦 胜")
+        await env.fixture_service.record_results(2, "利物浦 胜")
+        await env.fixture_service.record_results(3, "利物浦 取消")
+        await env.fixture_service.record_results(4, "利物浦 胜")
+        # 第 5 轮录入前：最近 3 场非取消 = r4/r2/r1 全胜 → Pts 9（补足 3 场）
+        r5 = await env.fixture_service.record_results(5, "利物浦 平")
+        assert r5["count"] == 1
+        assert r5["results"][0]["form_pts"] == 9, r5
     finally:
         await env.teardown()

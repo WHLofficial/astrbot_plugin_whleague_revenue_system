@@ -36,6 +36,7 @@ _RESULT_ALIASES = {
     "胜": "W", "w": "W", "win": "W",
     "平": "D", "d": "D", "draw": "D",
     "负": "L", "l": "L", "loss": "L",
+    "取消": "C", "c": "C", "cancel": "C", "cancelled": "C",
 }
 
 

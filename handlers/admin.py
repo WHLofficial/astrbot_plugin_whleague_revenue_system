@@ -141,7 +141,7 @@ class AdminHandler:
             return
         parts = event.get_message_str().split(maxsplit=2)
         if len(parts) < 2:
-            yield event.plain_result("用法: /主场赛果 <轮次>\n每行：主队 胜/平/负 [比分]（如 利物浦 胜 2-1；或附带 xlsx/csv 文件）\n轮次支持前缀：顶级9/次级11/冠军3（默认联赛）")
+            yield event.plain_result("用法: /主场赛果 <轮次>\n每行：主队 胜/平/负 [比分] 或 主队 取消（如 利物浦 胜 2-1；或附 xlsx/csv 文件）\n轮次支持前缀：顶级9/次级11/冠军3（默认联赛）")
             return
         try:
             competition, round_no = await self._plugin.fixture_service.resolve_round_arg(parts[1])
@@ -150,7 +150,7 @@ class AdminHandler:
             return
         path = await self._get_attachment(event)
         if path is None and len(parts) < 3:
-            yield event.plain_result("用法: /主场赛果 <轮次>\n每行：主队 胜/平/负 [比分]（如 利物浦 胜 2-1；或附带 xlsx/csv 文件）\n轮次支持前缀：顶级9/次级11/冠军3（默认联赛）")
+            yield event.plain_result("用法: /主场赛果 <轮次>\n每行：主队 胜/平/负 [比分] 或 主队 取消（如 利物浦 胜 2-1；或附 xlsx/csv 文件）\n轮次支持前缀：顶级9/次级11/冠军3（默认联赛）")
             return
         if path:
             try:
@@ -168,6 +168,9 @@ class AdminHandler:
             return
         lines = [f"⚽ 第 {round_no} 轮({competition})赛果已录入（{result['count']} 场）"]
         for r in result["results"]:
+            if r["result"] == "C":
+                lines.append(f"· {r['home']} vs {r['away']}：比赛取消（不计入合计）")
+                continue
             wx = {"晴": "☀️", "多云": "⛅", "雨": "🌧️", "雪": "❄️"}.get(r["weather"] or "", "")
             score_txt = f" {r['score']}" if r.get("score") else ""
             lines.append(

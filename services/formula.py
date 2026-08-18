@@ -247,10 +247,20 @@ def form_coef_table(cfg: dict) -> dict:
 
 
 def form_pts(results: list) -> int:
-    """近 3 场 Pts（胜3平1负0），results 为最近几场的 result 字符串列表。"""
+    """近 3 场 Pts（胜3平1负0），results 为最近几场的 result 字符串列表。
+
+    取消（C）不计入，也不占「近 3 场」名额。
+    """
     pts = 0
-    for r in results[:3]:
-        pts += _RESULT_PTS.get(str(r).strip().upper(), 0)
+    seen = 0
+    for r in results:
+        key = str(r).strip().upper()
+        if key == "C":
+            continue
+        pts += _RESULT_PTS.get(key, 0)
+        seen += 1
+        if seen >= 3:
+            break
     return pts
 
 

@@ -315,11 +315,13 @@ class StadiumDAO:
         )
 
     async def get_last_results(self, team_name: str, limit: int = 3) -> list:
-        return await self._db.fetchall(
+        """最近 limit 场已置赛果（取消场次 C 不计入，也不占「近 N 场」名额）。"""
+        rows = await self._db.fetchall(
             "SELECT * FROM matches WHERE home_team=? AND result IS NOT NULL "
             "ORDER BY season_number DESC, window_seq DESC, round_no DESC LIMIT ?",
-            (team_name, limit),
+            (team_name, max(limit * 5, 20)),
         )
+        return [r for r in rows if r["result"] != "C"][:limit]
 
     async def set_match_weather(self, match_id: int, weather: str) -> None:
         await self._db.execute("UPDATE matches SET weather=? WHERE id=?", (weather, match_id))

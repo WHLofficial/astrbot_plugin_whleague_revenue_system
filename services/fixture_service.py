@@ -34,6 +34,10 @@ _RESULT_ALIASES = {
     "负": "L",
     "l": "L",
     "loss": "L",
+    "取消": "C",
+    "c": "C",
+    "cancel": "C",
+    "cancelled": "C",
 }
 
 def _parse_schedule_extra(extra) -> tuple[int | None, int | None, str | None]:
@@ -296,6 +300,14 @@ class FixtureService:
     async def _record_one(self, match, result: str, season: int, window_seq: int,
                           score: str | None = None) -> dict:
         home, away = match["home_team"], match["away_team"]
+        if result == "C":
+            # 比赛取消：无观众、无收益、不记任何流水
+            await self._dao.set_match_result(match["id"], "C", None, 0.0, 0.0, 0.0, score)
+            return {
+                "home": home, "away": away, "result": "C", "score": score,
+                "weather": match["weather"], "form_pts": 0, "attendance": None,
+                "ticket": 0.0, "commercial": 0.0, "broadcast": 0.0, "total": 0.0,
+            }
         stadium = await self._stadium_service.ensure_stadium(home)
         away_stadium = await self._dao.get_stadium(away)
         away_influence = (
@@ -356,6 +368,9 @@ class FixtureService:
         totals = {"attendance": 0, "ticket": 0.0}
         lines = []
         for m in matches:
+            if m["result"] == "C":
+                lines.append(f"· {m['home_team']} vs {m['away_team']}：比赛取消（不计入合计）")
+                continue
             if m["attendance"] is None:
                 lines.append(f"· {m['home_team']} vs {m['away_team']}：未录赛果")
                 continue
