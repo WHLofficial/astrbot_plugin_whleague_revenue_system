@@ -208,17 +208,33 @@ def _text_w(dr, text: str, font) -> int:
     return int(dr.textlength(text, font=font))
 
 
-def _draw_cell_text(dr, text, x, y, w, h, font, fill, align: str, scale: int = 1) -> None:
+def _draw_cell_text(dr, text, x, y, w, h, font, fill, align: str, scale: int = 1,
+                    bold: bool = False) -> None:
+    """单元格文字：文本超宽时自动缩小字号（下限 11px），仍超则截断加省略号，避免压到相邻列。"""
+    inset = 12 * scale
+    avail = w - 2 * inset
     bbox = dr.textbbox((0, 0), text, font=font)
     tw = bbox[2] - bbox[0]
+    if tw > avail:
+        floor = max(11 * scale, int(font.size * avail / max(1, tw)))
+        if floor < font.size:
+            font = _font(floor, bold=bold)
+            bbox = dr.textbbox((0, 0), text, font=font)
+            tw = bbox[2] - bbox[0]
+        if tw > avail:
+            s = text
+            while len(s) > 1 and dr.textlength(s + "…", font=font) > avail:
+                s = s[:-1]
+            text = s + "…"
+            bbox = dr.textbbox((0, 0), text, font=font)
+            tw = bbox[2] - bbox[0]
     th = bbox[3] - bbox[1]
-    pad = 12 * scale
     if align == "right":
-        tx = x + w - pad - tw
+        tx = x + w - inset - tw
     elif align == "center":
         tx = x + (w - tw) / 2
     else:
-        tx = x + pad
+        tx = x + inset
     ty = y + (h - th) / 2 - bbox[1]
     dr.text((tx, ty), text, font=font, fill=fill)
 
@@ -253,7 +269,7 @@ def _draw_table_block(dr, y_base: int, width: int, title: str, subtitle: str,
 
     dr.rectangle([pad, y, W - pad, y + header_h], fill=header_fill)
     for i, (cell, (_, w, align)) in enumerate(zip([h[0] for h in headers], headers)):
-        _draw_cell_text(dr, cell, col_x[i], y, w * scale, header_h, f_head, header_text, align, scale)
+        _draw_cell_text(dr, cell, col_x[i], y, w * scale, header_h, f_head, header_text, align, scale, bold=True)
     y += header_h
 
     for ri, row in enumerate(rows):
@@ -267,7 +283,7 @@ def _draw_table_block(dr, y_base: int, width: int, title: str, subtitle: str,
     if totals is not None:
         dr.rectangle([pad, y, W - pad, y + total_h], fill=header_fill)
         for i, (cell, (_, w, align)) in enumerate(zip(totals, headers)):
-            _draw_cell_text(dr, cell, col_x[i], y, w * scale, total_h, f_tot, header_text, align, scale)
+            _draw_cell_text(dr, cell, col_x[i], y, w * scale, total_h, f_tot, header_text, align, scale, bold=True)
         y += total_h
         dr.rectangle([pad, y, W - pad, y + 3 * scale], fill=ACCENT)
     return y
@@ -530,9 +546,9 @@ class ChartService:
             sum(w for _, w, _ in sched_headers) + pad * 2,
             sum(w for _, w, _ in wx_headers) + pad * 2,
         )
-        h1 = pad + title_h + sub_h + gap + header_h + n * row_h + pad
-        h2 = pad + title_h + sub_h + gap + header_h + n * row_h + pad
-        height = h1 + 10 + h2
+        # 高度按实际绘制范围计算（两区块 + 间隙），不额外留底
+        content = pad + title_h + sub_h + gap + header_h + n * row_h
+        height = content + 10 + content
 
         from PIL import Image, ImageDraw
 

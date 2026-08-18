@@ -346,3 +346,32 @@ async def test_chart_bundled_font_weight_differentiates():
         )
     finally:
         set_font_override("")
+
+
+async def test_chart_long_team_names_and_preview_height():
+    """超长队名渲染不崩溃；预告图高度按实际绘制范围（无底部多余空白）。"""
+    from PIL import Image
+
+    env = await TestEnv().setup()
+    try:
+        long_a = "皇家马德里足球俱乐部阿斯图里亚斯竞技队"
+        long_b = "巴塞罗那城际联合体育协会精英队"
+        for team, inf in [(long_a, 150.0), (long_b, 130.0)]:
+            await env.stadium_service.import_attributes(team, influence=inf)
+        await env.fixture_service.import_fixtures(f"顶级9 {long_a} {long_b}\n")
+        await env.fixture_service.set_weather(9, long_a, "晴", "顶级联赛")
+        await env.fixture_service.record_results(9, f"{long_a} 胜 2-1", "顶级联赛")
+        svc = ChartService(env.db, env.dao, env.cfg)
+        pv = await svc.render_round_preview_chart(9, "顶级联赛")
+        assert _png_ok(pv), pv
+        im = Image.open(pv)
+        try:
+            w, h = im.size
+        finally:
+            im.close()
+        # 单场预告图高度 = content*2 + 10（无底部多余 pad）
+        assert h == 406, f"预告图高度应为紧致 406，实为 {w}x{h}"
+        rp = await svc.render_round_chart(9, "顶级联赛")
+        assert _png_ok(rp), rp
+    finally:
+        await env.teardown()
