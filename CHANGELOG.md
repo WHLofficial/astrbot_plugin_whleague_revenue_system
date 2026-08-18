@@ -5,6 +5,8 @@
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-08-18
+
 ### Added
 
 - **事件广播叙述化**：选择型事件广播改为「LLM 叙述段 + 选项列表（**不显示概率**）」——管理员可整段转发给教练选择，概率只留到结算时掷骰。
@@ -81,6 +83,7 @@
 - 权限与安全：管理员白名单、群白名单、输入净化、频率限制。
 - 配置（WebUI / `/主场设置`）与每日自动备份；零依赖测试基建（桩 + 临时库 + LLM 桩）。
 
+[1.3.0]: https://github.com/WHLofficial/astrbot_plugin_whleague_revenue_system/compare/a13c722...a98a161
 [1.2.0]: https://github.com/WHLofficial/astrbot_plugin_whleague_revenue_system/compare/f33cc93...a13c722
 [1.1.0]: https://github.com/WHLofficial/astrbot_plugin_whleague_revenue_system/compare/3bd5d61...f33cc93
 [1.0.0]: https://github.com/WHLofficial/astrbot_plugin_whleague_revenue_system/compare/c2e2cf7...3bd5d61
