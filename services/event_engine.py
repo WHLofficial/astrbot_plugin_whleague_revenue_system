@@ -349,11 +349,14 @@ class EventEngine:
 
     async def _apply_effects(self, team_name: str, season: int, window_seq: int,
                              effects: dict, label: str,
-                             created_ids: list[int] | None = None) -> list[str]:
+                             created_ids: list[int] | None = None,
+                             apply_state: bool = True) -> list[str]:
         """应用一组效果（资金/维护/死忠/上座修正），返回中文备注行。
 
         资金与维护各计一条 event 流水；created_ids 非空时收集流水 ID，
         供结算把选择结果流水并入可撤销集合。
+        apply_state=False 时跳过死忠/上座等持久状态类效果（强制重算只重记账目，
+        与死忠演化「重算不重复状态」一致），备注标注「重算跳过」。
         """
         stadium = await self._dao.get_stadium(team_name)
         await self._dao.ensure_balance(team_name, float(self._cfg.get("start_funds", 50.0)))
@@ -381,14 +384,20 @@ class EventEngine:
                 created_ids.append(tx_id)
             notes.append(f"维护 −{maintenance:.1f}M")
         if fans_pct:
-            fans = min(max(stadium["fans_diehards"] * (1.0 + fans_pct), 0.0),
-                       float(self._cfg.get("fans_cap", 10000)))
-            await self._dao.update_fans(team_name, fans)
-            notes.append(f"死忠 {'+' if fans_pct > 0 else ''}{fans_pct * 100:.1f}%")
+            if apply_state:
+                fans = min(max(stadium["fans_diehards"] * (1.0 + fans_pct), 0.0),
+                           float(self._cfg.get("fans_cap", 10000)))
+                await self._dao.update_fans(team_name, fans)
+                notes.append(f"死忠 {'+' if fans_pct > 0 else ''}{fans_pct * 100:.1f}%")
+            else:
+                notes.append(f"死忠 {fans_pct * 100:+.1f}%（重算跳过）")
         if attendance_mod != 1.0:
-            mod = stadium["next_attendance_mod"] * attendance_mod
-            await self._dao.update_attendance_mod(team_name, mod)
-            notes.append(f"下一场上座 {'+' if attendance_mod > 1 else ''}{attendance_mod * 100:.0f}%")
+            if apply_state:
+                mod = stadium["next_attendance_mod"] * attendance_mod
+                await self._dao.update_attendance_mod(team_name, mod)
+                notes.append(f"下一场上座 {'+' if attendance_mod > 1 else ''}{attendance_mod * 100:.0f}%")
+            else:
+                notes.append(f"下一场上座 ×{attendance_mod:.2f}（重算跳过）")
         return notes
 
     async def _apply(self, event, team_name: str, season: int, window_seq: int) -> dict:
@@ -417,7 +426,7 @@ class EventEngine:
         lines = [f"🎲 事件「{event['name']}」（{event['category']}）@ {team_name}·{stadium_name}",
                  "请在窗口结算前任选一项操作（回复：队名 事件名 选项号）："]
         for opt in options:
-            odds = " / ".join(f"{o['w']}% {self._outcome_desc(o.get('effects') or {})}"
+            odds = " / ".join(f"{o['w']:g}% {self._outcome_desc(o.get('effects') or {})}"
                               for o in opt.get("outcomes", []))
             desc = opt.get("desc") or ""
             lines.append(f"{self._num(opt['no'])} {opt['name']}"
@@ -495,11 +504,13 @@ class EventEngine:
 
     # ─── 结算 ─────────────────────────────────────────────
 
-    async def settle_choices(self, season: int, window_seq: int) -> dict:
+    async def settle_choices(self, season: int, window_seq: int,
+                             apply_state: bool = True) -> dict:
         """结算选择型事件：已导入选择按选项概率掷骰，未定按最差结果兜底。
 
         返回的 tx_ids 并入窗口结算的可撤销集合；同时把 events_log 中该选择
         事件的广播文案替换为一行结算摘要（保持结算回顾简洁）。
+        apply_state=False（强制重算场景）只重记账目类效果，跳过死忠/上座状态应用。
         """
         rows = await self._dao.get_unresolved_choices(season, window_seq)
         resolved = []
@@ -526,7 +537,8 @@ class EventEngine:
                 outcome = self._roll_option(opt)
             effects = outcome.get("effects") or {}
             notes = await self._apply_effects(c["team_name"], season, window_seq,
-                                              effects, f"{event['name']}·{opt['name']}", tx_ids)
+                                              effects, f"{event['name']}·{opt['name']}",
+                                              tx_ids, apply_state=apply_state)
             how = "未收到选择，按最差结果" if auto else f"选项{opt['no']} {opt['name']}"
             await self._dao.mark_choice_resolved(c["id"], json.dumps(
                 {"option": opt["no"], "option_name": opt["name"], "auto": auto,

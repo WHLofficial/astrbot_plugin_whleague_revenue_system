@@ -1,5 +1,6 @@
 """窗口结算：维护费、档期兑现、冠名费、死忠演化（非对称）、重复结算保护。"""
 
+import json
 import sys
 import os
 
@@ -177,5 +178,31 @@ async def test_brand_terminate_on_fan_drop():
             assert result is not None, "触发跌幅阈值应有机会解约"
         naming = await env.dao.get_active_naming("利物浦")
         assert naming is None or naming["status"] == "active"
+    finally:
+        await env.teardown()
+
+
+async def test_redo_skips_choice_state_effects():
+    env = await TestEnv().setup()
+    try:
+        await env.stadium_service.import_attributes("利物浦", influence=150.0)
+        import random
+
+        random.seed(7)
+        await env.event_engine.trigger_team("利物浦", 1, 1, event_id="new_wave")
+        # 选项1 办球迷开放日：死忠 +4%/资金-0.5（70%）或死忠 +1%/资金-1.5（30%）
+        await env.dao.set_event_choice("利物浦", 1, 1, "new_wave", 1)
+        await env.window_service.settle()
+        fans_after_1 = (await env.dao.get_stadium("利物浦"))["fans_diehards"]
+        # 强制重算：选择事件只重记账目、不再叠加死忠（避免复利）
+        random.seed(8)
+        await env.window_service.settle(force=True)
+        fans_after_redo = (await env.dao.get_stadium("利物浦"))["fans_diehards"]
+        assert fans_after_redo == fans_after_1, (fans_after_1, fans_after_redo)
+        summary = await env.dao.get_window_summary(1, 1)
+        assert json.loads(summary["tx_ids"]), "重算后仍应生成结算流水"
+        # 结算回顾标注「重算跳过」
+        logs = await env.dao.get_window_events("利物浦", 1, 1)
+        assert any("重算跳过" in (l["text"] or "") for l in logs), [l["text"] for l in logs]
     finally:
         await env.teardown()

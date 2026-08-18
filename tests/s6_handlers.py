@@ -130,8 +130,8 @@ async def test_choice_handlers_flow():
         out = [r async for r in handler.trigger_event(ev)]
         assert out and "①" in out[0] and "周边爆款" in out[0], out
 
-        # 单条录入选择
-        ev2 = _FakeEvent("/主场事件选择 利物浦 周边爆款 1", sender="admin", is_admin=True)
+        # 单条录入选择（支持 ①②③④ 符号）
+        ev2 = _FakeEvent("/主场事件选择 利物浦 周边爆款 ①", sender="admin", is_admin=True)
         out2 = [r async for r in handler.set_choice(ev2)]
         assert out2 and "已选" in out2[0], out2
 
@@ -150,5 +150,13 @@ async def test_choice_handlers_flow():
         ev5 = _FakeEvent("/主场事件选择列表 0", sender="admin", is_admin=True)
         out5 = [r async for r in handler.list_choices(ev5)]
         assert out5 and "正整数" in out5[0], out5
+
+        # 事件列表：即发显示效果数值、选择显示选项数
+        ev6 = _FakeEvent("/主场事件列表", sender="admin", is_admin=True)
+        out6 = [r async for r in handler.list_events(ev6)]
+        joined = "\n".join(out6)
+        assert "[即发]" in joined and "[选择]" in joined, joined
+        assert "个选项" in joined, joined
+        assert "政府补贴" in joined and 'money' in joined, joined
     finally:
         await env.teardown()

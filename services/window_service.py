@@ -56,8 +56,10 @@ class WindowService:
             # 重置该窗口已结算的选择事件，随本次结算重新兑现
             await self._dao.reset_choices_for_redo(season, window_seq)
 
-        # 事件选择结算：已定按选项概率掷骰、未定按最差结果兜底；流水并入可撤销集合
-        choice_res = await self._event_engine.settle_choices(season, window_seq)
+        # 事件选择结算：已定按选项概率掷骰、未定按最差结果兜底；流水并入可撤销集合。
+        # 强制重算（redo）只重记账目类效果，跳过死忠/上座等持久状态应用（避免复利叠加）。
+        choice_res = await self._event_engine.settle_choices(season, window_seq,
+                                                             apply_state=not redo)
         created_ids: list[int] = list(choice_res["tx_ids"])
         lines = []
 

@@ -1,5 +1,6 @@
 """管理命令：赛程/天气/赛果/统计、属性导入、事件与品牌（含 LLM 设计）、结算、配置。"""
 
+import json
 from collections.abc import AsyncGenerator
 
 from astrbot.api import logger
@@ -9,7 +10,7 @@ from astrbot.api.message_components import File
 from ..config.defaults import validate_and_cast
 from ..services import formula
 from ..services.brand_service import BrandError
-from ..services.event_engine import EventError
+from ..services.event_engine import EventError, _parse_choice_no
 from ..services.file_import_service import FileImportError, cleanup_file
 from ..services.fixture_service import FixtureError
 from ..services.stadium_service import StadiumError
@@ -411,9 +412,9 @@ class AdminHandler:
             yield event.plain_result("用法: /主场事件选择 <队名> <事件名> <选项号>\n（选项号见 /主场事件选择列表 的广播文案）")
             return
         try:
-            choice_no = int(parts[3])
+            choice_no = _parse_choice_no(parts[3])
         except ValueError:
-            yield event.plain_result("选项号需为正整数")
+            yield event.plain_result("选项号需为正整数或 ①②③④")
             return
         state = await self._plugin.dao.get_league_state()
         season = state["season_number"] if state else 1
@@ -519,7 +520,15 @@ class AdminHandler:
         lines = [f"事件池（{'待定' if status else '全部'} {len(rows)} 条）"]
         for r in rows[-30:]:
             kind = "选择" if r["event_type"] == "choice" else "即发"
-            lines.append(f"· {r['id']} [{r['status']}][{kind}] {r['name']}（{r['category']} w{r['weight']}）")
+            if r["event_type"] == "choice":
+                try:
+                    n = len(json.loads(r["options_json"] or "[]"))
+                except (ValueError, TypeError):
+                    n = 0
+                extra = f"{n} 个选项"
+            else:
+                extra = r["effects_json"]
+            lines.append(f"· {r['id']} [{r['status']}][{kind}] {r['name']}（{r['category']} w{r['weight']}）{extra}")
         yield event.plain_result("\n".join(lines))
 
     async def adopt_event(self, event) -> AsyncGenerator[MessageEventResult, None]:
