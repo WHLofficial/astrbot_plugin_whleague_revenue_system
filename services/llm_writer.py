@@ -23,16 +23,20 @@ class LlmWriter:
             return bool(self._cfg.get("llm_flavor_enabled", True))
         return bool(self._cfg.get("llm_design_enabled", True))
 
-    async def _ask(self, prompt: str) -> str | None:
-        """发起 LLM 调用；失败/空内容返回 None 并分类告警（便于归因）。"""
+    async def _ask(self, prompt: str, quiet: bool = False) -> str | None:
+        """发起 LLM 调用；失败/空内容返回 None 并分类告警（便于归因）。
+
+        quiet=True 时不打印失败原因（设计类命令重试时避免重复告警）。
+        """
         try:
             provider = self._get_provider()
             if provider is None:
-                logger.warning(
-                    "LLM provider 不可用（未配置，或 AstrBot 未选用可用模型），"
-                    "本次调用跳过（prompt %d 字符）。",
-                    len(prompt),
-                )
+                if not quiet:
+                    logger.warning(
+                        "LLM provider 不可用（未配置，或 AstrBot 未选用可用模型），"
+                        "本次调用跳过（prompt %d 字符）。",
+                        len(prompt),
+                    )
                 return None
             timeout = float(self._cfg.get("llm_timeout_seconds", 60))
             try:
@@ -40,26 +44,31 @@ class LlmWriter:
                     provider.text_chat(prompt, session_id="whl_stadium_llm"),
                     timeout=timeout,
                 )
-            except TimeoutError:
-                logger.warning(
-                    "LLM 调用超时（>%gs，可通过配置 llm_timeout_seconds 调大）。",
-                    timeout,
-                )
+            except (asyncio.TimeoutError, TimeoutError):
+                # 3.11 前 asyncio.TimeoutError 与内置 TimeoutError 不同，两者都要捕获
+                if not quiet:
+                    logger.warning(
+                        "LLM 调用超时（>%gs，可通过配置 llm_timeout_seconds 调大）。",
+                        timeout,
+                    )
                 return None
             text = getattr(result, "result_str", None)
             if text is None:
-                logger.warning(
-                    "LLM 返回对象缺少 result_str 字段（prompt %d 字符），视为空内容。",
-                    len(prompt),
-                )
+                if not quiet:
+                    logger.warning(
+                        "LLM 返回对象缺少 result_str 字段（prompt %d 字符），视为空内容。",
+                        len(prompt),
+                    )
                 return None
             text = str(text).strip()
             if not text:
-                logger.warning("LLM 返回空内容（prompt %d 字符）。", len(prompt))
+                if not quiet:
+                    logger.warning("LLM 返回空内容（prompt %d 字符）。", len(prompt))
                 return None
             return text
         except Exception as e:
-            logger.warning(f"LLM call failed: {e}")
+            if not quiet:
+                logger.warning(f"LLM call failed: {e}")
             return None
 
     # ─── 事件文案 ─────────────────────────────────────────
@@ -109,9 +118,12 @@ class LlmWriter:
         text = await self._ask(prompt)
         if not text:
             logger.warning("LLM 事件设计首次调用无内容，重试一次……")
-            text = await self._ask(prompt)
+            text = await self._ask(prompt, quiet=True)
         if not text:
-            raise RuntimeError("LLM 未返回内容（已重试 1 次，详见日志）")
+            raise RuntimeError(
+                "LLM 未返回内容（已重试 1 次，详见日志；若反复如此请检查 AstrBot 是否选用可用模型，"
+                "必要时调大 llm_timeout_seconds）"
+            )
         raw = _extract_json(text)
         if not isinstance(raw, list):
             raise RuntimeError("LLM 返回格式不是 JSON 数组")
@@ -139,9 +151,12 @@ class LlmWriter:
         text = await self._ask(prompt)
         if not text:
             logger.warning("LLM 品牌设计首次调用无内容，重试一次……")
-            text = await self._ask(prompt)
+            text = await self._ask(prompt, quiet=True)
         if not text:
-            raise RuntimeError("LLM 未返回内容（已重试 1 次，详见日志）")
+            raise RuntimeError(
+                "LLM 未返回内容（已重试 1 次，详见日志；若反复如此请检查 AstrBot 是否选用可用模型，"
+                "必要时调大 llm_timeout_seconds）"
+            )
         raw = _extract_json(text)
         if not isinstance(raw, list):
             raise RuntimeError("LLM 返回格式不是 JSON 数组")

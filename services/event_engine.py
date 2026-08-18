@@ -9,21 +9,11 @@ import json
 import random
 
 from . import formula
+from ..utils.security import parse_choice_no
 
 
 class EventError(Exception):
     pass
-
-
-_CIRCLE_NO = {"①": 1, "②": 2, "③": 3, "④": 4}
-
-
-def _parse_choice_no(raw: str) -> int:
-    """解析选项号：支持 1/2/3/4 与 ①②③④。"""
-    raw = str(raw).strip()
-    if raw in _CIRCLE_NO:
-        return _CIRCLE_NO[raw]
-    return int(raw)
 
 
 # 默认事件库（22 条：6 即发 + 16 选择）。
@@ -589,7 +579,7 @@ class EventEngine:
                 continue
             team, ev_name, opt_raw = fields[0], fields[1], fields[2]
             try:
-                choice_no = _parse_choice_no(opt_raw)
+                choice_no = parse_choice_no(opt_raw)
             except ValueError:
                 results.append({"team": team, "event": ev_name, "ok": False,
                                 "error": "选项号需为数字或 ①②③④"})

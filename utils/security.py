@@ -60,6 +60,17 @@ def parse_qq_arg(raw: str) -> str | None:
     return None
 
 
+_CIRCLE_NO = {"①": 1, "②": 2, "③": 3, "④": 4}
+
+
+def parse_choice_no(raw: str) -> int:
+    """解析随机事件选项号：支持 1/2/3/4 与 ①②③④。"""
+    raw = str(raw).strip()
+    if raw in _CIRCLE_NO:
+        return _CIRCLE_NO[raw]
+    return int(raw)
+
+
 def format_m(value: float) -> str:
     """金额显示：去掉多余的尾零（最多 2 位小数）。"""
     return f"{value:.2f}".rstrip("0").rstrip(".")

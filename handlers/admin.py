@@ -10,12 +10,12 @@ from astrbot.api.message_components import File
 from ..config.defaults import validate_and_cast
 from ..services import formula
 from ..services.brand_service import BrandError
-from ..services.event_engine import EventError, _parse_choice_no
+from ..services.event_engine import EventError
 from ..services.file_import_service import FileImportError, cleanup_file
 from ..services.fixture_service import FixtureError
 from ..services.stadium_service import StadiumError
 from ..services.window_service import SettleError
-from ..utils.security import format_m, parse_int, parse_qq, parse_qq_arg
+from ..utils.security import format_m, parse_choice_no, parse_int, parse_qq, parse_qq_arg
 
 _FACILITY_ALIASES = {
     "商业区": "commercial", "商业": "commercial", "commercial": "commercial",
@@ -412,7 +412,7 @@ class AdminHandler:
             yield event.plain_result("用法: /主场事件选择 <队名> <事件名> <选项号>\n（选项号见 /主场事件选择列表 的广播文案）")
             return
         try:
-            choice_no = _parse_choice_no(parts[3])
+            choice_no = parse_choice_no(parts[3])
         except ValueError:
             yield event.plain_result("选项号需为正整数或 ①②③④")
             return
