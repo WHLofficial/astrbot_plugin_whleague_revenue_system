@@ -48,6 +48,31 @@ class _CaptureProvider:
         return type("R", (), {"result_str": self._response})()
 
 
+class _CompletionTextProvider:
+    """模拟新版 AstrBot LLMResponse：只带 completion_text、无 result_str。"""
+
+    def __init__(self, response: str):
+        self._response = response
+        self.calls = 0
+
+    async def text_chat(self, prompt, session_id=""):
+        self.calls += 1
+        return type("LLMResponseLike", (), {"completion_text": self._response,
+                                            "result_chain": None})()
+
+
+class _PlainStrProvider:
+    """个别 provider 直接返回 str。"""
+
+    def __init__(self, response: str):
+        self._response = response
+        self.calls = 0
+
+    async def text_chat(self, prompt, session_id=""):
+        self.calls += 1
+        return self._response
+
+
 async def test_default_event_pool():
     env = await TestEnv().setup()
     try:
@@ -510,5 +535,34 @@ async def test_llm_design_prompt_uses_single_brace():
         # 草稿持久化后 template 同样为单花括号（_fill_template 才能替换）
         pending = await env.dao.list_events("pending")
         assert "{team}" in pending[0]["template"] and "{{team}}" not in pending[0]["template"]
+    finally:
+        await env.teardown()
+
+
+async def test_ask_reads_llmresponse_completion_text():
+    """新版 AstrBot：text_chat 返回 LLMResponse（只有 completion_text，无 result_str）。"""
+    env = await TestEnv().setup()
+    try:
+        env.provider = _CompletionTextProvider(
+            '[{"name":"新版返回事件","category":"c","weight":5,'
+            '"event_type":"instant","effects":{"money":1},"template":"t"}]'
+        )
+        drafts = await env.event_engine.generate_drafts(1)
+        assert len(drafts) == 1 and drafts[0]["name"] == "新版返回事件"
+        assert env.provider.calls == 1
+    finally:
+        await env.teardown()
+
+
+async def test_ask_plain_str_result():
+    """个别 provider 直接返回 str 文本。"""
+    env = await TestEnv().setup()
+    try:
+        env.provider = _PlainStrProvider(
+            '[{"name":"纯字符串事件","category":"c","weight":5,'
+            '"event_type":"instant","effects":{"money":1},"template":"t"}]'
+        )
+        drafts = await env.event_engine.generate_drafts(1)
+        assert len(drafts) == 1 and drafts[0]["name"] == "纯字符串事件"
     finally:
         await env.teardown()

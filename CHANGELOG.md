@@ -7,6 +7,7 @@
 
 ### Fixed
 
+- **修复 LLM 空内容根因（适配新版 AstrBot `text_chat` 返回）**：v4.2x 的 `provider.text_chat` 返回 `LLMResponse`（文本在 `completion_text`），旧代码只读 `result_str` 恒为空；现按 `completion_text` → `result_str`（旧版）→ `result_chain.get_plain_text()` → 纯字符串的顺序容错提取。
 - **LLM 空内容可诊断与自愈**：`_ask` 按失败原因分类告警（provider 未选用 / 缺 `result_str` / 空内容 / 超时），事件与品牌设计空内容静默**重试一次**后再报错（错误含可操作提示）；文案回退模板时也写日志。
 - 修复 LLM 事件设计 prompt 的 `{{team}}` 双花括号缺陷：模板占位符现为单花括号，可被 `_fill_template` 正确替换。
 - 默认 LLM 超时 15s → 60s（`llm_timeout_seconds`，长 prompt 的事件设计不再容易中途掐断）；超时捕获兼容 Python 3.10（`asyncio.TimeoutError` vs 内置 `TimeoutError`）。

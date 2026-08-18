@@ -186,7 +186,7 @@
 ## 十三、开发
 
 ```
-python tests/run_all.py    # 80 项零依赖测试（astrbot 桩 + 临时数据库 + LLM 桩）
+python tests/run_all.py    # 82 项零依赖测试（astrbot 桩 + 临时数据库 + LLM 桩）
 ```
 
 目录结构照搬谈判系统分层惯例：`main.py`（薄命令层）→ `handlers/` → `services/` →

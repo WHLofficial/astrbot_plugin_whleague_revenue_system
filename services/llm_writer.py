@@ -52,15 +52,16 @@ class LlmWriter:
                         timeout,
                     )
                 return None
-            text = getattr(result, "result_str", None)
+            text = _extract_llm_text(result)
             if text is None:
                 if not quiet:
                     logger.warning(
-                        "LLM 返回对象缺少 result_str 字段（prompt %d 字符），视为空内容。",
+                        "LLM 返回对象缺少文本字段 completion_text/result_str"
+                        "（prompt %d 字符，对象类型 %s），视为空内容。",
                         len(prompt),
+                        type(result).__name__,
                     )
                 return None
-            text = str(text).strip()
             if not text:
                 if not quiet:
                     logger.warning("LLM 返回空内容（prompt %d 字符）。", len(prompt))
@@ -165,6 +166,34 @@ class LlmWriter:
 
 def _fill_template(template: str, team: str, stadium: str) -> str:
     return template.replace("{team}", team).replace("{stadium}", stadium)
+
+
+def _extract_llm_text(result) -> str | None:
+    """从 provider 返回对象中尽力提取纯文本。
+
+    新版 AstrBot 的 text_chat 返回 LLMResponse（文本在 completion_text，
+    内部走 result_chain.get_plain_text()）；旧版返回 AiMessageResult（result_str）；
+    个别 provider 可能直接返回 str。全都不匹配返回 None。
+    """
+    if isinstance(result, str):
+        return result
+    if result is None:
+        return None
+    for attr in ("completion_text", "result_str"):
+        try:
+            val = getattr(result, attr, None)
+        except Exception:
+            val = None
+        if isinstance(val, str) and val:
+            return val
+    try:
+        chain = getattr(result, "result_chain", None)
+        if chain is not None:
+            text = chain.get_plain_text()
+            return text if isinstance(text, str) else None
+    except Exception:
+        pass
+    return None
 
 
 def _extract_json(text: str):
