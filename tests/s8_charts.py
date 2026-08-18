@@ -312,3 +312,37 @@ async def test_chart_bundled_font_and_override():
         _font(20, bold=False)
     finally:
         set_font_override("")
+
+
+async def test_chart_bundled_font_weight_differentiates():
+    """同一内置变量字体下，bold=True 必须真的切到粗体（避免全图等重 Regular）。
+
+    CJK 字形各字重前进宽度一致（全宽方块），但笔画墨量随字重增加，故用渲染墨量判别。
+    """
+    from PIL import Image, ImageDraw
+
+    from astrbot_plugin_whleague_revenue_system.services.chart_service import (
+        _font,
+        _list_plugin_fonts,
+        set_font_override,
+    )
+
+    def _ink(font) -> int:
+        img = Image.new("RGB", (260, 140), "white")
+        dr = ImageDraw.Draw(img)
+        dr.text((8, 8), "合计观众场次", font=font, fill="black")
+        px = img.load()
+        return sum(1 for y in range(img.size[1]) for x in range(img.size[0])
+                   if px[x, y][0] < 128)
+
+    bundled = _list_plugin_fonts()
+    assert bundled, "插件应内置中文字体"
+    set_font_override(bundled[0])
+    try:
+        ink_regular = _ink(_font(40, bold=False))
+        ink_bold = _ink(_font(40, bold=True))
+        assert ink_bold > ink_regular * 1.3, (
+            f"内置字体下粗体墨量应明显更大: regular={ink_regular} bold={ink_bold}"
+        )
+    finally:
+        set_font_override("")

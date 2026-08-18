@@ -107,6 +107,9 @@ def set_font_override(path: str) -> None:
 
 _RESULT_CN = {"W": "胜", "D": "平", "L": "负"}
 
+# 超采样倍率：按 2x 画布绘制再 LANCZOS 缩回设计尺寸，文字边缘更清晰
+_SUPERSAMPLE = 2
+
 
 class ChartError(Exception):
     pass
@@ -173,10 +176,13 @@ def _resolve_font_path(bold: bool) -> str:
     return ""
 
 
-def _try_regular_variation(font) -> None:
-    """内置 Noto Sans SC 为变量字体默认 Thin，切到 Regular 字重（失败静默）。"""
+def _apply_weight(font, bold: bool) -> None:
+    """内置 Noto Sans SC 为变量字体默认 Thin：粗体切 Bold、常规切 Regular（失败静默）。
+
+    静态粗体字体（如 msyhbd.ttc）不支持 set_variation_by_name，静默跳过保持原字重。
+    """
     try:
-        font.set_variation_by_name("Regular")
+        font.set_variation_by_name("Bold" if bold else "Regular")
     except Exception:
         pass
 
@@ -194,7 +200,7 @@ def _font(size: int, bold: bool = False):
         font = ImageFont.truetype(path, size, index=0)
     except Exception as e:
         raise ChartError(f"字体加载失败（{path}）：{e}") from e
-    _try_regular_variation(font)
+    _apply_weight(font, bold)
     return font
 
 
@@ -202,66 +208,68 @@ def _text_w(dr, text: str, font) -> int:
     return int(dr.textlength(text, font=font))
 
 
-def _draw_cell_text(dr, text, x, y, w, h, font, fill, align: str) -> None:
+def _draw_cell_text(dr, text, x, y, w, h, font, fill, align: str, scale: int = 1) -> None:
     bbox = dr.textbbox((0, 0), text, font=font)
     tw = bbox[2] - bbox[0]
     th = bbox[3] - bbox[1]
+    pad = 12 * scale
     if align == "right":
-        tx = x + w - 12 - tw
+        tx = x + w - pad - tw
     elif align == "center":
         tx = x + (w - tw) / 2
     else:
-        tx = x + 12
+        tx = x + pad
     ty = y + (h - th) / 2 - bbox[1]
     dr.text((tx, ty), text, font=font, fill=fill)
 
 
 def _draw_table_block(dr, y_base: int, width: int, title: str, subtitle: str,
                       headers, rows, totals, header_fill, header_text,
-                      row_colors=None) -> int:
-    """在画布 (0, y_base) 起绘制一个表格区块，返回区块结束的 y。
+                      row_colors=None, scale: int = 1) -> int:
+    """在画布 (0, y_base) 起绘制一个表格区块，返回区块结束的 y（按 scale 缩放）。
 
     headers: (文本, 列宽, 对齐 l/c/r)；totals 可为 None（不画合计行）；
     row_colors: 与 rows 同构的每格颜色（None 用默认深色）。
     """
-    pad, title_h, sub_h, gap = 24, 48, 30, 8
-    header_h, row_h, total_h = 46, 42, 46
+    pad, title_h, sub_h, gap = 24 * scale, 48 * scale, 30 * scale, 8 * scale
+    header_h, row_h, total_h = 46 * scale, 42 * scale, 46 * scale
+    W = width * scale
     col_x = []
     x = pad
     for _, w, _ in headers:
         col_x.append(x)
-        x += w
-    f_title = _font(32, bold=True)
-    f_sub = _font(20)
-    f_head = _font(22, bold=True)
-    f_row = _font(22)
-    f_tot = _font(22, bold=True)
+        x += w * scale
+    f_title = _font(32 * scale, bold=True)
+    f_sub = _font(20 * scale)
+    f_head = _font(22 * scale, bold=True)
+    f_row = _font(22 * scale)
+    f_tot = _font(22 * scale, bold=True)
 
-    y = y_base + pad
+    y = y_base * scale + pad
     dr.text((pad, y), title, font=f_title, fill=TEXT_DARK)
     y += title_h
-    dr.text((pad + 2, y), subtitle, font=f_sub, fill=(120, 120, 120))
+    dr.text((pad + 2 * scale, y), subtitle, font=f_sub, fill=(120, 120, 120))
     y += sub_h + gap
 
-    dr.rectangle([pad, y, width - pad, y + header_h], fill=header_fill)
+    dr.rectangle([pad, y, W - pad, y + header_h], fill=header_fill)
     for i, (cell, (_, w, align)) in enumerate(zip([h[0] for h in headers], headers)):
-        _draw_cell_text(dr, cell, col_x[i], y, w, header_h, f_head, header_text, align)
+        _draw_cell_text(dr, cell, col_x[i], y, w * scale, header_h, f_head, header_text, align, scale)
     y += header_h
 
     for ri, row in enumerate(rows):
-        dr.rectangle([pad, y, width - pad, y + row_h], outline=GRID)
+        dr.rectangle([pad, y, W - pad, y + row_h], outline=GRID)
         colors = row_colors[ri] if row_colors else None
         for i, (cell, (_, w, align)) in enumerate(zip(row, headers)):
             fill = (colors[i] if colors and colors[i] else TEXT_DARK)
-            _draw_cell_text(dr, cell, col_x[i], y, w, row_h, f_row, fill, align)
+            _draw_cell_text(dr, cell, col_x[i], y, w * scale, row_h, f_row, fill, align, scale)
         y += row_h
 
     if totals is not None:
-        dr.rectangle([pad, y, width - pad, y + total_h], fill=header_fill)
+        dr.rectangle([pad, y, W - pad, y + total_h], fill=header_fill)
         for i, (cell, (_, w, align)) in enumerate(zip(totals, headers)):
-            _draw_cell_text(dr, cell, col_x[i], y, w, total_h, f_tot, header_text, align)
+            _draw_cell_text(dr, cell, col_x[i], y, w * scale, total_h, f_tot, header_text, align, scale)
         y += total_h
-        dr.rectangle([pad, y, width - pad, y + 3], fill=ACCENT)
+        dr.rectangle([pad, y, W - pad, y + 3 * scale], fill=ACCENT)
     return y
 
 
@@ -270,6 +278,7 @@ def _draw_table(title: str, subtitle: str, headers, rows, totals, out_path: str,
     """单表格图（headers/rows/totals: (文本, 列宽, 对齐 l/c/r)）。"""
     from PIL import Image, ImageDraw
 
+    S = _SUPERSAMPLE
     pad, title_h, sub_h, gap = 24, 48, 30, 8
     header_h, row_h, total_h = 46, 42, 46
     width = sum(w for _, w, _ in headers) + pad * 2
@@ -277,10 +286,11 @@ def _draw_table(title: str, subtitle: str, headers, rows, totals, out_path: str,
     height = pad + title_h + sub_h + gap + header_h + len(rows) * row_h \
         + (total_h + 3 if has_totals else 0) + pad
 
-    img = Image.new("RGB", (width, height), BG)
+    img = Image.new("RGB", (width * S, height * S), BG)
     dr = ImageDraw.Draw(img)
     _draw_table_block(dr, 0, width, title, subtitle, headers, rows, totals,
-                      header_fill, header_text)
+                      header_fill, header_text, scale=S)
+    img = img.resize((width, height), Image.LANCZOS)
     img.save(out_path)
     return out_path
 
@@ -317,14 +327,15 @@ def _draw_trend(title: str, subtitle: str, series, out_path: str,
 
     from PIL import Image, ImageDraw
 
-    W, H = 1180, 640
-    margin_t, margin_b = 96, 64
+    S = _SUPERSAMPLE
+    W, H = 1180 * S, 640 * S
+    margin_t, margin_b = 96 * S, 64 * S
     names = [n for n, _ in series]
     legend_cols = 2 if len(series) > 14 else 1
     per_col = math.ceil(len(series) / legend_cols)
-    legend_row_h = 28
-    margin_r = min(340, 70 + max(len(n) for n in names) * 24 + 20)
-    margin_l = 110
+    legend_row_h = 28 * S
+    margin_r = min(340 * S, 70 * S + max(len(n) for n in names) * 24 * S + 20 * S)
+    margin_l = 110 * S
     plot_w = W - margin_l - margin_r
     plot_h = H - margin_t - margin_b
 
@@ -341,17 +352,17 @@ def _draw_trend(title: str, subtitle: str, series, out_path: str,
 
     img = Image.new("RGB", (W, H), BG)
     dr = ImageDraw.Draw(img)
-    f_title = _font(30, bold=True)
-    f_axis = _font(20)
+    f_title = _font(30 * S, bold=True)
+    f_axis = _font(20 * S)
 
     # 网格与 y 轴刻度
     for i in range(6):
         yy = margin_t + plot_h * i / 5
         val = y_top * (5 - i) / 5
-        dr.line([margin_l, yy, W - margin_r, yy], fill=GRID, width=1)
+        dr.line([margin_l, yy, W - margin_r, yy], fill=GRID, width=S)
         tick = _fmt_k(int(round(val)))
         tw = _text_w(dr, tick, f_axis)
-        dr.text((margin_l - 12 - tw, yy - 13), tick, font=f_axis, fill=(110, 110, 110))
+        dr.text((margin_l - 12 * S - tw, yy - 13 * S), tick, font=f_axis, fill=(110, 110, 110))
 
     # x 轴刻度
     step = max(1, (x_max - x_min + 1) // 10)
@@ -359,35 +370,36 @@ def _draw_trend(title: str, subtitle: str, series, out_path: str,
         xx = sx(xv)
         t = str(xv)
         tw = _text_w(dr, t, f_axis)
-        dr.text((xx - tw / 2, margin_t + plot_h + 8), t, font=f_axis, fill=(110, 110, 110))
-    dr.line([margin_l, margin_t + plot_h, W - margin_r, margin_t + plot_h], fill=TEXT_DARK, width=2)
+        dr.text((xx - tw / 2, margin_t + plot_h + 8 * S), t, font=f_axis, fill=(110, 110, 110))
+    dr.line([margin_l, margin_t + plot_h, W - margin_r, margin_t + plot_h], fill=TEXT_DARK, width=2 * S)
 
     # 折线
     for idx, (name, pts) in enumerate(series):
         color = PALETTE[idx % len(PALETTE)]
         coords = [(sx(x), sy(y)) for x, y in sorted(pts)]
-        dr.line(coords, fill=color, width=4)
+        dr.line(coords, fill=color, width=4 * S)
         for cx, cy in coords:
-            dr.ellipse([cx - 5, cy - 5, cx + 5, cy + 5], fill=color, outline=BG)
+            dr.ellipse([cx - 5 * S, cy - 5 * S, cx + 5 * S, cy + 5 * S], fill=color, outline=BG)
 
     # 图例（右侧，最多两列）
-    lx = W - margin_r + 16
+    lx = W - margin_r + 16 * S
     for i, name in enumerate(names):
         col = i // per_col
         row = i % per_col
-        ly = margin_t - 20 + row * legend_row_h
-        px = lx + col * (max(len(n) for n in names) * 24 + 60)
+        ly = margin_t - 20 * S + row * legend_row_h
+        px = lx + col * (max(len(n) for n in names) * 24 * S + 60 * S)
         color = PALETTE[i % len(PALETTE)]
-        dr.rectangle([px, ly + 4, px + 16, ly + 20], fill=color)
-        dr.text((px + 24, ly), name, font=f_axis, fill=TEXT_DARK)
+        dr.rectangle([px, ly + 4 * S, px + 16 * S, ly + 20 * S], fill=color)
+        dr.text((px + 24 * S, ly), name, font=f_axis, fill=TEXT_DARK)
 
     # 轴标签与标题
-    dr.text((margin_l - 10, H - 34), x_label, font=f_axis, fill=(110, 110, 110))
-    dr.text((16, margin_t + plot_h // 2), y_label, font=f_axis, fill=(110, 110, 110))
+    dr.text((margin_l - 10 * S, H - 34 * S), x_label, font=f_axis, fill=(110, 110, 110))
+    dr.text((16 * S, margin_t + plot_h // 2), y_label, font=f_axis, fill=(110, 110, 110))
 
-    dr.text((margin_l, 24), title, font=f_title, fill=TEXT_DARK)
-    dr.text((margin_l, 64), subtitle, font=f_axis, fill=(120, 120, 120))
+    dr.text((margin_l, 24 * S), title, font=f_title, fill=TEXT_DARK)
+    dr.text((margin_l, 64 * S), subtitle, font=f_axis, fill=(120, 120, 120))
 
+    img = img.resize((W // S, H // S), Image.LANCZOS)
     img.save(out_path)
     return out_path
 
@@ -524,16 +536,18 @@ class ChartService:
 
         from PIL import Image, ImageDraw
 
-        img = Image.new("RGB", (width, height), BG)
+        S = _SUPERSAMPLE
+        img = Image.new("RGB", (width * S, height * S), BG)
         dr = ImageDraw.Draw(img)
         title1 = f"WHL 第{season}赛季{competition} 第{round_no}轮 对阵表"
         subtitle1 = f"第 {season} 赛季 · 窗口 {window_seq} · 共 {n} 场"
         y = _draw_table_block(dr, 0, width, title1, subtitle1, sched_headers,
-                              sched_rows, None, header_fill, header_text)
+                              sched_rows, None, header_fill, header_text, scale=S)
         title2 = "天气预报"
         subtitle2 = f"第 {round_no} 轮({competition}) · 未预报显示灰色「待预报」"
-        _draw_table_block(dr, y + 10, width, title2, subtitle2, wx_headers,
-                          wx_rows, None, header_fill, header_text, row_colors=wx_colors)
+        _draw_table_block(dr, y + 10 * S, width, title2, subtitle2, wx_headers,
+                          wx_rows, None, header_fill, header_text, row_colors=wx_colors, scale=S)
+        img = img.resize((width, height), Image.LANCZOS)
 
         out = self.charts_dir / f"preview_s{season}_w{window_seq}_{competition}_r{round_no}.png"
         try:
