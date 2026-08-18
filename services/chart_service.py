@@ -242,7 +242,7 @@ def _draw_cell_text(dr, text, x, y, w, h, font, fill, align: str, scale: int = 1
 def _draw_table_block(dr, y_base: int, width: int, title: str, subtitle: str,
                       headers, rows, totals, header_fill, header_text,
                       row_colors=None, scale: int = 1) -> int:
-    """在画布 (0, y_base) 起绘制一个表格区块，返回区块结束的 y（按 scale 缩放）。
+    """在画布 y_base（已按 scale 缩放的设备坐标）起绘制一个表格区块，返回区块结束的 y（同坐标系）。
 
     headers: (文本, 列宽, 对齐 l/c/r)；totals 可为 None（不画合计行）；
     row_colors: 与 rows 同构的每格颜色（None 用默认深色）。
@@ -261,7 +261,7 @@ def _draw_table_block(dr, y_base: int, width: int, title: str, subtitle: str,
     f_row = _font(22 * scale)
     f_tot = _font(22 * scale, bold=True)
 
-    y = y_base * scale + pad
+    y = y_base + pad
     dr.text((pad, y), title, font=f_title, fill=TEXT_DARK)
     y += title_h
     dr.text((pad + 2 * scale, y), subtitle, font=f_sub, fill=(120, 120, 120))

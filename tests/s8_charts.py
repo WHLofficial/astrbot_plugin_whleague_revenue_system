@@ -35,6 +35,32 @@ def _color_count(path, target, tol=14) -> int:
         im.close()
 
 
+def _header_band_count(path, header_rgb, tol=10) -> int:
+    """统计图中表头填充色出现的横向色带数（用于确认多区块都存在）。"""
+    from PIL import Image
+
+    im = Image.open(path).convert("RGB")
+    try:
+        w, h = im.size
+        px = im.load()
+        bands, in_band = 0, False
+        for y in range(h):
+            run = sum(
+                1 for x in range(0, w, 4)
+                if abs(px[x, y][0] - header_rgb[0]) < tol
+                and abs(px[x, y][1] - header_rgb[1]) < tol
+                and abs(px[x, y][2] - header_rgb[2]) < tol
+            )
+            if run > 30 and not in_band:
+                bands += 1
+                in_band = True
+            elif run <= 30:
+                in_band = False
+        return bands
+    finally:
+        im.close()
+
+
 PURPLE = (177, 156, 217)
 ORANGE = (233, 113, 50)
 GREEN = (92, 180, 142)
@@ -373,6 +399,25 @@ async def test_chart_long_team_names_and_preview_height():
         assert h == 406, f"预告图高度应为紧致 406，实为 {w}x{h}"
         rp = await svc.render_round_chart(9, "顶级联赛")
         assert _png_ok(rp), rp
+    finally:
+        await env.teardown()
+
+
+async def test_preview_chart_weather_block_present():
+    """预告图必须包含两个区块（对阵表 + 天气预报），天气块不能被挤出画布。"""
+    env = await TestEnv().setup()
+    try:
+        for team, inf in [("利物浦", 150.0), ("巴塞罗那", 120.0),
+                          ("纽卡斯尔联", 130.0), ("勒沃库森", 110.0)]:
+            await env.stadium_service.import_attributes(team, influence=inf)
+        await env.fixture_service.import_fixtures(
+            "顶级9 利物浦 巴塞罗那 W12 D6 15:00\n顶级9 纽卡斯尔联 勒沃库森 W12 D6 20:00\n"
+        )
+        await env.fixture_service.set_weather(9, "利物浦", "晴", "顶级联赛")
+        svc = ChartService(env.db, env.dao, env.cfg)
+        pv = await svc.render_round_preview_chart(9, "顶级联赛")
+        assert _png_ok(pv), pv
+        assert _header_band_count(pv, ORANGE) >= 2, "预告图应含对阵表 + 天气两个表头色带"
     finally:
         await env.teardown()
 
