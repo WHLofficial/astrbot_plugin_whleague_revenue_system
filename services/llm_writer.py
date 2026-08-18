@@ -94,6 +94,48 @@ class LlmWriter:
             return _fill_template(template, team, stadium_name)
         return _fill_template(text[:120], team, stadium_name)
 
+    # ─── 事件广播与结算 ────────────────────────────────────
+
+    async def event_broadcast(self, event, team: str, stadium: str) -> str:
+        """选择型事件广播的叙述段（LLM；失败/关闭回退模板）。
+
+        选项与概率由插件确定性拼接，叙述只负责氛围，绝不列选项/概率/金额。
+        """
+        name = str(event["name"])
+        category = str(event["category"]) if "category" in event.keys() else ""
+        template = event["template"] or name
+        if not self.enabled(flavor=True):
+            return _fill_template(template, team, stadium)
+        prompt = (
+            "你是足球俱乐部的赛事运营文案，为一次随机事件写一段 2~4 句的中文广播"
+            "（将转发给教练们做选择）。事件："
+            f"{name}（{category}）；球队：{team}，球场：{stadium}。\n"
+            "要求：写出情境与氛围，生动有画面感；不要列举操作选项，不要出现选项编号"
+            "（①②③④）或数字列表，不要出现任何概率百分比与金额数值。只输出广播正文。"
+        )
+        text = await self._ask(prompt)
+        if not text:
+            logger.warning("事件广播 LLM 调用无内容，回退模板（%s·%s）。", team, name)
+            return _fill_template(template, team, stadium)
+        return _fill_template(text[:200], team, stadium)
+
+    async def event_result(self, event, team: str, how: str, notes) -> str:
+        """结算结果短文案（LLM；失败/关闭返回空串，由调用方回退确定性摘要）。"""
+        name = str(event["name"])
+        if not self.enabled(flavor=True):
+            return ""
+        effect_txt = "、".join(notes) if notes else "无变化"
+        prompt = (
+            "你是足球俱乐部的赛事播报员，为一次随机事件结算写 1~2 句简短中文播报。\n"
+            f"事件：{name}；球队：{team}；本次：{how}；效果：{effect_txt}。\n"
+            "要求：语气简洁，说清这次结果的后果；不要出现选项编号（①②③④）与概率百分比。"
+            "只输出播报。"
+        )
+        text = await self._ask(prompt)
+        if not text:
+            return ""
+        return text[:120]
+
     # ─── 事件设计 ─────────────────────────────────────────
 
     async def design_events(self, count: int, topic: str = "") -> list[dict]:

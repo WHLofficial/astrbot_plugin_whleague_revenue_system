@@ -128,22 +128,66 @@ async def test_choice_trigger_pending_and_broadcast():
     env = await TestEnv().setup()
     try:
         await env.stadium_service.import_attributes("利物浦", influence=150.0)
+        env.provider.set_response("围巾印到一半，机器突然停了，加单还是不加单？")
         result = await env.event_engine.trigger_team("利物浦", 1, 1, event_id="merch_hit")
         hit = result["hits"][0]
         assert hit["type"] == "choice"
         # 选择型不立即记账（无事件流水）
         txs = await env.dao.list_transactions("利物浦", season=1, window_seq=1)
         assert not [t for t in txs if t["kind"] == "event"], txs
-        # 广播文案含事件名/球队/选项号与概率
+        # 广播 = LLM 叙述 + 选项列表（不含概率）
         text = hit["broadcast"]
         assert "周边爆款" in text and "利物浦" in text
-        assert "①" in text and "②" in text and "60%" in text
+        assert "围巾印到一半" in text  # LLM 叙述被采用
+        assert "①" in text and "②" in text
+        assert "60%" not in text and "资金" not in text  # 概率/金额不出现在广播
         # 待定选择记录（未定）
         c = await env.dao.get_event_choice("利物浦", 1, 1, "merch_hit")
         assert c is not None and c["choice_no"] is None and c["resolved"] == 0
         # 日志带广播文案
         logs = await env.dao.get_window_events("利物浦", 1, 1)
         assert logs and "①" in logs[0]["text"]
+    finally:
+        await env.teardown()
+
+
+async def test_settle_now_decided_and_all():
+    env = await TestEnv().setup()
+    try:
+        await env.stadium_service.import_attributes("利物浦", influence=150.0)
+        await env.stadium_service.import_attributes("巴塞罗那", influence=150.0)
+        await env.event_engine.trigger_team("利物浦", 1, 1, event_id="merch_hit")
+        await env.event_engine.trigger_team("巴塞罗那", 1, 1, event_id="new_wave")
+        await env.dao.set_event_choice("利物浦", 1, 1, "merch_hit", 1)
+        import random
+
+        random.seed(3)
+        # 只结已导入选择
+        res = await env.event_engine.settle_now(1, 1)
+        assert len(res["resolved"]) == 1 and res["resolved"][0]["team"] == "利物浦"
+        assert not res["resolved"][0]["auto"]
+        remain = await env.dao.get_unresolved_choices(1, 1)
+        assert [c for c in remain if c["team_name"] == "巴塞罗那"], "未定应保留"
+        # 全部结算（连同未定按最差兜底）
+        res2 = await env.event_engine.settle_now(1, 1, include_undecided=True)
+        assert [r for r in res2["resolved"] if r["team"] == "巴塞罗那"]
+        assert await env.dao.get_unresolved_choices(1, 1) == []
+    finally:
+        await env.teardown()
+
+
+async def test_settle_result_text_replaces_broadcast():
+    env = await TestEnv().setup()
+    try:
+        await env.stadium_service.import_attributes("利物浦", influence=150.0)
+        await env.event_engine.trigger_team("利物浦", 1, 1, event_id="merch_hit")
+        await env.dao.set_event_choice("利物浦", 1, 1, "merch_hit", 1)
+        await env.event_engine.settle_now(1, 1)
+        logs = await env.dao.get_window_events("利物浦", 1, 1)
+        text = logs[0]["text"]
+        # 结算后日志为结果短文案（回退摘要），不再是广播（不含「请在窗口结算前」）
+        assert "请在窗口结算前" not in text
+        assert ("周边爆款" in text) and ("选1" in text or "自动最差" in text)
     finally:
         await env.teardown()
 

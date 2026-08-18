@@ -9,6 +9,7 @@ import json
 import random
 
 from . import formula
+from .llm_writer import _fill_template
 from ..utils.security import parse_choice_no
 
 
@@ -404,45 +405,37 @@ class EventEngine:
         await self._dao.add_event_choice(team_name, season, window_seq, event["event_id"])
         options = self._event_options(event)
         stadium = await self._dao.get_stadium(team_name)
-        broadcast = self._build_broadcast(event, team_name,
-                                          stadium["name"] if stadium else team_name, options)
+        broadcast = await self._build_broadcast(event, team_name,
+                                                stadium["name"] if stadium else team_name, options)
         await self._dao.add_event_log(team_name, season, window_seq, event["event_id"],
                                       "{}", broadcast)
         return {"team": team_name, "event": event["name"], "event_id": event["event_id"],
                 "type": "choice", "broadcast": broadcast, "options": options}
 
-    def _build_broadcast(self, event, team_name: str, stadium_name: str, options: list) -> str:
-        """确定性生成面向球员的广播文案（含选项与概率），按选项号回复。"""
-        lines = [f"🎲 事件「{event['name']}」（{event['category']}）@ {team_name}·{stadium_name}",
-                 "请在窗口结算前任选一项操作（回复：队名 事件名 选项号）："]
+    async def _build_broadcast(self, event, team_name: str, stadium_name: str, options: list) -> str:
+        """生成面向球员的广播：LLM 叙述段 + 确定性选项列表（不显示概率）。
+
+        叙述只讲氛围（失败回退模板），选项由数据生成保证编号/说明准确，
+        玩家按「队名 事件名 选项号」回复。
+        """
+        if self._llm is None:
+            narrative = _fill_template(event["template"] or event["name"], team_name, stadium_name)
+        else:
+            narrative = await self._llm.event_broadcast(event, team_name, stadium_name)
+        lines = [
+            f"🎲 事件「{event['name']}」（{event['category']}）@ {team_name}·{stadium_name}",
+            narrative,
+            "请在窗口结算前任选一项操作（回复：队名 事件名 选项号）：",
+        ]
         for opt in options:
-            odds = " / ".join(f"{o['w']:g}% {self._outcome_desc(o.get('effects') or {})}"
-                              for o in opt.get("outcomes", []))
             desc = opt.get("desc") or ""
             lines.append(f"{self._num(opt['no'])} {opt['name']}"
-                         + (f"（{desc}）" if desc else "") + f"：{odds}")
+                         + (f"（{desc}）" if desc else ""))
         return "\n".join(lines)
 
     @staticmethod
     def _num(n) -> str:
         return {1: "①", 2: "②", 3: "③", 4: "④"}.get(int(n), f"{n}.")
-
-    @staticmethod
-    def _outcome_desc(effects: dict) -> str:
-        parts = []
-        money = float(effects.get("money", 0.0))
-        maintenance = float(effects.get("maintenance", 0.0))
-        fans = float(effects.get("fans_pct", 0.0))
-        mod = float(effects.get("attendance_mod", 1.0))
-        if money:
-            parts.append(f"资金{money:+.1f}M")
-        if maintenance:
-            parts.append(f"维护−{maintenance:.1f}M")
-        if fans:
-            parts.append(f"死忠{fans * 100:+.1f}%")
-        if mod != 1.0:
-            parts.append(f"上座×{mod:.2f}")
-        return "、".join(parts) if parts else "无变化"
 
     def _roll_option(self, opt: dict) -> dict:
         """按选项结果的权重掷骰选一条 outcome。"""
@@ -483,8 +476,6 @@ class EventEngine:
                 text = await self._llm.event_text(event_row, hit["team"], stadium_name,
                                                   context="；".join(hit["notes"]))
             else:
-                from .llm_writer import _fill_template
-
                 text = _fill_template(event_row["template"] or event_row["name"],
                                       hit["team"], stadium_name)
             await self._dao.update_event_log_text(
@@ -496,50 +487,87 @@ class EventEngine:
 
     async def settle_choices(self, season: int, window_seq: int,
                              apply_state: bool = True) -> dict:
-        """结算选择型事件：已导入选择按选项概率掷骰，未定按最差结果兜底。
+        """结算当前窗口全部待定选择：已定按概率掷骰、未定按最差兜底。
 
-        返回的 tx_ids 并入窗口结算的可撤销集合；同时把 events_log 中该选择
-        事件的广播文案替换为一行结算摘要（保持结算回顾简洁）。
-        apply_state=False（强制重算场景）只重记账目类效果，跳过死忠/上座状态应用。
+        返回的 tx_ids 并入窗口结算的可撤销集合；每个已结事件写一行结算短文案
+        （LLM，超限/失败回退确定性摘要）到 events_log.text。
+        apply_state=False（强制重算）只重记账目，跳过死忠/上座状态应用。
         """
         rows = await self._dao.get_unresolved_choices(season, window_seq)
+        return await self._settle_rows(rows, apply_state=apply_state)
+
+    async def settle_now(self, season: int, window_seq: int,
+                         include_undecided: bool = False) -> dict:
+        """独立结算（管理员指令）：默认只结已导入选择；include_undecided 连未定一并兜底。
+
+        与窗口结算解耦——流水是普通 event 流水，不写入 window_summaries.tx_ids，
+        之后窗口「强制」重算不会误删；已结算的选择窗口结算会跳过。
+        """
+        rows = await self._dao.get_unresolved_choices(season, window_seq)
+        if not include_undecided:
+            rows = [c for c in rows if c["choice_no"] is not None]
+        return await self._settle_rows(rows, apply_state=True)
+
+    async def _settle_rows(self, rows, apply_state: bool) -> dict:
         resolved = []
         tx_ids: list[int] = []
+        llm_max = int(self._cfg.get("llm_max_calls", 8))
+        used = 0
         for c in rows:
-            event = await self._dao.fetch_event_by_id(c["event_id"])
-            options = self._event_options(event) if event else []
-            if not options:
-                await self._dao.mark_choice_resolved(c["id"], '{"skipped": true}')
-                name = event["name"] if event else c["event_id"]
-                await self._dao.update_event_log_text(c["team_name"], c["event_id"],
-                                                      f"「{name}」无选项信息，跳过")
-                resolved.append({"team": c["team_name"], "event": name,
-                                 "auto": True, "skipped": True, "notes": []})
-                continue
-            auto = c["choice_no"] is None
-            opt = None
-            if not auto:
-                opt = next((o for o in options if o["no"] == c["choice_no"]), None)
-                auto = opt is None  # 选项号无效同样按最差兜底
-            if auto:
-                opt, outcome = self._worst_option(options)
-            else:
-                outcome = self._roll_option(opt)
-            effects = outcome.get("effects") or {}
-            notes = await self._apply_effects(c["team_name"], season, window_seq,
-                                              effects, f"{event['name']}·{opt['name']}",
-                                              tx_ids, apply_state=apply_state)
-            how = "未收到选择，按最差结果" if auto else f"选项{opt['no']} {opt['name']}"
-            await self._dao.mark_choice_resolved(c["id"], json.dumps(
-                {"option": opt["no"], "option_name": opt["name"], "auto": auto,
-                 "effects": effects}, ensure_ascii=False))
-            await self._dao.update_event_log_text(
-                c["team_name"], c["event_id"],
-                f"「{event['name']}」{how} → {'；'.join(notes) if notes else '无变化'}",
-            )
-            resolved.append({"team": c["team_name"], "event": event["name"],
-                             "option": opt["name"], "auto": auto, "notes": notes})
+            use_llm = used < llm_max
+            used += 1
+            resolved.append(await self._resolve_choice(c, tx_ids, apply_state=apply_state,
+                                                       use_llm=use_llm))
         return {"resolved": resolved, "tx_ids": tx_ids}
+
+    async def _resolve_choice(self, c, tx_ids: list[int], apply_state: bool, use_llm: bool) -> dict:
+        """结算单条选择事件：已定掷骰/未定最差 → 生效 → 记 resolved → 写结算短文案。"""
+        season, window_seq = int(c["season_number"]), int(c["window_seq"])
+        event = await self._dao.fetch_event_by_id(c["event_id"])
+        options = self._event_options(event) if event else []
+        if not options:
+            await self._dao.mark_choice_resolved(c["id"], '{"skipped": true}')
+            name = event["name"] if event else c["event_id"]
+            await self._dao.update_event_log_text(c["team_name"], c["event_id"],
+                                                  f"「{name}」无选项信息，跳过")
+            return {"team": c["team_name"], "event": name,
+                    "auto": True, "skipped": True, "notes": []}
+        auto = c["choice_no"] is None
+        opt = None
+        if not auto:
+            opt = next((o for o in options if o["no"] == c["choice_no"]), None)
+            auto = opt is None  # 选项号无效同样按最差兜底
+        if auto:
+            opt, outcome = self._worst_option(options)
+        else:
+            outcome = self._roll_option(opt)
+        effects = outcome.get("effects") or {}
+        notes = await self._apply_effects(c["team_name"], season, window_seq,
+                                          effects, f"{event['name']}·{opt['name']}",
+                                          tx_ids, apply_state=apply_state)
+        if auto:
+            how = "自动最差（选项号无效）" if c["choice_no"] is not None else "自动最差（未收到选择）"
+        else:
+            how = f"选{opt['no']} {opt['name']}"
+        await self._dao.mark_choice_resolved(c["id"], json.dumps(
+            {"option": opt["no"], "option_name": opt["name"], "auto": auto,
+             "effects": effects}, ensure_ascii=False))
+        text = await self._result_text(event, c["team_name"], how, notes, use_llm)
+        await self._dao.update_event_log_text(c["team_name"], c["event_id"], text)
+        return {"team": c["team_name"], "event": event["name"],
+                "option": opt["name"], "auto": auto, "notes": notes}
+
+    async def _result_text(self, event, team: str, how: str, notes, use_llm: bool) -> str:
+        """结算短文案：LLM（受调用上限约束）；失败/超限回退确定性摘要行。"""
+        fallback = f"「{event['name']}」{how} → {'；'.join(notes) if notes else '无变化'}"
+        if use_llm and self._llm is not None:
+            try:
+                text = await self._llm.event_result(event, team, how, notes)
+            except Exception:
+                text = ""
+            if text:
+                return text
+        return fallback
 
     # ─── 选择录入（管理员收集球员回应后导入） ───────────────
 
