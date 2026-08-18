@@ -286,3 +286,29 @@ async def test_chart_commands():
         assert out3 and isinstance(out3[0], str) and _png_ok(out3[0]), out3
     finally:
         await env.teardown()
+
+
+async def test_chart_bundled_font_and_override():
+    """内置字体存在可加载；chart_font_path 覆盖优先于系统扫描。"""
+    from astrbot_plugin_whleague_revenue_system.services.chart_service import (
+        _font,
+        _list_plugin_fonts,
+        set_font_override,
+    )
+
+    bundled = _list_plugin_fonts()
+    assert bundled, "插件应内置中文字体"
+    assert os.path.exists(bundled[0])
+    # 覆盖到内置字体：_font 不应抛 ChartError，且能拿到 Regular 字重
+    set_font_override(bundled[0])
+    try:
+        f = _font(20)
+        assert f is not None
+    finally:
+        set_font_override("")
+    # 无效覆盖路径 → 回退系统字体（本机 msyh 在候选清单内），不抛错
+    set_font_override(r"C:\Windows\Fonts\not_exist.ttf")
+    try:
+        _font(20, bold=False)
+    finally:
+        set_font_override("")

@@ -275,6 +275,12 @@
     "type": "int",
     "default": 60
   },
+  "chart_font_path": {
+    "description": "图表中文字体文件路径",
+    "hint": "自定义图表使用的中文字体文件（.ttf/.otf/.ttc）；留空自动按「内置字体→系统字体→目录扫描」查找。",
+    "type": "string",
+    "default": ""
+  },
   "backup_enabled": {
     "description": "自动备份",
     "hint": "是否启用每日自动备份。",

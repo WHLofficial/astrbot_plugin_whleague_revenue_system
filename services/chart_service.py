@@ -6,6 +6,7 @@ Pillow 懒加载：未安装时不拖垮插件初始化，命令层返回明确�
 """
 
 import os
+import re
 from pathlib import Path
 
 from astrbot.api import logger
@@ -35,13 +36,74 @@ PALETTE = [
 ]
 
 _FONT_CANDIDATES = [
+    # Windows（微软雅黑优先，贴近展示表风格）
     r"C:\Windows\Fonts\msyh.ttc",
     r"C:\Windows\Fonts\msyhbd.ttc",
+    r"C:\Windows\Fonts\msyhl.ttc",
     r"C:\Windows\Fonts\simhei.ttf",
+    r"C:\Windows\Fonts\simsun.ttc",
     r"C:\Windows\Fonts\simkai.ttf",
+    r"C:\Windows\Fonts\Deng.ttf",
+    r"C:\Windows\Fonts\Dengb.ttf",
+    r"C:\Windows\Fonts\msjh.ttc",
+    r"C:\Windows\Fonts\msjhbd.ttc",
+    r"C:\Windows\Fonts\YuGothR.ttc",
+    r"C:\Windows\Fonts\YuGothM.ttc",
+    r"C:\Windows\Fonts\malgun.ttf",
+    r"C:\Windows\Fonts\batang.ttc",
+    r"C:\Windows\Fonts\gulim.ttc",
+    # macOS
     "/System/Library/Fonts/PingFang.ttc",
+    "/System/Library/Fonts/Hiragino Sans GB.ttc",
+    "/System/Library/Fonts/STHeiti Light.ttc",
+    "/System/Library/Fonts/STHeiti Medium.ttc",
+    "/System/Library/Fonts/Supplemental/Songti.ttc",
+    "/Library/Fonts/Arial Unicode.ttf",
+    # Linux（Noto / 文泉驿 / Droid / 文鼎）
     "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+    "/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc",
+    "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc",
+    "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+    "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
+    "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
+    "/usr/share/fonts/wenquanyi/wqy-zenhei/wqy-zenhei.ttc",
+    "/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf",
+    "/usr/share/fonts/truetype/arphic/uming.ttc",
+    "/usr/share/fonts/truetype/arphic/ukai.ttc",
 ]
+
+# 常见 CJK 字体目录（目录扫描兜底用）
+_SYSTEM_FONT_DIRS = [
+    r"C:\Windows\Fonts",
+    "/usr/share/fonts",
+    "/usr/local/share/fonts",
+    "/System/Library/Fonts",
+    "/System/Library/Fonts/Supplemental",
+    "/Library/Fonts",
+]
+
+# 文件名含这些特征视为 CJK 字体（避免误选纯拉丁字体渲染豆腐块）
+_CJK_FILE_RE = re.compile(
+    r"(msyh|simhei|simsun|simkai|deng|yahei|noto|cjk|wqy|zenhei|microhei|droid|"
+    r"hei|song|ming|gothic|pingfang|hiragino|malgun|batang|gulim|uming|ukai)"
+    r"|(arial\s*unicode)",
+    re.I,
+)
+
+# 插件内置字体目录（随仓库分发，服务器零依赖兜底）
+_PLUGIN_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_BUNDLED_FONT_DIR = os.path.join(_PLUGIN_ROOT, "fonts")
+
+# 图表字体解析：chart_font_path 覆盖优先（不缓存），其余路径按 need-bold 缓存
+_FONT_OVERRIDE = ""
+_FOUND_FONT: dict = {}
+
+
+def set_font_override(path: str) -> None:
+    """设置/清除图表字体路径覆盖（由 ChartService 从配置注入）。"""
+    global _FONT_OVERRIDE
+    _FONT_OVERRIDE = (path or "").strip()
+
 
 _RESULT_CN = {"W": "胜", "D": "平", "L": "负"}
 
@@ -50,19 +112,90 @@ class ChartError(Exception):
     pass
 
 
+def _list_plugin_fonts() -> list[str]:
+    """插件自带 fonts/ 目录内的字体文件（随仓库分发，保证零依赖可用）。"""
+    if not os.path.isdir(_BUNDLED_FONT_DIR):
+        return []
+    try:
+        entries = os.listdir(_BUNDLED_FONT_DIR)
+    except OSError:
+        return []
+    return [os.path.join(_BUNDLED_FONT_DIR, n)
+            for n in sorted(entries) if n.lower().endswith((".ttf", ".otf", ".ttc"))]
+
+
+def _scan_system_font_dirs() -> list[str]:
+    """递归扫描系统字体目录，仅收集文件名含 CJK 特征的字体。"""
+    dirs = list(_SYSTEM_FONT_DIRS)
+    for key in ("USERPROFILE", "HOME"):
+        home = os.environ.get(key)
+        if home:
+            dirs.extend([os.path.join(home, ".fonts"),
+                         os.path.join(home, ".local", "share", "fonts")])
+    out = []
+    for d in dirs:
+        if not os.path.isdir(d):
+            continue
+        try:
+            for root, _subs, files in os.walk(d):
+                for name in files:
+                    if name.lower().endswith((".ttf", ".otf", ".ttc")) \
+                            and _CJK_FILE_RE.search(name):
+                        out.append(os.path.join(root, name))
+        except OSError:
+            continue
+    return out
+
+
+def _resolve_font_path(bold: bool) -> str:
+    """四级兜底：chart_font_path → 已知系统名单 → 插件内置 fonts/ → 系统目录扫描。"""
+    if _FONT_OVERRIDE and os.path.isfile(_FONT_OVERRIDE):
+        return _FONT_OVERRIDE
+    if bold in _FOUND_FONT:
+        return _FOUND_FONT[bold]
+    from PIL import ImageFont
+
+    order = []
+    if bold:
+        order += [r"C:\Windows\Fonts\msyhbd.ttc", r"C:\Windows\Fonts\Dengb.ttf",
+                  r"C:\Windows\Fonts\malgunbd.ttf",
+                  "/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc"]
+    order += list(_FONT_CANDIDATES) + _list_plugin_fonts() + _scan_system_font_dirs()
+    for p in order:
+        if not os.path.isfile(p):
+            continue
+        try:
+            ImageFont.truetype(p, 10, index=0)
+        except Exception:
+            continue
+        _FOUND_FONT[bold] = p
+        return p
+    return ""
+
+
+def _try_regular_variation(font) -> None:
+    """内置 Noto Sans SC 为变量字体默认 Thin，切到 Regular 字重（失败静默）。"""
+    try:
+        font.set_variation_by_name("Regular")
+    except Exception:
+        pass
+
+
 def _font(size: int, bold: bool = False):
     from PIL import ImageFont
 
-    candidates = _FONT_CANDIDATES
-    if bold:
-        candidates = [r"C:\Windows\Fonts\msyhbd.ttc", r"C:\Windows\Fonts\msyh.ttc"] + candidates
-    for p in candidates:
-        if os.path.exists(p):
-            try:
-                return ImageFont.truetype(p, size, index=0)
-            except Exception:
-                continue
-    raise ChartError("未找到中文字体，无法生成图表")
+    path = _resolve_font_path(bold)
+    if not path:
+        raise ChartError(
+            "未找到可用中文字体（已搜索内置字体与系统字体目录）。"
+            "请安装中文字体，或用 /主场设置 chart_font_path 指定字体文件。"
+        )
+    try:
+        font = ImageFont.truetype(path, size, index=0)
+    except Exception as e:
+        raise ChartError(f"字体加载失败（{path}）：{e}") from e
+    _try_regular_variation(font)
+    return font
 
 
 def _text_w(dr, text: str, font) -> int:
@@ -264,6 +397,7 @@ class ChartService:
         self._db = db
         self._dao = dao
         self._cfg = cfg
+        set_font_override(cfg.get("chart_font_path"))
 
     @property
     def charts_dir(self) -> Path:
