@@ -246,3 +246,48 @@ async def test_named_round_same_name_same_round():
         assert await env.dao.get_named_round(1, "顶级9") is None
     finally:
         await env.teardown()
+
+
+async def test_result_derived_from_score_text():
+    """文本赛果支持直接写比分：由比分自动判主队胜平负并保留比分原文。"""
+    env = await TestEnv().setup()
+    try:
+        await env.fixture_service.import_fixtures(
+            "1 利物浦 巴塞罗那\n1 纽卡斯尔联 勒沃库森\n1 巴塞罗那 利物浦\n"
+        )
+        r = await env.fixture_service.record_results(
+            1, "利物浦 2-1\n纽卡斯尔联 0-0PK2-4\n巴塞罗那 1-1\n"
+        )
+        assert r["count"] == 3, r
+        by = {m["home_team"]: m for m in await env.dao.get_round_matches(1, 1, 1)}
+        assert by["利物浦"]["result"] == "W" and by["利物浦"]["score"] == "2-1"
+        assert by["纽卡斯尔联"]["result"] == "L" and by["纽卡斯尔联"]["score"] == "0-0PK2-4"
+        assert by["巴塞罗那"]["result"] == "D" and by["巴塞罗那"]["score"] == "1-1"
+        # 显式胜平负仍可用
+        await env.fixture_service.import_fixtures("2 利物浦 巴塞罗那")
+        r2 = await env.fixture_service.record_results(2, "利物浦 胜 3-0")
+        assert r2["count"] == 1
+        m = (await env.dao.get_round_matches(1, 1, 2))[0]
+        assert m["result"] == "W" and m["score"] == "3-0"
+    finally:
+        await env.teardown()
+
+
+async def test_same_round_multiple_home_matches():
+    """同轮同赛事同主队不同客队的多场照常导入（不再以主队判重）；完全相同行仍跳过。"""
+    env = await TestEnv().setup()
+    try:
+        r = await env.fixture_service.import_fixtures(
+            "1 利物浦 巴塞罗那\n1 利物浦 勒沃库森\n"
+        )
+        assert r["imported"] == 2, r
+        matches = await env.dao.get_round_matches(1, 1, 1)
+        assert len(matches) == 2
+        aways = {m["away_team"] for m in matches}
+        assert aways == {"巴塞罗那", "勒沃库森"}
+        # 完全相同的行重复导入仍跳过并提示
+        r2 = await env.fixture_service.import_fixtures("1 利物浦 巴塞罗那")
+        assert r2["imported"] == 0
+        assert any("重复" in e for e in r2["errors"]), r2["errors"]
+    finally:
+        await env.teardown()

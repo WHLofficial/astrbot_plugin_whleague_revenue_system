@@ -115,6 +115,33 @@ DEFAULT_COMPETITION_ALIASES = {
 
 _RESULT_PTS = {"W": 3, "D": 1, "L": 0}
 
+# 比分：常规 (h-a) 可选点球 (PK h-a)，分隔符支持连字符/半角/全角冒号
+_SCORE_RE = re.compile(
+    r"^\s*(\d+)\s*[-:：]\s*(\d+)(?:\s*[Pp][Kk]\s*(\d+)\s*[-:：]\s*(\d+))?\s*$"
+)
+
+
+def result_from_score(text) -> str | None:
+    """由比分推导主队赛果：2-1→W、1-2→L、1-1→D；常规平且有点球时按点球判。
+
+    支持 2-1 / 2:1 / 2：1 / 0-0PK2-4 / 0-0PK4-2；无法解析返回 None。
+    """
+    m = _SCORE_RE.match(str(text or ""))
+    if not m:
+        return None
+    h, a = int(m.group(1)), int(m.group(2))
+    if h > a:
+        return "W"
+    if h < a:
+        return "L"
+    ph, pa = m.group(3), m.group(4)
+    if ph is not None and pa is not None:
+        if int(ph) > int(pa):
+            return "W"
+        if int(ph) < int(pa):
+            return "L"
+    return "D"
+
 
 def competition_aliases(cfg: dict) -> dict:
     aliases = parse_json_object(cfg.get("competition_aliases", {}))

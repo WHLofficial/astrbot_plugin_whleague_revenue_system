@@ -108,7 +108,7 @@ async def test_v4_to_latest_migration():
             row = await db.fetchone(
                 "SELECT value FROM plugin_config WHERE key='schema_version'"
             )
-            assert row["value"] == "6"
+            assert row["value"] == "7"
             # 事件池新增列
             cols = await _table_columns(db.conn, "event_pool")
             assert {"event_type", "options_json"} <= cols, cols
@@ -128,15 +128,15 @@ async def test_v4_to_latest_migration():
             row2 = await db.fetchone(
                 "SELECT value FROM plugin_config WHERE key='schema_version'"
             )
-            assert row2["value"] == "6"
+            assert row2["value"] == "7"
         finally:
             await db.close()
     finally:
         tmp.cleanup()
 
 
-async def test_v5_to_v6_migration():
-    """v5 库迁移到 v6：版本号更新且 round_names 表可用。"""
+async def test_v5_to_latest_migration():
+    """v5 库迁移到当前版本：版本号更新、round_names 表可用。"""
     tmp = tempfile.TemporaryDirectory()
     try:
         path = str(Path(tmp.name) / "v5.db")
@@ -148,7 +148,7 @@ async def test_v5_to_v6_migration():
             row = await db.fetchone(
                 "SELECT value FROM plugin_config WHERE key='schema_version'"
             )
-            assert row["value"] == "6"
+            assert row["value"] == "7"
             cols = await _table_columns(db.conn, "round_names")
             assert {"season_number", "token", "round_no"} <= cols, cols
             # 登记 API 可用：同名同号、递增分配
@@ -157,6 +157,95 @@ async def test_v5_to_v6_migration():
                 "ON CONFLICT(season_number, token) DO NOTHING RETURNING round_no"
             )
             assert n1 is not None and n1["round_no"] == 1
+        finally:
+            await db.close()
+    finally:
+        tmp.cleanup()
+
+
+async def _make_v6_db(path: str) -> None:
+    """构造 v6 结构数据库：matches 唯一键为同轮次同赛事同主队（无 away_team）。"""
+    import aiosqlite
+
+    conn = await aiosqlite.connect(path)
+    try:
+        await conn.executescript(
+            """
+            CREATE TABLE matches (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                season_number INTEGER NOT NULL,
+                window_seq INTEGER NOT NULL,
+                round_no INTEGER NOT NULL,
+                competition TEXT NOT NULL DEFAULT '联赛',
+                home_team TEXT NOT NULL,
+                away_team TEXT NOT NULL,
+                weather TEXT,
+                result TEXT,
+                score TEXT,
+                week_no INTEGER,
+                day_no INTEGER,
+                match_time TEXT,
+                attendance INTEGER,
+                ticket_revenue REAL,
+                commercial REAL,
+                broadcast REAL,
+                created_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+                UNIQUE(season_number, window_seq, round_no, competition, home_team)
+            );
+            CREATE TABLE round_names (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                season_number INTEGER NOT NULL,
+                token TEXT NOT NULL,
+                round_no INTEGER NOT NULL,
+                created_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+                UNIQUE(season_number, token)
+            );
+            CREATE TABLE plugin_config (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL,
+                updated_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
+            );
+            INSERT INTO plugin_config (key, value) VALUES ('schema_version', '6');
+            INSERT INTO matches (season_number, window_seq, round_no, competition, home_team, away_team)
+            VALUES (1, 1, 1, '顶级联赛', '利物浦', '巴塞罗那');
+            """
+        )
+        await conn.commit()
+    finally:
+        await conn.close()
+
+
+async def test_v6_to_latest_migration():
+    """v6 库迁移到 v7：matches 唯一键收窄为完整对阵（home+away）。"""
+    tmp = tempfile.TemporaryDirectory()
+    try:
+        path = str(Path(tmp.name) / "v6.db")
+        await _make_v6_db(path)
+        db = DatabaseManager(path)
+        await db.init()
+        try:
+            await init_schema(db)
+            row = await db.fetchone(
+                "SELECT value FROM plugin_config WHERE key='schema_version'"
+            )
+            assert row["value"] == "7"
+            # 迁移后旧数据保留
+            rows = await db.fetchall("SELECT * FROM matches")
+            assert rows and rows[0]["home_team"] == "利物浦"
+            # 语义验证：同轮同赛事同主队、不同客队可并存；完全相同的行仍判重
+            async def _ins(home, away) -> int:
+                cur = await db.execute(
+                    "INSERT OR IGNORE INTO matches (season_number, window_seq, round_no, competition, home_team, away_team) "
+                    "VALUES (1, 1, 1, '顶级联赛', ?, ?)",
+                    (home, away),
+                )
+                try:
+                    return cur.rowcount or 0
+                finally:
+                    await cur.close()
+
+            assert await _ins("利物浦", "勒沃库森") == 1
+            assert await _ins("利物浦", "巴塞罗那") == 0  # 与旧行完全相同 → 重复跳过
         finally:
             await db.close()
     finally:

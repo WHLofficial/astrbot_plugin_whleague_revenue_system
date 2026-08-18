@@ -81,7 +81,10 @@ def parse_fixture_lines(text: str, cfg: dict) -> list[tuple]:
 
 
 def parse_result_lines(text: str) -> list[tuple[str, str, str | None]]:
-    """解析赛果文本行。每行：主队 胜/平/负（或 W/D/L）[比分]。"""
+    """解析赛果文本行。每行：主队 胜/平/负（或 W/D/L）[比分]，或 主队 <比分>。
+
+    比分（2-1 / 0-0PK2-4 等）自动推导主队胜平负并保留原文为比分。
+    """
     out = []
     for raw_line in str(text or "").splitlines():
         line = raw_line.strip()
@@ -89,13 +92,19 @@ def parse_result_lines(text: str) -> list[tuple[str, str, str | None]]:
             continue
         parts = re.split(r"[\s|\t,，]+", line)
         if len(parts) < 2:
-            raise FixtureError(f"无法解析行: {line}（需为：主队 胜/平/负 [比分]）")
+            raise FixtureError(f"无法解析行: {line}（需为：主队 胜/平/负 [比分]，或 主队 比分）")
         home = parts[0].strip()
         result_key = parts[1].strip().lower()
         result = _RESULT_ALIASES.get(result_key)
-        if result is None:
-            raise FixtureError(f"赛果需为 胜/平/负（W/D/L）: {line}")
-        score = " ".join(p.strip() for p in parts[2:] if p.strip()).strip() or None
+        if result is not None:
+            score = " ".join(p.strip() for p in parts[2:] if p.strip()).strip() or None
+        else:
+            result = formula.result_from_score(result_key)
+            if result is None:
+                raise FixtureError(
+                    f"赛果需为 胜/平/负（W/D/L）或比分（如 2-1 / 0-0PK2-4）: {line}"
+                )
+            score = " ".join(p.strip() for p in parts[1:] if p.strip()).strip() or None
         out.append((home, result, score))
     return out
 

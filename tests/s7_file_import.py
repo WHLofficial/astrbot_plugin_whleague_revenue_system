@@ -201,6 +201,44 @@ async def test_result_lines_errors_and_skip():
     assert len(errors) == 1 and "赛果需为" in errors[0], errors
 
 
+async def test_result_lines_score_derived():
+    # 赛果列留空、由比分列推导；赛果列直接写比分亦推导
+    rows = [["主队", "比分"], ["利物浦", "2-1"], ["纽卡斯尔联", "0-0PK2-4"]]
+    lines, errors = fis.build_result_lines(rows)
+    assert errors == [], errors
+    assert lines == ["利物浦 W 2-1", "纽卡斯尔联 L 0-0PK2-4"], lines
+    rows2 = [["主队", "赛果"], ["巴塞罗那", "1-1"]]
+    lines2, errors2 = fis.build_result_lines(rows2)
+    assert errors2 == [], errors2
+    assert lines2 == ["巴塞罗那 D 1-1"], lines2
+    # 非比分也不能静默通过
+    rows3 = [["主队", "赛果"], ["利物浦", "大胜"]]
+    _, errors3 = fis.build_result_lines(rows3)
+    assert len(errors3) == 1 and "赛果需为" in errors3[0], errors3
+
+
+async def test_results_file_score_derived_e2e():
+    """文件录入赛果：赛果列留空用比分推导、赛果列写比分也推导。"""
+    env = await TestEnv().setup()
+    try:
+        await env.fixture_service.import_fixtures(
+            "1 利物浦 巴塞罗那\n1 纽卡斯尔联 勒沃库森"
+        )
+        p = Path(os.path.join(os.path.dirname(os.path.abspath(__file__)), "tmp_res_score.csv"))
+        p.write_text("主队,赛果,比分\n利物浦,,2-1\n纽卡斯尔联,0-0PK2-4,\n", encoding="utf-8")
+        try:
+            result = await env.fixture_service.record_results_file(1, str(p))
+            assert result["count"] == 2, result
+            assert result["file_errors"] == [], result
+            by = {m["home_team"]: m for m in await env.dao.get_round_matches(1, 1, 1)}
+            assert by["利物浦"]["result"] == "W" and by["利物浦"]["score"] == "2-1"
+            assert by["纽卡斯尔联"]["result"] == "L" and by["纽卡斯尔联"]["score"] == "0-0PK2-4"
+        finally:
+            p.unlink(missing_ok=True)
+    finally:
+        await env.teardown()
+
+
 async def test_attribute_rows_errors_and_skip():
     rows = [["队名", "影响力", "容量", "等级"], ["利物浦", 150, 12000, 0], ["巴塞罗那", "abc", 20000, 1]]
     records, errors = fis.build_attribute_rows(rows)

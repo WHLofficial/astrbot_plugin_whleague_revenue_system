@@ -213,6 +213,19 @@ async def test_split_competition():
         assert (got_comp, got_rest) == (comp, rest), f"{token}: {got_comp},{got_rest}"
 
 
+async def test_result_from_score():
+    cases = [
+        ("2-1", "W"), ("1-2", "L"), ("1-1", "D"),
+        ("2:1", "W"), ("2：1", "W"),
+        ("0-0PK2-4", "L"), ("0-0PK4-2", "W"), ("0-0PK2-2", "D"),
+        ("1-1PK0-0", "D"),
+        ("0-0PK", None), ("abc", None), ("2", None), ("2-1-3", None), ("", None),
+    ]
+    for text, expect in cases:
+        got = formula.result_from_score(text)
+        assert got == expect, f"{text}: {got!r} vs {expect!r}"
+
+
 def run_all():
     import asyncio
 

@@ -210,7 +210,13 @@ def build_fixture_lines(rows: list[list[str]]) -> tuple[list[str], list[str]]:
 
 
 def build_result_lines(rows: list[list[str]]) -> tuple[list[str], list[str]]:
-    """归一化为「主队 胜/平/负 [比分]」文本行。返回 (lines, errors)。"""
+    """归一化为「主队 胜/平/负 [比分]」文本行。返回 (lines, errors)。
+
+    赛果列可显式填 胜/平/负，也可空缺或直接写比分（如 2-1 / 0-0PK2-4），
+    由比分自动推导主队胜平负。
+    """
+    from . import formula
+
     data, col_map = _detect_header(rows)
     lines, errors = [], []
     start = 2 if col_map else 1
@@ -229,13 +235,22 @@ def build_result_lines(rows: list[list[str]]) -> tuple[list[str], list[str]]:
                 continue  # 整行空白
             errors.append(f"第{rownum}行: 主队缺失")
             continue
-        result = _RESULT_ALIASES.get(res_raw.strip().lower())
+        res = res_raw.strip()
+        result = _RESULT_ALIASES.get(res.lower())
+        score_txt = score_raw
         if result is None:
-            errors.append(f"第{rownum}行: 赛果需为 胜/平/负（W/D/L）「{res_raw}」")
-            continue
+            # 赛果列空缺或本身就是比分 → 由比分列/赛果列推导
+            result = formula.result_from_score(score_txt or res)
+            if result is not None and not score_txt and res:
+                score_txt = res
+            if result is None:
+                errors.append(
+                    f"第{rownum}行: 赛果需为 胜/平/负（W/D/L）或比分（如 2-1 / 0-0PK2-4）「{res_raw}」"
+                )
+                continue
         line = f"{home} {result}"
-        if score_raw:
-            line += f" {score_raw}"
+        if score_txt:
+            line += f" {score_txt}"
         lines.append(line)
     return lines, errors
 
