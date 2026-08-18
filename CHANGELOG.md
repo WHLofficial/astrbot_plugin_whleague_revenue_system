@@ -12,6 +12,7 @@
 - 修复 LLM 事件设计 prompt 的 `{{team}}` 双花括号缺陷：模板占位符现为单花括号，可被 `_fill_template` 正确替换。
 - 默认 LLM 超时 15s → 60s（`llm_timeout_seconds`，长 prompt 的事件设计不再容易中途掐断）；超时捕获兼容 Python 3.10（`asyncio.TimeoutError` vs 内置 `TimeoutError`）。
 - 事件选项号解析（1~4 / ①②③④）收敛到 `utils/security.parse_choice_no`，服务端与管理命令统一引用。
+- **修复管理命令成功路径崩溃**：`/主场事件采纳/丢弃`、`/主场事件写`、`/主场品牌采纳/丢弃` 等服务成功返回 `None` 时，handler 的 `if "error" in result` 抛 `TypeError`；`_run` 现仅对 `None` 归一为空 dict（list 返回如选择列表/批量导入原样保留）。
 - **强制重算（`/主场结算 强制`）选择事件只重记账目流水**，跳过死忠/上座等持续状态类效果，避免百分比复利叠加（与死忠演化「重算不重复状态」一致）。
 - `/主场事件选择` 支持 ①②③④ 符号录入（与 `/主场事件选择导入` 一致）。
 - `/主场事件列表` 恢复效果信息：即发显示 `effects_json`、选择显示选项数。

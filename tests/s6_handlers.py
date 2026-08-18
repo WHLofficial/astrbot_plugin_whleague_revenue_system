@@ -160,3 +160,54 @@ async def test_choice_handlers_flow():
         assert "政府补贴" in joined and 'money' in joined, joined
     finally:
         await env.teardown()
+
+
+async def test_none_returning_handlers_no_crash():
+    """服务成功返回 None（采纳/丢弃/自定义）的 handler 成功路径不得崩溃。"""
+    env = await TestEnv().setup()
+    try:
+        from astrbot_plugin_whleague_revenue_system.handlers.admin import AdminHandler
+
+        handler = AdminHandler(env.__class__ and type("P", (), {
+            "dao": env.dao,
+            "config_cache": env.cfg,
+            "fixture_service": env.fixture_service,
+            "stadium_service": env.stadium_service,
+            "event_engine": env.event_engine,
+            "brand_service": env.brand_service,
+            "window_service": env.window_service,
+            "bridge": env.bridge,
+            "_persist_config": lambda k, v: None,
+        })())
+
+        # 1) 自定义事件：event_engine.add_custom 返回 None → 成功路径
+        ev = _FakeEvent('/主场事件写 测试事件 分类 5 {"money":1}', sender="admin", is_admin=True)
+        out = [r async for r in handler.add_custom_event(ev)]
+        assert out and "已加入事件池" in out[0], out
+
+        # 2) 事件丢弃成功路径（生产 pending 后丢弃）
+        env.provider.set_response(
+            '[{"name":"待扔事件","category":"c","weight":5,'
+            '"event_type":"instant","effects":{"money":1},"template":"t"}]'
+        )
+        await env.event_engine.generate_drafts(1)
+        pending = await env.dao.list_events("pending")
+        assert pending and pending[0]["name"] == "待扔事件"
+        ev2 = _FakeEvent(f"/主场事件丢弃 {pending[0]['id']}", sender="admin", is_admin=True)
+        out2 = [r async for r in handler.discard_event(ev2)]
+        assert out2 and "已丢弃" in out2[0], out2
+        # 丢弃后再丢同一条应给出提示而非崩溃
+        ev2b = _FakeEvent(f"/主场事件丢弃 {pending[0]['id']}", sender="admin", is_admin=True)
+        out2b = [r async for r in handler.discard_event(ev2b)]
+        assert out2b and ("不存在" in out2b[0] or "已丢弃" in out2b[0]), out2b
+
+        # 3) 品牌丢弃成功路径
+        env.provider.set_response('[{"brand":"老八食堂","heat":1.2}]')
+        await env.brand_service.generate_drafts(1)
+        pend_b = await env.dao.list_brands("pending")
+        assert pend_b and pend_b[0]["brand"] == "老八食堂"
+        ev3 = _FakeEvent(f"/主场品牌丢弃 {pend_b[0]['id']}", sender="admin", is_admin=True)
+        out3 = [r async for r in handler.discard_brand(ev3)]
+        assert out3 and "已丢弃" in out3[0], out3
+    finally:
+        await env.teardown()

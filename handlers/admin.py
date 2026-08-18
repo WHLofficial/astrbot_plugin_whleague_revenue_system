@@ -37,7 +37,10 @@ class AdminHandler:
 
     async def _run(self, event, coro):
         try:
-            return await coro
+            result = await coro
+            # 服务成功但返回 None（采纳/丢弃/自定义等）统一归一为空 dict，
+            # 避免上层 `"error" in None`；list（选择列表/批量导入）原样保留
+            return result if result is not None else {}
         except (StadiumError, FixtureError, EventError, BrandError, SettleError,
                 FileImportError, ValueError) as e:
             return {"error": str(e)}
