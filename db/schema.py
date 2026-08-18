@@ -274,44 +274,58 @@ async def _migrate(db, current_version: int):
         cols = await _table_columns(db, "matches")
         if "competition" not in cols:
             # 重建 matches 表：新增 competition 列并纳入唯一键（同轮次多赛事可共存）
-            await db.executescript(
-                """
-                ALTER TABLE matches RENAME TO matches_old;
-                CREATE TABLE matches (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    season_number INTEGER NOT NULL,
-                    window_seq INTEGER NOT NULL,
-                    round_no INTEGER NOT NULL,
-                    competition TEXT NOT NULL DEFAULT '联赛',
-                    home_team TEXT NOT NULL,
-                    away_team TEXT NOT NULL,
-                    weather TEXT,
-                    result TEXT,
-                    score TEXT,
-                    week_no INTEGER,
-                    day_no INTEGER,
-                    match_time TEXT,
-                    attendance INTEGER,
-                    ticket_revenue REAL,
-                    commercial REAL,
-                    broadcast REAL,
-                    created_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
-                    UNIQUE(season_number, window_seq, round_no, competition, home_team)
-                );
-                INSERT INTO matches
-                    (id, season_number, window_seq, round_no, competition, home_team,
-                     away_team, weather, result, attendance, ticket_revenue,
-                     commercial, broadcast, created_at)
-                SELECT id, season_number, window_seq, round_no, '联赛', home_team,
-                       away_team, weather, result, attendance, ticket_revenue,
-                       commercial, broadcast, created_at
-                FROM matches_old;
-                DROP TABLE matches_old;
-                CREATE INDEX IF NOT EXISTS idx_matches_round ON matches(season_number, window_seq, round_no);
-                CREATE INDEX IF NOT EXISTS idx_matches_home ON matches(home_team);
-                """
-            )
-            await db.commit()
+            # 显式事务包裹（SQLite DDL 可回滚）：失败时旧表完好，下次启动可重试，避免残留空表丢数据
+            await db.execute("BEGIN IMMEDIATE")
+            try:
+                await db.execute(
+                    "ALTER TABLE matches RENAME TO matches_old"
+                )
+                await db.execute(
+                    """
+                    CREATE TABLE matches (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        season_number INTEGER NOT NULL,
+                        window_seq INTEGER NOT NULL,
+                        round_no INTEGER NOT NULL,
+                        competition TEXT NOT NULL DEFAULT '联赛',
+                        home_team TEXT NOT NULL,
+                        away_team TEXT NOT NULL,
+                        weather TEXT,
+                        result TEXT,
+                        score TEXT,
+                        week_no INTEGER,
+                        day_no INTEGER,
+                        match_time TEXT,
+                        attendance INTEGER,
+                        ticket_revenue REAL,
+                        commercial REAL,
+                        broadcast REAL,
+                        created_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+                        UNIQUE(season_number, window_seq, round_no, competition, home_team)
+                    )
+                    """
+                )
+                await db.execute(
+                    """
+                    INSERT INTO matches
+                        (id, season_number, window_seq, round_no, competition, home_team,
+                         away_team, weather, result, attendance, ticket_revenue,
+                         commercial, broadcast, created_at)
+                    SELECT id, season_number, window_seq, round_no, '联赛', home_team,
+                           away_team, weather, result, attendance, ticket_revenue,
+                           commercial, broadcast, created_at
+                    FROM matches_old
+                    """
+                )
+                await db.execute("DROP TABLE matches_old")
+                await db.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_matches_round ON matches(season_number, window_seq, round_no)"
+                )
+                await db.execute("CREATE INDEX IF NOT EXISTS idx_matches_home ON matches(home_team)")
+                await db.commit()
+            except BaseException:
+                await db.rollback()
+                raise
             logger.info("Migrated matches table: added competition column.")
     if current_version < 3:
         cols = await _table_columns(db, "matches")
@@ -380,42 +394,54 @@ async def _migrate(db, current_version: int):
         logger.info("Migrated round_names table for named rounds.")
     if current_version < 7:
         # 去重粒度收窄为「完整对阵」：唯一键加入 away_team，同主队窗口内可多场（重复对阵/双回合）
-        await db.executescript(
-            """
-            ALTER TABLE matches RENAME TO matches_old;
-            CREATE TABLE matches (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                season_number INTEGER NOT NULL,
-                window_seq INTEGER NOT NULL,
-                round_no INTEGER NOT NULL,
-                competition TEXT NOT NULL DEFAULT '联赛',
-                home_team TEXT NOT NULL,
-                away_team TEXT NOT NULL,
-                weather TEXT,
-                result TEXT,
-                score TEXT,
-                week_no INTEGER,
-                day_no INTEGER,
-                match_time TEXT,
-                attendance INTEGER,
-                ticket_revenue REAL,
-                commercial REAL,
-                broadcast REAL,
-                created_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
-                UNIQUE(season_number, window_seq, round_no, competition, home_team, away_team)
-            );
-            INSERT INTO matches
-                (id, season_number, window_seq, round_no, competition, home_team,
-                 away_team, weather, result, score, week_no, day_no, match_time,
-                 attendance, ticket_revenue, commercial, broadcast, created_at)
-            SELECT id, season_number, window_seq, round_no, competition, home_team,
-                   away_team, weather, result, score, week_no, day_no, match_time,
-                   attendance, ticket_revenue, commercial, broadcast, created_at
-            FROM matches_old;
-            DROP TABLE matches_old;
-            CREATE INDEX IF NOT EXISTS idx_matches_round ON matches(season_number, window_seq, round_no);
-            CREATE INDEX IF NOT EXISTS idx_matches_home ON matches(home_team);
-            """
-        )
-        await db.commit()
+        # 显式事务包裹（DDL 可回滚）：失败时旧表完好、下次启动可重试，避免残留空表丢数据
+        await db.execute("BEGIN IMMEDIATE")
+        try:
+            await db.execute("ALTER TABLE matches RENAME TO matches_old")
+            await db.execute(
+                """
+                CREATE TABLE matches (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    season_number INTEGER NOT NULL,
+                    window_seq INTEGER NOT NULL,
+                    round_no INTEGER NOT NULL,
+                    competition TEXT NOT NULL DEFAULT '联赛',
+                    home_team TEXT NOT NULL,
+                    away_team TEXT NOT NULL,
+                    weather TEXT,
+                    result TEXT,
+                    score TEXT,
+                    week_no INTEGER,
+                    day_no INTEGER,
+                    match_time TEXT,
+                    attendance INTEGER,
+                    ticket_revenue REAL,
+                    commercial REAL,
+                    broadcast REAL,
+                    created_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+                    UNIQUE(season_number, window_seq, round_no, competition, home_team, away_team)
+                )
+                """
+            )
+            await db.execute(
+                """
+                INSERT INTO matches
+                    (id, season_number, window_seq, round_no, competition, home_team,
+                     away_team, weather, result, score, week_no, day_no, match_time,
+                     attendance, ticket_revenue, commercial, broadcast, created_at)
+                SELECT id, season_number, window_seq, round_no, competition, home_team,
+                       away_team, weather, result, score, week_no, day_no, match_time,
+                       attendance, ticket_revenue, commercial, broadcast, created_at
+                FROM matches_old
+                """
+            )
+            await db.execute("DROP TABLE matches_old")
+            await db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_matches_round ON matches(season_number, window_seq, round_no)"
+            )
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_matches_home ON matches(home_team)")
+            await db.commit()
+        except BaseException:
+            await db.rollback()
+            raise
         logger.info("Migrated matches table: unique on full fixture (home+away).")

@@ -217,7 +217,7 @@ class FixtureService:
                 out.append(raw_line)
                 continue
             token = parts[0].strip()
-            comp, rest = formula.split_competition(self._cfg, token)
+            _comp, rest = formula.split_competition(self._cfg, token)
             if re.sub(r"\D", "", rest):
                 out.append(raw_line)
                 continue

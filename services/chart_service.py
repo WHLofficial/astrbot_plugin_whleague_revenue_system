@@ -476,6 +476,8 @@ class ChartService:
                 # 比赛取消：观众/上座率显示 -，不计入合计与场均
                 rows.append(head + ["取消", m["away_team"], name, "-", "-"])
                 continue
+            if m["attendance"] is None:
+                continue  # 已置结果但无观众（异常数据），按未录入兜底
             total += int(m["attendance"])
             counted += 1
             rate = f"{int(m['attendance']) / capacity * 100:.1f}%" if capacity else "—"

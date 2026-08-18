@@ -172,9 +172,10 @@ class AdminHandler:
                 lines.append(f"· {r['home']} vs {r['away']}：比赛取消（不计入合计）")
                 continue
             wx = {"晴": "☀️", "多云": "⛅", "雨": "🌧️", "雪": "❄️"}.get(r["weather"] or "", "")
+            result_cn = {"W": "胜", "D": "平", "L": "负", "C": "取消"}.get(r["result"], r["result"])
             score_txt = f" {r['score']}" if r.get("score") else ""
             lines.append(
-                f"· {r['home']} {r['result']}{score_txt} {r['away']} {wx} | 上座 {r['attendance']:,}"
+                f"· {r['home']} {result_cn}{score_txt} {r['away']} {wx} | 上座 {r['attendance']:,}"
                 f" | 票 {r['ticket']:.2f}M 商 {r['commercial']:.2f}M 转 {r['broadcast']:.2f}M"
             )
         for e in result.get("file_errors", []):

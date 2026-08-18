@@ -252,6 +252,41 @@ async def test_v6_to_latest_migration():
         tmp.cleanup()
 
 
+async def test_matches_rebuild_rollback_on_failure():
+    """matches 重建失败时回滚：不重建空表、旧数据完好，版本不推进（下次可重试）。"""
+    import aiosqlite
+
+    tmp = tempfile.TemporaryDirectory()
+    try:
+        path = str(Path(tmp.name) / "v6_rollback.db")
+        await _make_v6_db(path)
+        conn = await aiosqlite.connect(path)
+        try:
+            # 预置同名旧表，让 v7 重建的 RENAME 冲突，触发失败路径
+            await conn.execute("CREATE TABLE matches_old (id INTEGER PRIMARY KEY)")
+            await conn.commit()
+        finally:
+            await conn.close()
+        db = DatabaseManager(path)
+        await db.init()
+        try:
+            try:
+                await init_schema(db)
+                assert False, "重建应因表名冲突失败"
+            except aiosqlite.OperationalError:
+                pass
+            rows = await db.fetchall("SELECT * FROM matches")
+            assert rows and rows[0]["home_team"] == "利物浦", "失败后旧 matches 数据应完好"
+            ver = await db.fetchone(
+                "SELECT value FROM plugin_config WHERE key='schema_version'"
+            )
+            assert ver["value"] == "6", "失败后版本号不应推进，可重试迁移"
+        finally:
+            await db.close()
+    finally:
+        tmp.cleanup()
+
+
 async def test_fresh_db_has_choice_schema():
     env = await TestEnv().setup()
     try:
