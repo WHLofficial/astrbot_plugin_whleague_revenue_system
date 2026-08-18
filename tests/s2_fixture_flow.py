@@ -211,3 +211,38 @@ async def test_competitions_share_round_numbers():
         assert rs_sub["totals"]["attendance"] == 0
     finally:
         await env.teardown()
+
+
+async def test_named_round_same_name_same_round():
+    """纯文字轮次（无数字）：同名即为同一轮，跨导入/天气/赛果/统计恒同号。"""
+    env = await TestEnv().setup()
+    try:
+        # 两行同名「顶级」→ 同一轮、同一赛事
+        r = await env.fixture_service.import_fixtures(
+            "顶级 利物浦 巴塞罗那\n顶级 纽卡斯尔联 勒沃库森\n"
+        )
+        assert r["imported"] == 2, r
+        matches = await env.dao.get_window_matches(1, 1)
+        assert {m["round_no"] for m in matches} == {1}
+        assert {m["competition"] for m in matches} == {"顶级联赛"}
+
+        # 天气/赛果/统计命令用同一文字轮次 → 解析到同一号
+        comp, round_no = await env.fixture_service.resolve_round_arg("顶级")
+        assert (comp, round_no) == ("顶级联赛", 1)
+        await env.fixture_service.set_weather(round_no, "利物浦", "晴", comp)
+        await env.fixture_service.record_results(round_no, "利物浦 胜", comp)
+        rs = await env.fixture_service.round_stats(round_no, comp)
+        assert rs["totals"]["attendance"] > 0
+
+        # 不同名（次级）→ 递增分配新号
+        comp2, no2 = await env.fixture_service.resolve_round_arg("次级")
+        assert (comp2, no2) == ("次级联赛", 2)
+
+        # 与显式数字混排：数字不入登记表、纯文字稳定取登记号
+        r2 = await env.fixture_service.import_fixtures("顶级9 利物浦 巴塞罗那\n")
+        assert r2["imported"] == 1, r2
+        assert await env.fixture_service.resolve_round_arg("顶级9") == ("顶级联赛", 9)
+        assert await env.dao.get_named_round(1, "顶级") == 1
+        assert await env.dao.get_named_round(1, "顶级9") is None
+    finally:
+        await env.teardown()

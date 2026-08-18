@@ -170,6 +170,36 @@ async def test_choice_handlers_flow():
         await env.teardown()
 
 
+async def test_named_round_command_resolution():
+    """天气/赛果命令输入纯文字轮次：解析到与导入登记一致的轮次号。"""
+    env = await TestEnv().setup()
+    try:
+        await env.fixture_service.import_fixtures("顶级 利物浦 巴塞罗那")
+        from astrbot_plugin_whleague_revenue_system.handlers.admin import AdminHandler
+
+        handler = AdminHandler(type("P", (), {
+            "dao": env.dao,
+            "config_cache": env.cfg,
+            "fixture_service": env.fixture_service,
+            "stadium_service": env.stadium_service,
+            "event_engine": env.event_engine,
+            "brand_service": env.brand_service,
+            "window_service": env.window_service,
+            "bridge": env.bridge,
+            "_persist_config": lambda k, v: None,
+        })())
+        # /主场天气 顶级 利物浦 晴 → 解析到登记轮次 1(顶级联赛)
+        ev = _FakeEvent("/主场天气 顶级 利物浦 晴", sender="admin", is_admin=True)
+        out = [r async for r in handler.forecast_weather(ev)]
+        assert out and "第 1 轮(顶级联赛)" in out[0], out
+        # /主场赛果 顶级 … → 解析到登记轮次 1(顶级联赛)
+        ev2 = _FakeEvent("/主场赛果 顶级\n利物浦 胜", sender="admin", is_admin=True)
+        out2 = [r async for r in handler.record_results(ev2)]
+        assert out2 and "第 1 轮(顶级联赛)" in out2[0], out2
+    finally:
+        await env.teardown()
+
+
 async def test_none_returning_handlers_no_crash():
     """服务成功返回 None（采纳/丢弃/自定义）的 handler 成功路径不得崩溃。"""
     env = await TestEnv().setup()

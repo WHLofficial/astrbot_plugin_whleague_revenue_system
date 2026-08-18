@@ -138,6 +138,38 @@ async def test_fixture_file_competition_token():
         await env.teardown()
 
 
+async def test_build_fixture_lines_text_round_passthrough():
+    """轮次列为纯文字（无数字）不再拒绝，原样透传由服务层登记改写。"""
+    rows = [["轮次", "主队", "客队"],
+            ["顶级", "利物浦", "巴塞罗那"],
+            ["次级", "纽卡斯尔联", "勒沃库森"]]
+    lines, errors = fis.build_fixture_lines(rows)
+    assert errors == [], errors
+    assert lines == ["顶级 利物浦 巴塞罗那", "次级 纽卡斯尔联 勒沃库森"], lines
+
+
+async def test_fixture_file_named_round_no_digit():
+    """文件导入纯文字轮次：同名同一轮、命令侧恒同号、不同名递增。"""
+    env = await TestEnv().setup()
+    try:
+        p = Path(os.path.join(os.path.dirname(os.path.abspath(__file__)), "tmp_fix_named.csv"))
+        p.write_text("轮次,主队,客队\n顶级,利物浦,巴塞罗那\n顶级,纽卡斯尔联,勒沃库森\n",
+                     encoding="utf-8")
+        try:
+            result = await env.fixture_service.import_fixtures_file(str(p))
+            assert result["imported"] == 2, result
+            assert result["file_errors"] == [], result
+            matches = await env.dao.get_window_matches(1, 1)
+            assert {m["round_no"] for m in matches} == {1}
+            assert {m["competition"] for m in matches} == {"顶级联赛"}
+            assert await env.fixture_service.resolve_round_arg("顶级") == ("顶级联赛", 1)
+            assert await env.fixture_service.resolve_round_arg("次级") == ("次级联赛", 2)
+        finally:
+            p.unlink(missing_ok=True)
+    finally:
+        await env.teardown()
+
+
 async def test_xlsx_header_columns():
     base = os.path.dirname(os.path.abspath(__file__))
 

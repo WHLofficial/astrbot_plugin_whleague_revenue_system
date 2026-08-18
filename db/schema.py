@@ -1,6 +1,6 @@
 from astrbot.api import logger
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 SQL_CREATE_TABLES = r"""
 
@@ -197,6 +197,16 @@ CREATE TABLE IF NOT EXISTS plugin_config (
     updated_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
 );
 
+-- 命名轮次登记：同一赛季内「轮次名」唯一对应一个轮次号（同名即为同一轮）
+CREATE TABLE IF NOT EXISTS round_names (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    season_number INTEGER NOT NULL,
+    token TEXT NOT NULL,
+    round_no INTEGER NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+    UNIQUE(season_number, token)
+);
+
 """
 
 
@@ -352,3 +362,19 @@ async def _migrate(db, current_version: int):
         )
         await db.commit()
         logger.info("Migrated event tables: event_type/options_json + event_choices table.")
+    if current_version < 6:
+        # 命名轮次登记表：纯文字轮次（如「顶级」「小组赛」）在同一赛季同名恒同号
+        await db.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS round_names (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                season_number INTEGER NOT NULL,
+                token TEXT NOT NULL,
+                round_no INTEGER NOT NULL,
+                created_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+                UNIQUE(season_number, token)
+            );
+            """
+        )
+        await db.commit()
+        logger.info("Migrated round_names table for named rounds.")

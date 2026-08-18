@@ -169,11 +169,9 @@ def build_fixture_lines(rows: list[list[str]]) -> tuple[list[str], list[str]]:
             errors.append(f"第{rownum}行: 主客队不能相同")
             continue
         round_token = round_raw if round_raw else "1"
+        # 纯文字轮次（无数字）允许透传，由服务层按「同名即为同一轮」登记并改写
         digits = re.sub(r"\D", "", round_token)
-        if not digits:
-            errors.append(f"第{rownum}行: 轮次需包含数字（如 9 / 顶级9 / 次级11）「{round_token}」")
-            continue
-        if int(digits) < 1:
+        if digits and int(digits) < 1:
             errors.append(f"第{rownum}行: 轮次需为正数「{round_token}」")
             continue
         ok = True

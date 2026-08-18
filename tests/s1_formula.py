@@ -195,6 +195,24 @@ async def test_parse_round_token():
             pass
 
 
+async def test_split_competition():
+    """前缀剥离：识别赛事并返回剩余（不要求剩余含数字，供命名轮次使用）。"""
+    cfg = _cfg()
+    cases = [
+        ("1", "联赛", "1"),
+        ("顶级9", "顶级联赛", "9"),
+        ("顶级", "顶级联赛", ""),
+        ("顶3", "顶级联赛", "3"),
+        ("次级11", "次级联赛", "11"),
+        ("小组赛", "冠军杯", "赛"),
+        ("abc", "联赛", "abc"),
+        ("", "联赛", ""),
+    ]
+    for token, comp, rest in cases:
+        got_comp, got_rest = formula.split_competition(cfg, token)
+        assert (got_comp, got_rest) == (comp, rest), f"{token}: {got_comp},{got_rest}"
+
+
 def run_all():
     import asyncio
 

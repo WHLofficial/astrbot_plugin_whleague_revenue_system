@@ -8,7 +8,6 @@ from astrbot.api.event import MessageEventResult
 from astrbot.api.message_components import File
 
 from ..config.defaults import validate_and_cast
-from ..services import formula
 from ..services.brand_service import BrandError
 from ..services.event_engine import EventError
 from ..services.file_import_service import FileImportError, cleanup_file
@@ -110,7 +109,7 @@ class AdminHandler:
             yield event.plain_result("用法: /主场天气 <轮次>（或 /主场天气 <轮次> <主队> <天气> 覆盖）\n轮次支持前缀：顶级9/次级11/冠军3（默认联赛）")
             return
         try:
-            competition, round_no = formula.parse_round_token(self._plugin.config_cache, parts[1])
+            competition, round_no = await self._plugin.fixture_service.resolve_round_arg(parts[1])
         except ValueError as e:
             yield event.plain_result(str(e))
             return
@@ -145,7 +144,7 @@ class AdminHandler:
             yield event.plain_result("用法: /主场赛果 <轮次>\n每行：主队 胜/平/负 [比分]（如 利物浦 胜 2-1；或附带 xlsx/csv 文件）\n轮次支持前缀：顶级9/次级11/冠军3（默认联赛）")
             return
         try:
-            competition, round_no = formula.parse_round_token(self._plugin.config_cache, parts[1])
+            competition, round_no = await self._plugin.fixture_service.resolve_round_arg(parts[1])
         except ValueError as e:
             yield event.plain_result(str(e))
             return
@@ -189,7 +188,7 @@ class AdminHandler:
             yield event.plain_result("用法: /主场轮次统计 <轮次>\n轮次支持前缀：顶级9/次级11/冠军3（默认联赛）")
             return
         try:
-            competition, round_no = formula.parse_round_token(self._plugin.config_cache, parts[1])
+            competition, round_no = await self._plugin.fixture_service.resolve_round_arg(parts[1])
         except ValueError as e:
             yield event.plain_result(str(e))
             return

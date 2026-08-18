@@ -131,6 +131,7 @@ class FixtureService:
     # ─── 赛程导入 ─────────────────────────────────────────
 
     async def import_fixtures(self, text: str) -> dict:
+        text = await self._normalize_round_tokens(text)
         rows = parse_fixture_lines(text, self._cfg)
         if not rows:
             raise FixtureError("没有可导入的赛程行")
@@ -165,6 +166,53 @@ class FixtureService:
         result = await self.import_fixtures("\n".join(parsed["lines"]))
         result["file_errors"] = parsed["errors"]
         return result
+
+    # ─── 命名轮次（同名即为同一轮） ────────────────────────
+
+    async def resolve_round_arg(self, token) -> tuple[str, int]:
+        """解析命令里的轮次参数：带数字走 parse_round_token；纯文字按登记表取轮次号。
+
+        纯文字轮次与导入时同名登记恒为同一号（同一赛季内），供天气/赛果/统计使用。
+        """
+        s = str(token or "").strip()
+        if not s:
+            raise ValueError("轮次不能为空")
+        comp, rest = formula.split_competition(self._cfg, s)
+        digits = re.sub(r"\D", "", rest)
+        if digits:
+            round_no = int(digits)
+            if round_no < 1:
+                raise ValueError(f"轮次需为正数: {token}")
+            return comp, round_no
+        season = (await self.get_state())["season_number"]
+        round_no = await self._dao.add_named_round(season, s)
+        return comp, round_no
+
+    async def _normalize_round_tokens(self, text: str) -> str:
+        """赛程文本首列的纯文字轮次改写为「前缀+轮次号」（同名登记，跨导入恒同号）。
+
+        带数字的轮次原样保留；空 token 的行不动（沿用既有报错）。
+        """
+        season = (await self.get_state())["season_number"]
+        out = []
+        for raw_line in str(text or "").splitlines():
+            line = raw_line.strip()
+            parts = re.split(r"[|\t,，]+", line)
+            if len(parts) < 3:
+                parts = line.split()
+            if not parts or not parts[0].strip():
+                out.append(raw_line)
+                continue
+            token = parts[0].strip()
+            comp, rest = formula.split_competition(self._cfg, token)
+            if re.sub(r"\D", "", rest):
+                out.append(raw_line)
+                continue
+            round_no = await self._dao.add_named_round(season, token)
+            prefix = token[: len(token) - len(rest)]
+            parts[0] = f"{prefix}{round_no}" if prefix else str(round_no)
+            out.append(" ".join(p.strip() for p in parts))
+        return "\n".join(out)
 
     # ─── 天气预报 ─────────────────────────────────────────
 

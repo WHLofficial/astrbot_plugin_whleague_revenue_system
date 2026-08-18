@@ -121,6 +121,20 @@ def competition_aliases(cfg: dict) -> dict:
     return aliases if aliases else DEFAULT_COMPETITION_ALIASES
 
 
+def split_competition(cfg: dict, s: str) -> tuple[str, str]:
+    """按轮次前缀识别赛事，返回 (赛事, 剥离前缀后的剩余)；无前缀命中为联赛。
+
+    与 parse_round_token 共用前缀表；不要求剩余部分含数字。
+    """
+    aliases = competition_aliases(cfg)
+    for name, prefixes in aliases.items():
+        for p in prefixes:
+            p = str(p)
+            if s.startswith(p):
+                return name, s[len(p):]
+    return DEFAULT_COMPETITION, s
+
+
 def parse_round_token(cfg: dict, token) -> tuple[str, int]:
     """轮次支持文字，按前缀识别赛事：如「顶级9」「次级11」「冠军3」「小组赛第3轮」。
 
@@ -129,18 +143,8 @@ def parse_round_token(cfg: dict, token) -> tuple[str, int]:
     s = str(token or "").strip()
     if not s:
         raise ValueError("轮次不能为空")
-    comp = DEFAULT_COMPETITION
-    aliases = competition_aliases(cfg)
-    for name, prefixes in aliases.items():
-        for p in prefixes:
-            p = str(p)
-            if s.startswith(p):
-                comp = name
-                s = s[len(p):]
-                break
-        if comp != DEFAULT_COMPETITION:
-            break
-    digits = re.sub(r"\D", "", s)
+    comp, rest = split_competition(cfg, s)
+    digits = re.sub(r"\D", "", rest)
     if not digits:
         raise ValueError(f"轮次需包含数字: {token}")
     round_no = int(digits)

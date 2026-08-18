@@ -128,7 +128,7 @@ class PlayerHandler:
             yield event.plain_result("用法: /主场轮次统计图 <轮次>\n轮次支持前缀：顶级9/次级11/冠军3（默认联赛）")
             return
         try:
-            competition, round_no = formula.parse_round_token(self._plugin.config_cache, parts[1])
+            competition, round_no = await self._plugin.fixture_service.resolve_round_arg(parts[1])
         except ValueError as e:
             yield event.plain_result(str(e))
             return
@@ -153,7 +153,7 @@ class PlayerHandler:
             yield event.plain_result("用法: /主场轮次预告图 <轮次>\n上半为对阵、下半为天气预报\n轮次支持前缀：顶级9/次级11/冠军3（默认联赛）")
             return
         try:
-            competition, round_no = formula.parse_round_token(self._plugin.config_cache, parts[1])
+            competition, round_no = await self._plugin.fixture_service.resolve_round_arg(parts[1])
         except ValueError as e:
             yield event.plain_result(str(e))
             return
