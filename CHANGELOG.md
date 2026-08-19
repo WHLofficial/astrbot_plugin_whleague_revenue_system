@@ -114,7 +114,7 @@
 
 [1.3.0]: https://github.com/WHLofficial/astrbot_plugin_whleague_revenue_system/compare/a13c722...a98a161
 [1.4.0]: https://github.com/WHLofficial/astrbot_plugin_whleague_revenue_system/compare/a98a161...443dd79
-[1.5.0]: https://github.com/WHLofficial/astrbot_plugin_whleague_revenue_system/compare/38b26a9...b281f85
+[1.5.0]: https://github.com/WHLofficial/astrbot_plugin_whleague_revenue_system/compare/38b26a9...4df6983
 [1.2.0]: https://github.com/WHLofficial/astrbot_plugin_whleague_revenue_system/compare/f33cc93...a13c722
 [1.1.0]: https://github.com/WHLofficial/astrbot_plugin_whleague_revenue_system/compare/3bd5d61...f33cc93
 [1.0.0]: https://github.com/WHLofficial/astrbot_plugin_whleague_revenue_system/compare/c2e2cf7...3bd5d61
