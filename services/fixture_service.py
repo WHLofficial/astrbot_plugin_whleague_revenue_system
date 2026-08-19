@@ -9,7 +9,14 @@ import re
 from astrbot.api import logger
 
 from . import formula
-from .file_import_service import parse_fixture_file, parse_result_file
+from .file_import_service import (
+    FileImportError,
+    check_import_file,
+    is_import_ext,
+    list_import_files as _list_import_files,
+    parse_fixture_file,
+    parse_result_file,
+)
 from .stadium_service import StadiumService
 
 _WEATHER_ALIASES = {
@@ -180,6 +187,33 @@ class FixtureService:
         result["file_errors"] = parsed["errors"]
         return result
 
+    # ─── 本地 imports 目录（文件名直读 / 钩子共用入口） ──────
+
+    def resolve_import_file(self, name: str) -> str | None:
+        """命令参数自动判定：返回 imports 目录里的真实路径，None 表示按文本处理。
+
+        参数以 .csv/.xlsx 结尾（明确的文件意图）但目录里没有 → 抛 FileImportError；
+        普通文本参数 → None（走文本导入）。
+        """
+        s = str(name or "").strip()
+        if not s:
+            return None
+        try:
+            return check_import_file(self._db.db_path, s)
+        except FileImportError:
+            if is_import_ext(s):
+                raise
+            return None
+
+    def list_import_files(self) -> list[str]:
+        """imports 目录内可导入文件名（命令无参时的提示用）。"""
+        return [p.name for p in _list_import_files(self._db.db_path)]
+
+    async def import_fixtures_by_name(self, name: str) -> dict:
+        """按文件名从 imports 目录导入赛程。"""
+        path = check_import_file(self._db.db_path, name)
+        return await self.import_fixtures_file(path)
+
     # ─── 命名轮次（同名即为同一轮） ────────────────────────
 
     async def resolve_round_arg(self, token) -> tuple[str, int]:
@@ -290,6 +324,12 @@ class FixtureService:
         result = await self.record_results(round_no, "\n".join(parsed["lines"]), competition)
         result["file_errors"] = parsed["errors"]
         return result
+
+    async def record_results_by_name(self, round_no: int, name: str,
+                                     competition: str | None = None) -> dict:
+        """按文件名从 imports 目录录入赛果。"""
+        path = check_import_file(self._db.db_path, name)
+        return await self.record_results_file(round_no, path, competition)
 
     async def _record_one(self, match, result: str, season: int, window_seq: int,
                           score: str | None = None) -> dict:

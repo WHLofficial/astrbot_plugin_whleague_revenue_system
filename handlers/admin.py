@@ -5,12 +5,11 @@ from collections.abc import AsyncGenerator
 
 from astrbot.api import logger
 from astrbot.api.event import MessageEventResult
-from astrbot.api.message_components import File
 
 from ..config.defaults import validate_and_cast
 from ..services.brand_service import BrandError
 from ..services.event_engine import EventError
-from ..services.file_import_service import FileImportError, cleanup_file
+from ..services.file_import_service import FileImportError
 from ..services.fixture_service import FixtureError
 from ..services.stadium_service import StadiumError
 from ..services.window_service import SettleError
@@ -53,22 +52,11 @@ class AdminHandler:
             return "你没有权限执行此操作"
         return None
 
-    async def _get_attachment(self, event) -> str | None:
-        """从消息链中提取第一个文件附件，返回下载后的本地路径；无附件返回 None。"""
-        try:
-            messages = event.get_messages()
-        except Exception:
-            return None
-        for comp in messages:
-            if isinstance(comp, File):
-                try:
-                    path = await comp.get_file()
-                except Exception as e:
-                    logger.warning(f"附件下载失败: {e}")
-                    return None
-                if path:
-                    return path
-        return None
+    @staticmethod
+    def _import_files_hint(service) -> str:
+        """imports 目录现有可导入文件提示（命令无参/缺参时引导用）。"""
+        names = service.list_import_files()
+        return "、".join(names) if names else "（空，把 .csv/.xlsx 放进该目录后传文件名）"
 
     # ─── 赛程 ─────────────────────────────────────────────
 
@@ -77,20 +65,24 @@ class AdminHandler:
         if deny:
             yield event.plain_result(deny)
             return
-        path = await self._get_attachment(event)
+        svc = self._plugin.fixture_service
         parts = event.get_message_str().split(maxsplit=1)
-        if path is None and len(parts) < 2:
-            yield event.plain_result("用法: /主场赛程导入\n每行：轮次 主队 客队 [周] [天] [时间]\n例：1 利物浦 巴塞罗那 W12 D6 15:00（或附带 xlsx/csv 文件）")
+        if len(parts) < 2:
+            yield event.plain_result(
+                "用法: /主场赛程导入 <赛程文件.csv/xlsx> 或直接粘贴赛程\n"
+                "每行：轮次 主队 客队 [周] [天] [时间]；例：1 利物浦 巴塞罗那 W12 D6 15:00\n"
+                f"📁 imports 目录当前有：{self._import_files_hint(svc)}"
+            )
             return
-        if path:
-            try:
-                result = await self._run(
-                    event, self._plugin.fixture_service.import_fixtures_file(path)
-                )
-            finally:
-                cleanup_file(path)
+        try:
+            path = svc.resolve_import_file(parts[1])
+        except FileImportError as e:
+            yield event.plain_result(str(e))
+            return
+        if path is not None:
+            result = await self._run(event, svc.import_fixtures_file(path))
         else:
-            result = await self._run(event, self._plugin.fixture_service.import_fixtures(parts[1]))
+            result = await self._run(event, svc.import_fixtures(parts[1]))
         if "error" in result:
             yield event.plain_result(result["error"])
             return
@@ -139,30 +131,32 @@ class AdminHandler:
         if deny:
             yield event.plain_result(deny)
             return
+        svc = self._plugin.fixture_service
         parts = event.get_message_str().split(maxsplit=2)
         if len(parts) < 2:
-            yield event.plain_result("用法: /主场赛果 <轮次>\n每行：主队 胜/平/负 [比分] 或 主队 取消（如 利物浦 胜 2-1；或附 xlsx/csv 文件）\n轮次支持前缀：顶级9/次级11/冠军3（默认联赛）")
+            yield event.plain_result("用法: /主场赛果 <轮次> [赛果文本或赛果文件.csv/xlsx]\n每行：主队 胜/平/负 [比分] 或 主队 取消（如 利物浦 胜 2-1）\n轮次支持前缀：顶级9/次级11/冠军3（默认联赛）；文件来自 imports 目录")
             return
         try:
-            competition, round_no = await self._plugin.fixture_service.resolve_round_arg(parts[1])
+            competition, round_no = await svc.resolve_round_arg(parts[1])
         except ValueError as e:
             yield event.plain_result(str(e))
             return
-        path = await self._get_attachment(event)
-        if path is None and len(parts) < 3:
-            yield event.plain_result("用法: /主场赛果 <轮次>\n每行：主队 胜/平/负 [比分] 或 主队 取消（如 利物浦 胜 2-1；或附 xlsx/csv 文件）\n轮次支持前缀：顶级9/次级11/冠军3（默认联赛）")
-            return
-        if path:
-            try:
-                result = await self._run(
-                    event, self._plugin.fixture_service.record_results_file(round_no, path, competition)
-                )
-            finally:
-                cleanup_file(path)
-        else:
-            result = await self._run(
-                event, self._plugin.fixture_service.record_results(round_no, parts[2], competition)
+        if len(parts) < 3:
+            yield event.plain_result(
+                "用法: /主场赛果 <轮次> [赛果文本或赛果文件.csv/xlsx]\n"
+                "每行：主队 胜/平/负 [比分] 或 主队 取消（如 利物浦 胜 2-1）；文件来自 imports 目录\n"
+                f"📁 imports 目录当前有：{self._import_files_hint(svc)}"
             )
+            return
+        try:
+            path = svc.resolve_import_file(parts[2])
+        except FileImportError as e:
+            yield event.plain_result(str(e))
+            return
+        if path is not None:
+            result = await self._run(event, svc.record_results_file(round_no, path, competition))
+        else:
+            result = await self._run(event, svc.record_results(round_no, parts[2], competition))
         if "error" in result:
             yield event.plain_result(result["error"])
             return
@@ -270,18 +264,22 @@ class AdminHandler:
         if deny:
             yield event.plain_result(deny)
             return
+        svc = self._plugin.stadium_service
         parts = event.get_message_str().split(maxsplit=1)
-        path = await self._get_attachment(event)
-        if path is None and len(parts) < 2:
-            yield event.plain_result("用法: /主场属性导入\n每行：队名 影响力 容量 等级（或附带 xlsx/csv 文件）")
+        if len(parts) < 2:
+            yield event.plain_result(
+                "用法: /主场属性导入 <属性文件.csv/xlsx> 或直接粘贴\n"
+                "每行：队名 影响力 容量 等级（- 表示不改）\n"
+                f"📁 imports 目录当前有：{self._import_files_hint(svc)}"
+            )
             return
-        if path:
-            try:
-                result = await self._run(
-                    event, self._plugin.stadium_service.import_attributes_file(path)
-                )
-            finally:
-                cleanup_file(path)
+        try:
+            path = svc.resolve_import_file(parts[1])
+        except FileImportError as e:
+            yield event.plain_result(str(e))
+            return
+        if path is not None:
+            result = await self._run(event, svc.import_attributes_file(path))
             if "error" in result:
                 yield event.plain_result(result["error"])
                 return

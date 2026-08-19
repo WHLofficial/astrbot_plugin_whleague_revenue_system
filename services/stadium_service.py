@@ -7,7 +7,13 @@
 from astrbot.api import logger
 
 from . import formula
-from .file_import_service import parse_attribute_file
+from .file_import_service import (
+    FileImportError,
+    check_import_file,
+    is_import_ext,
+    list_import_files as _list_import_files,
+    parse_attribute_file,
+)
 
 
 class StadiumError(Exception):
@@ -161,6 +167,33 @@ class StadiumService:
             except (StadiumError, ValueError) as e:
                 results.append({"team": team, "ok": False, "error": str(e)})
         return {"imported": imported, "results": results, "errors": parsed["errors"]}
+
+    # ─── 本地 imports 目录（文件名直读 / 钩子共用入口） ──────
+
+    def resolve_import_file(self, name: str) -> str | None:
+        """命令参数自动判定：返回 imports 目录里的真实路径，None 表示按文本处理。
+
+        参数以 .csv/.xlsx 结尾（明确的文件意图）但目录里没有 → 抛 FileImportError；
+        普通文本参数 → None（走文本导入）。
+        """
+        s = str(name or "").strip()
+        if not s:
+            return None
+        try:
+            return check_import_file(self._db.db_path, s)
+        except FileImportError:
+            if is_import_ext(s):
+                raise
+            return None
+
+    def list_import_files(self) -> list[str]:
+        """imports 目录内可导入文件名（命令无参时的提示用）。"""
+        return [p.name for p in _list_import_files(self._db.db_path)]
+
+    async def import_attributes_by_name(self, name: str) -> dict:
+        """按文件名从 imports 目录批量导入属性。"""
+        path = check_import_file(self._db.db_path, name)
+        return await self.import_attributes_file(path)
 
     async def _record_build_cost(self, team_name: str, season: int, window_seq: int,
                                  cost: float, note: str) -> None:

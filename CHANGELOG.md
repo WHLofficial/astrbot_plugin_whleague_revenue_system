@@ -5,6 +5,12 @@
 
 ## [Unreleased]
 
+## [1.5.0] - 2026-08-19
+
+### Added
+
+- **文件导入改为本地 `imports/` 目录 + 群文件钩子自动导入（对标 WHL 成长/谈判插件）**：文件导入不再依赖「聊天里附带文件」，改为数据库同目录的固定 `imports/` 目录。两种通道：①群里直接发文件即自动导入——按**文件名前缀判型**（`赛程_`/`schedule_` → 赛程；`赛果_`/`result_`/`score_` → 赛果；`属性_`/`attr_`/`attribute_` → 属性），非命中文件名静默忽略；**赛果的轮次取自文件名前缀后剩余**（`赛果_顶级1.csv` → 轮次「顶级1」，契合轮次文本即身份），轮次未导入赛程时报错；②把文件放进 `imports/` 目录后用命令按文件名导入（`/主场赛程导入 赛程_第一周.csv`、`/主场赛果 <轮次> 赛果_xxx.csv`、`/主场属性导入 属性_xxx.csv`），命令不带文件名时列出目录现有文件。文件按 `check_import_file` 校验（防目录穿越、`.csv/.xlsx` 白名单、缺失列出目录文件、大小上限复用 `import_max_file_size_mb`）；群文件由 `on_group_file` 钩子（管理员 + 群白名单）接收，落盘 imports 目录后自动导入并回复结果。
+
 ### Fixed
 
 - **独立事件结算回复展示 LLM 结果短文案**：`/主场事件结算 [全部]` 此前直接罗列数据变化（如「资金 +2.5M；维护 −1.0M」），LLM 生成的结果播报只见于窗口结算的「事件·」回顾、结算回复里看不到；现结算回复优先显示 LLM 生成的结果短文案（已含效果说明），LLM 无内容/未启用时回退确定性数据变化行，与窗口结算一致。
@@ -108,6 +114,7 @@
 
 [1.3.0]: https://github.com/WHLofficial/astrbot_plugin_whleague_revenue_system/compare/a13c722...a98a161
 [1.4.0]: https://github.com/WHLofficial/astrbot_plugin_whleague_revenue_system/compare/a98a161...443dd79
+[1.5.0]: https://github.com/WHLofficial/astrbot_plugin_whleague_revenue_system/compare/38b26a9...b281f85
 [1.2.0]: https://github.com/WHLofficial/astrbot_plugin_whleague_revenue_system/compare/f33cc93...a13c722
 [1.1.0]: https://github.com/WHLofficial/astrbot_plugin_whleague_revenue_system/compare/3bd5d61...f33cc93
 [1.0.0]: https://github.com/WHLofficial/astrbot_plugin_whleague_revenue_system/compare/c2e2cf7...3bd5d61

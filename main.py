@@ -1,7 +1,9 @@
 from collections.abc import AsyncGenerator
 
 from astrbot.api import logger
-from astrbot.api.event import AstrMessageEvent, MessageEventResult, filter
+from astrbot.api.event import AstrMessageEvent, MessageChain, MessageEventResult, filter
+from astrbot.api.event.filter import EventMessageType
+from astrbot.api.message_components import File
 from astrbot.api.star import Context, Star, register
 
 from .config.defaults import (
@@ -131,6 +133,92 @@ class StadiumPlugin(Star):
         if not whitelist:
             return True
         return str(group_id) in [str(g) for g in whitelist]
+
+    # ─── 群文件钩子（发文件即导入） ────────────────────────
+
+    @filter.event_message_type(EventMessageType.GROUP_MESSAGE)
+    async def on_group_file(self, event: AstrMessageEvent) -> None:
+        """群内发文件时接收：按文件名前缀筛选，命中则存入 imports 目录并自动导入。
+
+        文件名规则（前缀 → 类型）：`赛程_`/`schedule_` → 赛程；`赛果_`/`result_`/`score_`
+        → 赛果（前缀后剩余即轮次文本，如 `赛果_顶级1.csv` → 轮次「顶级1」）；
+        `属性_`/`attr_`/`attribute_` → 属性。文件名不匹配则静默跳过。
+        仅管理员、且根目录路径可被 imports 目录读取的文件会被处理。
+        """
+        if not self._is_group_allowed(event):
+            return
+        file_comps = [m for m in event.get_messages() if isinstance(m, File)]
+        if not file_comps:
+            return
+        qq = event.get_sender_id()
+        if not (event.is_admin() or await self.dao.is_admin(qq)):
+            return
+        from .services import file_import_service as fis
+        from .services.fixture_service import FixtureError
+        from .services.stadium_service import StadiumError
+
+        max_size_mb = float(self.config_cache.get("import_max_file_size_mb", 20.0))
+        for comp in file_comps:
+            file_name = comp.name or ""
+            info = fis.parse_import_name(file_name)
+            if info is None:
+                continue
+            kind, round_token = info
+            try:
+                file_path = await comp.get_file()
+                if not file_path:
+                    continue
+                if hasattr(event, "track_temporary_local_file"):
+                    try:
+                        event.track_temporary_local_file(file_path)
+                    except Exception:
+                        pass
+                target = fis.save_uploaded(self.db.db_path, file_path, file_name,
+                                           max_size_mb=max_size_mb)
+                reply = await self._auto_import(kind, round_token, target.name)
+                await event.send(MessageChain().message(reply))
+            except (fis.FileImportError, FixtureError, StadiumError, ValueError) as e:
+                await event.send(MessageChain().message(f"文件接收失败：{e}"))
+            except Exception as e:
+                logger.error(f"群文件捕获/导入失败: {e}")
+                await event.send(MessageChain().message("文件接收失败，已记录错误"))
+
+    async def _auto_import(self, kind: str, round_token: str | None, name: str) -> str:
+        """钩子接到的文件自动导入并返回汇总文案（与命令报告的格式保持一致）。"""
+        if kind == "fixture":
+            result = await self.fixture_service.import_fixtures_by_name(name)
+            lines = [f"📋 已导入第 {result['season']} 赛季窗口 {result['window_seq']} "
+                     f"赛程 {result['imported']} 场（跳过 {result['skipped']}）"]
+            for e in list(result.get("file_errors", [])) + list(result.get("errors", [])):
+                lines.append(f"⚠️ {e}")
+            return "\n".join(lines)
+        if kind == "attribute":
+            result = await self.stadium_service.import_attributes_by_name(name)
+            lines = [f"📄 已导入属性 {result['imported']} 队"]
+            for r in result.get("results", [])[:10]:
+                if r["ok"]:
+                    lines.append(f"✅ {r['team']}: " + "；".join(r["notes"]))
+                else:
+                    lines.append(f"⚠️ {r['team']}: {r['error']}")
+            for e in result.get("errors", [])[:5]:
+                lines.append(f"⚠️ {e}")
+            return "\n".join(lines)
+        # 赛果：轮次来自文件名前缀后剩余（round_token）
+        if not round_token:
+            raise FixtureError("赛果文件名需带轮次，如「赛果_顶级1.csv」")
+        competition, round_no = await self.fixture_service.resolve_round_arg(round_token)
+        result = await self.fixture_service.record_results_by_name(round_no, name, competition)
+        lines = [f"⚽ 已录入第 {round_no} 轮({competition})赛果 {result['count']} 场"]
+        result_cn = {"W": "胜", "D": "平", "L": "负", "C": "取消"}
+        for r in result.get("results", []):
+            if r["result"] == "C":
+                lines.append(f"· {r['home']} vs {r['away']}：比赛取消（不计入合计）")
+                continue
+            score_txt = f" {r['score']}" if r.get("score") else ""
+            lines.append(f"· {r['home']} {result_cn.get(r['result'], r['result'])}{score_txt} {r['away']}")
+        for e in list(result.get("file_errors", [])) + list(result.get("errors", []))[:5]:
+            lines.append(f"⚠️ {e}")
+        return "\n".join(lines)
 
     # ─── cron ───────────────────────────────────────────────
 

@@ -36,8 +36,16 @@ def install_stubs():
 
     event_pkg = types.ModuleType("astrbot.api.event")
     event_pkg.MessageEventResult = types.SimpleNamespace
-    event_pkg.MessageChain = types.SimpleNamespace
     event_pkg.AstrMessageEvent = object
+
+    class _MessageChain:
+        """桩：MessageChain().message(text) 返回 text（群文件钩子回复用）。"""
+
+        @staticmethod
+        def message(text):
+            return text
+
+    event_pkg.MessageChain = _MessageChain
 
     filter_mod = types.ModuleType("astrbot.api.event.filter")
     filter_mod.regex = lambda *a, **k: (lambda fn: fn)

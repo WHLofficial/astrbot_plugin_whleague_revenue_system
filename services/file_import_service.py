@@ -16,6 +16,15 @@ from astrbot.api import logger
 
 _ALLOWED_EXTS = (".csv", ".xlsx")
 
+# 文件名前缀 → 导入类型（对标兄弟插件 growth_system 的前缀判型）。
+# 赛果类额外把「前缀后剩余部分」当作轮次文本（赛果_顶级1.csv → 轮次「顶级1」）。
+_IMPORT_PREFIXES = (
+    ("fixture", ("赛程", "schedule")),
+    ("result", ("赛果", "result", "score")),
+    ("attribute", ("属性", "attr", "attribute")),
+)
+_KIND_CN = {"fixture": "赛程", "result": "赛果", "attribute": "属性"}
+
 _HEADER_KEYWORDS = {
     "round": ("轮次", "round", "轮"),
     "week": ("周", "周次", "week", "w"),
@@ -111,6 +120,97 @@ def read_rows(path, max_size_mb: float = 20.0) -> list[list[str]]:
     except Exception as e:
         logger.error(f"File parse error: {e}")
         raise FileImportError(f"文件解析失败: {e}")
+
+
+# ─── imports 目录（本地文件导入通道） ─────────────────────
+
+def imports_dir(db_path: str) -> Path:
+    """数据库文件同目录下的固定 imports 目录（对标兄弟插件 growth/negotiation）。
+
+    db_path 为 revenue_system.db 的完整路径，imports/ 即落在其所在目录。
+    """
+    d = Path(db_path).parent / "imports"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def _available_hint(d: Path) -> str:
+    names = sorted(p.name for p in d.iterdir()
+                   if p.is_file() and p.suffix.lower() in _ALLOWED_EXTS)
+    return "、".join(names) if names else "（空）"
+
+
+def list_import_files(db_path: str) -> list[Path]:
+    """imports 目录内可导入文件，按修改时间倒序。"""
+    d = imports_dir(db_path)
+    files = [p for p in d.iterdir()
+             if p.is_file() and p.suffix.lower() in _ALLOWED_EXTS]
+    files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+    return files
+
+
+def is_import_ext(name: str) -> bool:
+    """文件名是否以 .csv/.xlsx 结尾（判断参数是否为明确的文件导入意图）。"""
+    return Path(str(name or "")).suffix.lower() in _ALLOWED_EXTS
+
+
+def check_import_file(db_path: str, name: str) -> str:
+    """按文件名解析到 imports 目录里的真实路径。
+
+    防目录穿越（拒绝含路径分隔符/盘符）、扩展名白名单、存在性校验；
+    缺失/非法时错误信息列出目录现有可导入文件。大小/编码校验由 read_rows 兜底。
+    """
+    d = imports_dir(db_path)
+    s = str(name or "").strip()
+    if (not s or s in (".", "..")
+            or "/" in s or "\\" in s or ":" in s):
+        raise FileImportError(f"文件名不合法「{s or '空'}」（imports 目录当前有：{_available_hint(d)}）")
+    if Path(s).suffix.lower() not in _ALLOWED_EXTS:
+        raise FileImportError(f"仅支持 .csv/.xlsx 文件（imports 目录当前有：{_available_hint(d)}）")
+    candidate = d / s
+    if candidate.parent.resolve() != d.resolve():
+        raise FileImportError(f"文件名越界被拒绝「{s}」")
+    if not candidate.is_file():
+        raise FileImportError(f"imports 目录里没有「{s}」，当前有：{_available_hint(d)}")
+    return str(candidate)
+
+
+def parse_import_name(name: str) -> tuple[str, str | None] | None:
+    """按文件名前缀判型：赛程_/赛果_/属性_（含英文别名）→ (kind, round_token)。
+
+    kind ∈ fixture/result/attribute；round_token 仅赛果类有（前缀后剩余、去扩展名，
+    如 赛果_顶级1.csv → 轮次「顶级1」）；不匹配返回 None。
+    """
+    stem = Path(str(name or "")).stem.strip()
+    if not stem:
+        return None
+    s2 = stem.lower()
+    for kind, prefixes in _IMPORT_PREFIXES:
+        for p in prefixes:
+            if s2.startswith(p.lower()):
+                rest = stem[len(p):].strip("_ -")
+                if kind == "result":
+                    return kind, rest or None
+                return kind, None
+    return None
+
+
+def save_uploaded(db_path: str, file_path: str, file_name: str,
+                  max_size_mb: float = 20.0) -> Path:
+    """把收到的群文件复制进 imports 目录（净化文件名 + 扩展名/大小校验）。"""
+    safe = Path(str(file_name or "")).name  # 只取文件名，去路径段
+    if not safe or safe in (".", ".."):
+        raise FileImportError("文件名不合法")
+    if Path(safe).suffix.lower() not in _ALLOWED_EXTS:
+        raise FileImportError(f"仅支持 .csv/.xlsx 文件：{safe}")
+    src = Path(file_path)
+    if src.is_file():
+        size_mb = src.stat().st_size / (1024 * 1024)
+        if size_mb > max_size_mb:
+            raise FileImportError(f"文件超过大小上限（{max_size_mb:g} MB）")
+    target = imports_dir(db_path) / safe
+    target.write_bytes(src.read_bytes())
+    return target
 
 
 def _non_empty_rows(rows: list[list[str]]) -> list[list[str]]:
@@ -316,15 +416,3 @@ async def parse_attribute_file(cfg, path) -> dict:
     rows = await asyncio.to_thread(read_rows, path, _max_size_mb(cfg))
     records, errors = await asyncio.to_thread(build_attribute_rows, rows)
     return {"records": records, "errors": errors}
-
-
-def cleanup_file(path) -> None:
-    """删除解析后的临时文件（AstrBot 下载的附件），失败静默。"""
-    if not path:
-        return
-    try:
-        p = Path(path)
-        if p.is_file():
-            p.unlink()
-    except OSError:
-        pass

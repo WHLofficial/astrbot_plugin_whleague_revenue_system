@@ -1,4 +1,4 @@
-"""文件导入：CSV/XLSX 解析（表头/编码/报错）、三种类型端到端、附件命令路径、临时文件清理。"""
+"""文件导入：CSV/XLSX 解析（表头/编码/报错）、三种类型端到端、imports 目录 by-name 命令、群文件钩子自动导入、文件名判型。"""
 
 import asyncio
 import os
@@ -289,15 +289,6 @@ async def test_unsupported_and_oversize():
         p2.unlink(missing_ok=True)
 
 
-async def test_cleanup_file():
-    p = Path(os.path.join(os.path.dirname(os.path.abspath(__file__)), "tmp_cleanup.csv"))
-    p.write_text("x")
-    fis.cleanup_file(str(p))
-    assert not p.exists()
-    fis.cleanup_file(str(p))  # 不存在时静默
-    fis.cleanup_file("")
-
-
 # ─── 端到端（服务层） ─────────────────────────────────────
 
 async def test_fixture_file_e2e():
@@ -408,77 +399,352 @@ async def test_attributes_file_e2e():
         await env.teardown()
 
 
-# ─── 命令层（附件路径） ──────────────────────────────────
+# ─── 文件名判型 / imports 目录 ───────────────────────────
 
-async def test_handler_attachment_and_cleanup():
+async def test_parse_import_name():
+    assert fis.parse_import_name("赛程_第一周.csv") == ("fixture", None)
+    assert fis.parse_import_name("schedule_w1.csv") == ("fixture", None)
+    assert fis.parse_import_name("赛果_顶级1.csv") == ("result", "顶级1")
+    assert fis.parse_import_name("result_9.xlsx") == ("result", "9")
+    assert fis.parse_import_name("赛果_1 平局.csv") == ("result", "1 平局")
+    assert fis.parse_import_name("属性_w1.csv") == ("attribute", None)
+    assert fis.parse_import_name("attr_名单.csv") == ("attribute", None)
+    assert fis.parse_import_name("随手记.csv") is None
+    assert fis.parse_import_name("") is None
+
+
+async def test_check_and_list_import_files():
+    env = await TestEnv().setup()
+    import time as _t
+
+    def _touch(p, ts):
+        p.write_text("x", encoding="utf-8")
+        os.utime(p, (ts, ts))
+
+    try:
+        d = fis.imports_dir(env.db.db_path)
+        assert d.is_dir()
+        _touch(d / "a.xlsx", _t.time() + 10)
+        _touch(d / "b.csv", _t.time())
+        _touch(d / "notme.txt", _t.time() + 20)
+        # list 只列 .csv/.xlsx，按 mtime 倒序（后写的排前面）
+        names = [p.name for p in fis.list_import_files(env.db.db_path)]
+        assert set(names) == {"a.xlsx", "b.csv"}, names
+        assert names[0] == "a.xlsx", names
+        # check 命中
+        assert fis.check_import_file(env.db.db_path, "b.csv") == str(d / "b.csv")
+        assert fis.is_import_ext("a.CSV") and fis.is_import_ext("b.xlsx")
+        assert not fis.is_import_ext("a.txt") and not fis.is_import_ext("")
+        # 缺失 → 报错并列出目录现有文件
+        try:
+            fis.check_import_file(env.db.db_path, "缺失.csv")
+            assert False, "缺失文件应报错"
+        except FileImportError as e:
+            assert "imports 目录里没有" in str(e) and "b.csv" in str(e), e
+        # 扩展名白名单
+        try:
+            fis.check_import_file(env.db.db_path, "notme.txt")
+            assert False, "非白名单扩展名应报错"
+        except FileImportError as e:
+            assert "仅支持" in str(e), e
+        # 目录穿越 / 非法名
+        for bad in ("../x.csv", "..\\x.csv", "C:\\x.csv", "a/b.csv", ".", "..", ""):
+            try:
+                fis.check_import_file(env.db.db_path, bad)
+                assert False, f"「{bad}」应被拒绝"
+            except FileImportError:
+                pass
+    finally:
+        await env.teardown()
+
+
+async def test_save_uploaded():
     env = await TestEnv().setup()
     try:
-        handler = _make_admin_handler(env)
-        p = Path(os.path.join(os.path.dirname(os.path.abspath(__file__)), "tmp_attach.csv"))
-        p.write_text("轮次,主队,客队\n1,利物浦,巴塞罗那\n2,利物浦,纽卡斯尔联\n", encoding="utf-8")
+        src = Path(os.path.join(os.path.dirname(os.path.abspath(__file__)), "tmp_src.csv"))
+        src.write_text("轮次,主队,客队\n1,利物浦,巴塞罗那\n", encoding="utf-8")
+        try:
+            target = fis.save_uploaded(env.db.db_path, str(src), "赛程_第一周.csv")
+            assert target.exists() and target.name == "赛程_第一周.csv"
+            # 恶意文件名净化（只保留文件名基准）
+            target2 = fis.save_uploaded(env.db.db_path, str(src), "..\\evil.csv")
+            assert target2.name == "evil.csv"
+            # 非法扩展名拒绝
+            try:
+                fis.save_uploaded(env.db.db_path, str(src), "x.txt")
+                assert False, "非法扩展名应拒绝"
+            except FileImportError:
+                pass
+            # 超上限拒绝
+            try:
+                fis.save_uploaded(env.db.db_path, str(src), "big.csv", max_size_mb=0.0000001)
+                assert False, "超限文件应拒绝"
+            except FileImportError as e:
+                assert "大小上限" in str(e), e
+        finally:
+            src.unlink(missing_ok=True)
+    finally:
+        await env.teardown()
 
-        _FakeEvent.results = []
-        event = _FakeEvent("/主场赛程导入", sender="10001", is_admin=True,
-                           messages=[File(name="fix.csv", file=str(p))])
-        results = [r async for r in handler.import_fixtures(event)]
-        assert results and "已导入" in results[0], results
-        assert "2 场" in results[0], results
-        assert not p.exists(), "临时附件应被清理"
+
+async def test_import_by_name_e2e():
+    env = await TestEnv().setup()
+    try:
+        d = fis.imports_dir(env.db.db_path)
+        (d / "赛程_w1.csv").write_text(
+            "轮次,主队,客队\n1,利物浦,巴塞罗那\n1,纽卡斯尔联,勒沃库森\n", encoding="utf-8")
+        result = await env.fixture_service.import_fixtures_by_name("赛程_w1.csv")
+        assert result["imported"] == 2, result
+        try:
+            await env.fixture_service.import_fixtures_by_name("缺失.csv")
+            assert False, "缺失文件应报错"
+        except FileImportError as e:
+            assert "赛程_w1.csv" in str(e), e
+
+        (d / "属性_w1.csv").write_text(
+            "队名,影响力,容量,等级\n利物浦,150,12000,0\n", encoding="utf-8-sig")
+        a = await env.stadium_service.import_attributes_by_name("属性_w1.csv")
+        assert a["imported"] == 1, a
+        st = await env.dao.get_stadium("利物浦")
+        assert abs(st["influence"] - 150.0) < 1e-6
+    finally:
+        await env.teardown()
+
+
+async def test_record_results_by_name_e2e():
+    env = await TestEnv().setup()
+    try:
+        await env.fixture_service.import_fixtures("顶级1 利物浦 巴塞罗那\n顶级1 纽卡斯尔联 勒沃库森")
+        d = fis.imports_dir(env.db.db_path)
+        (d / "赛果_顶级1.csv").write_text("主队,赛果\n利物浦,胜\n纽卡斯尔联,负\n", encoding="utf-8")
+        result = await env.fixture_service.record_results_by_name(1, "赛果_顶级1.csv", "顶级联赛")
+        assert result["count"] == 2, result
+        comp, rn = await env.fixture_service.resolve_round_arg("顶级1")
+        assert (comp, rn) == ("顶级联赛", 1)
+    finally:
+        await env.teardown()
+
+
+# ─── 群文件钩子（发文件即导入） ─────────────────────────
+
+class _GroupFileEvent:
+    """群消息事件桩：携带 File 文件段 + 异步 send + 权限。"""
+
+    def __init__(self, group_id, qq, is_admin, files):
+        self._group_id = group_id
+        self._qq = qq
+        self._admin = is_admin
+        self._files = files
+        self.sent = []
+
+    def get_group_id(self):
+        return self._group_id
+
+    def get_sender_id(self):
+        return self._qq
+
+    def get_messages(self):
+        return list(self._files)
+
+    def is_admin(self):
+        return self._admin
+
+    async def send(self, result):
+        self.sent.append(result)
+
+
+def _make_plugin(env):
+    """构造 StadiumPlugin 实例（__new__ 绕过 initialize，手工注入服务）。"""
+    from astrbot_plugin_whleague_revenue_system import main as plugin_module
+
+    p = plugin_module.StadiumPlugin.__new__(plugin_module.StadiumPlugin)
+    p.config_cache = env.cfg
+    p.dao = env.dao
+    p.db = env.db
+    p.fixture_service = env.fixture_service
+    p.stadium_service = env.stadium_service
+    return p
+
+
+async def test_group_file_hook_auto_import_fixture():
+    env = await TestEnv().setup()
+    try:
+        p = _make_plugin(env)
+        d = fis.imports_dir(env.db.db_path)
+        src = d / "src_赛程_w1.csv"
+        src.write_text("轮次,主队,客队\n1,利物浦,巴塞罗那\n2,利物浦,纽卡斯尔联\n", encoding="utf-8")
+        event = _GroupFileEvent("99999", "10001", True,
+                                [File(name="赛程_w1.csv", file=str(src))])
+        await p.on_group_file(event)
+        assert event.sent and "已导入" in event.sent[0] and "2 场" in event.sent[0], event.sent
+        assert (d / "赛程_w1.csv").exists(), "文件应落盘 imports 目录"
         matches = await env.dao.get_round_matches(1, 1, 1)
         assert len(matches) == 1
-
-        # 文本回退路径仍可用
-        _FakeEvent.results = []
-        event2 = _FakeEvent("/主场赛程导入\n1 巴塞罗那 勒沃库森", sender="10001", is_admin=True)
-        results2 = [r async for r in handler.import_fixtures(event2)]
-        assert results2 and "已导入" in results2[0], results2
-        matches2 = await env.dao.get_round_matches(1, 1, 1)
-        assert len(matches2) == 2
     finally:
         await env.teardown()
 
 
-async def test_handler_attachment_results_and_attributes():
+async def test_group_file_hook_result_round_from_name():
+    """赛果轮次取自文件名前缀后剩余：赛果_顶级1.csv → 轮次「顶级1」。"""
+    env = await TestEnv().setup()
+    try:
+        p = _make_plugin(env)
+        await env.fixture_service.import_fixtures("顶级1 利物浦 巴塞罗那")
+        await env.fixture_service.set_weather(1, "利物浦", "晴")
+        d = fis.imports_dir(env.db.db_path)
+        src = d / "src_赛果.csv"
+        src.write_text("主队,赛果\n利物浦,胜\n", encoding="utf-8")
+        event = _GroupFileEvent("99999", "10001", True,
+                                [File(name="赛果_顶级1.csv", file=str(src))])
+        await p.on_group_file(event)
+        assert event.sent and "已录入" in event.sent[0] and "胜" in event.sent[0], event.sent
+        comp, rn = await env.fixture_service.resolve_round_arg("顶级1")
+        m = (await env.dao.get_round_matches(1, 1, rn, comp))[0]
+        assert m["result"] == "W"
+    finally:
+        await env.teardown()
+
+
+async def test_group_file_hook_result_unregistered_round():
+    """赛果轮次文本未导入赛程 → 友好报错、不静默吞掉。"""
+    env = await TestEnv().setup()
+    try:
+        p = _make_plugin(env)
+        d = fis.imports_dir(env.db.db_path)
+        (d / "赛程_w1.csv").write_text("轮次,主队,客队\n1,利物浦,巴塞罗那\n", encoding="utf-8")
+        src = d / "src_赛果.csv"
+        src.write_text("主队,赛果\n利物浦,胜\n", encoding="utf-8")
+        event = _GroupFileEvent("99999", "10001", True,
+                                [File(name="赛果_顶级9.csv", file=str(src))])
+        await p.on_group_file(event)
+        assert event.sent and "尚未导入" in event.sent[0], event.sent
+    finally:
+        await env.teardown()
+
+
+async def test_group_file_hook_attribute():
+    env = await TestEnv().setup()
+    try:
+        p = _make_plugin(env)
+        d = fis.imports_dir(env.db.db_path)
+        src = d / "src_属性.csv"
+        src.write_text("队名,影响力,容量,等级\n利物浦,150,12000,0\n", encoding="utf-8-sig")
+        event = _GroupFileEvent("99999", "10001", True,
+                                [File(name="属性_w1.csv", file=str(src))])
+        await p.on_group_file(event)
+        assert event.sent and "已导入属性" in event.sent[0], event.sent
+        st = await env.dao.get_stadium("利物浦")
+        assert abs(st["influence"] - 150.0) < 1e-6
+    finally:
+        await env.teardown()
+
+
+async def test_group_file_hook_skips_unmatched_and_nonadmin():
+    env = await TestEnv().setup()
+    try:
+        p = _make_plugin(env)
+        d = fis.imports_dir(env.db.db_path)
+        src = d / "src_随手.csv"
+        src.write_text("随便,内容\n", encoding="utf-8")
+        # 文件名不匹配前缀 → 静默跳过、不落盘、不回复
+        ev1 = _GroupFileEvent("99999", "10001", True, [File(name="随手.csv", file=str(src))])
+        await p.on_group_file(ev1)
+        assert not ev1.sent and not (d / "随手.csv").exists()
+        # 非法文件名（../）→ 不落盘
+        ev2 = _GroupFileEvent("99999", "10001", True, [File(name="../evil.csv", file=str(src))])
+        await p.on_group_file(ev2)
+        assert not ev2.sent
+        # 非管理员 → 不处理
+        ev3 = _GroupFileEvent("99999", "10002", False,
+                              [File(name="赛程_w1.csv", file=str(src))])
+        await p.on_group_file(ev3)
+        assert not ev3.sent and not (d / "赛程_w1.csv").exists()
+    finally:
+        await env.teardown()
+
+
+# ─── 命令层（by-name / 无参列表／文本回退） ──────────────
+
+async def test_handler_import_fixtures_by_name():
     env = await TestEnv().setup()
     try:
         handler = _make_admin_handler(env)
+        d = fis.imports_dir(env.db.db_path)
+        (d / "赛程_w1.csv").write_text(
+            "轮次,主队,客队\n1,利物浦,巴塞罗那\n2,利物浦,纽卡斯尔联\n", encoding="utf-8")
+        _FakeEvent.results = []
+        event = _FakeEvent("/主场赛程导入 赛程_w1.csv", sender="10001", is_admin=True, messages=[])
+        results = [r async for r in handler.import_fixtures(event)]
+        assert results and "已导入" in results[0] and "2 场" in results[0], results
+        assert (d / "赛程_w1.csv").exists(), "命令导入不删除 imports 文件"
+        matches = await env.dao.get_round_matches(1, 1, 1)
+        assert len(matches) == 1
+    finally:
+        await env.teardown()
 
-        res_path = Path(os.path.join(os.path.dirname(os.path.abspath(__file__)), "tmp_attach_res.csv"))
-        res_path.write_text("主队,赛果\n利物浦,胜\n", encoding="utf-8")
+
+async def test_handler_import_by_name_missing():
+    env = await TestEnv().setup()
+    try:
+        handler = _make_admin_handler(env)
+        _FakeEvent.results = []
+        event = _FakeEvent("/主场赛程导入 缺失.csv", sender="10001", is_admin=True, messages=[])
+        results = [r async for r in handler.import_fixtures(event)]
+        assert results and "imports 目录里没有" in results[0], results
+    finally:
+        await env.teardown()
+
+
+async def test_handler_results_and_attributes_by_name():
+    env = await TestEnv().setup()
+    try:
+        handler = _make_admin_handler(env)
         await env.fixture_service.import_fixtures("1 利物浦 巴塞罗那")
         await env.fixture_service.set_weather(1, "利物浦", "晴")
-        try:
-            _FakeEvent.results = []
-            event = _FakeEvent("/主场赛果 1", sender="10001", is_admin=True,
-                               messages=[File(name="res.csv", file=str(res_path))])
-            results = [r async for r in handler.record_results(event)]
-            assert results and "已录入" in results[0], results
-            assert not res_path.exists()
-        finally:
-            res_path.unlink(missing_ok=True)
+        d = fis.imports_dir(env.db.db_path)
+        (d / "赛果_1.csv").write_text("主队,赛果\n利物浦,胜\n", encoding="utf-8")
+        _FakeEvent.results = []
+        event = _FakeEvent("/主场赛果 1 赛果_1.csv", sender="10001", is_admin=True, messages=[])
+        results = [r async for r in handler.record_results(event)]
+        assert results and "已录入" in results[0], results
 
-        attr_path = Path(os.path.join(os.path.dirname(os.path.abspath(__file__)), "tmp_attach_attr.csv"))
-        attr_path.write_text("队名,影响力,容量,等级\n利物浦,160,12000,0\n", encoding="utf-8")
-        try:
-            _FakeEvent.results = []
-            event2 = _FakeEvent("/主场属性导入", sender="10001", is_admin=True,
-                                messages=[File(name="attr.csv", file=str(attr_path))])
-            results2 = [r async for r in handler.import_attributes_batch(event2)]
-            assert results2 and "文件导入属性" in results2[0], results2
-            assert not attr_path.exists()
-        finally:
-            attr_path.unlink(missing_ok=True)
+        (d / "属性_w1.csv").write_text("队名,影响力,容量,等级\n利物浦,160,12000,0\n", encoding="utf-8-sig")
+        _FakeEvent.results = []
+        event2 = _FakeEvent("/主场属性导入 属性_w1.csv", sender="10001", is_admin=True, messages=[])
+        results2 = [r async for r in handler.import_attributes_batch(event2)]
+        assert results2 and "文件导入属性" in results2[0], results2
     finally:
         await env.teardown()
 
 
-async def test_no_attachment_usage_hint():
+async def test_handler_no_arg_lists_imports_dir():
+    env = await TestEnv().setup()
+    try:
+        handler = _make_admin_handler(env)
+        d = fis.imports_dir(env.db.db_path)
+        (d / "赛程_w1.csv").write_text("轮次,主队,客队\n1,利物浦,巴塞罗那\n", encoding="utf-8")
+        for msg in ("/主场赛程导入", "/主场属性导入"):
+            _FakeEvent.results = []
+            event = _FakeEvent(msg, sender="10001", is_admin=True, messages=[])
+            if "赛程" in msg:
+                results = [r async for r in handler.import_fixtures(event)]
+            else:
+                results = [r async for r in handler.import_attributes_batch(event)]
+            assert results and "用法" in results[0] and "赛程_w1.csv" in results[0], results
+    finally:
+        await env.teardown()
+
+
+async def test_handler_text_paste_still_works():
+    """移除附件入口后，纯文本粘贴导入不受影响。"""
     env = await TestEnv().setup()
     try:
         handler = _make_admin_handler(env)
         _FakeEvent.results = []
-        event = _FakeEvent("/主场赛程导入", sender="10001", is_admin=True, messages=[])
+        event = _FakeEvent("/主场赛程导入\n1 利物浦 巴塞罗那", sender="10001", is_admin=True, messages=[])
         results = [r async for r in handler.import_fixtures(event)]
-        assert results and "用法" in results[0], results
+        assert results and "已导入" in results[0], results
+        matches = await env.dao.get_round_matches(1, 1, 1)
+        assert len(matches) == 1
     finally:
         await env.teardown()
