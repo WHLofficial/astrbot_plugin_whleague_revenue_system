@@ -518,7 +518,9 @@ class AdminHandler:
                 lines.append(f"· {r['team']} {r['event']}：跳过（无选项信息）")
                 continue
             how = "自动最差" if r["auto"] else "已选"
-            detail = "；".join(r["notes"]) if r["notes"] else "无变化"
+            # 优先展示 LLM 生成的结果短文案（已含效果说明）；无内容回退到确定性数据变化行
+            text = (r.get("text") or "").strip()
+            detail = text or ("；".join(r["notes"]) if r["notes"] else "无变化")
             lines.append(f"· {r['team']} {r['event']}（{how}）：{detail}")
         if not include:
             remaining = await self._plugin.dao.get_unresolved_choices(season, window_seq)

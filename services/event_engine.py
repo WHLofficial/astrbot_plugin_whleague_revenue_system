@@ -555,7 +555,7 @@ class EventEngine:
         text = await self._result_text(event, c["team_name"], how, notes, use_llm)
         await self._dao.update_event_log_text(c["team_name"], c["event_id"], text)
         return {"team": c["team_name"], "event": event["name"],
-                "option": opt["name"], "auto": auto, "notes": notes}
+                "option": opt["name"], "auto": auto, "notes": notes, "text": text}
 
     async def _result_text(self, event, team: str, how: str, notes, use_llm: bool) -> str:
         """结算短文案：LLM（受调用上限约束）；失败/超限回退确定性摘要行。"""

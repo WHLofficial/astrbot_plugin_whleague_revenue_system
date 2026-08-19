@@ -159,10 +159,12 @@ async def test_choice_handlers_flow():
         assert "个选项" in joined, joined
         assert "政府补贴" in joined and 'money' in joined, joined
 
-        # 独立事件结算：只结已导入选择；再走「全部」提示无待结算
+        # 独立事件结算：LLM 结果短文案应出现在回复中（而非只给数据变化行）
+        env.provider.set_response("结算播报：周边爆款意外大卖，全场爆满。")
         ev8 = _FakeEvent("/主场事件结算", sender="admin", is_admin=True)
         out8 = [r async for r in handler.settle_events_now(ev8)]
         assert out8 and "事件结算" in out8[0], out8
+        assert "结算播报：周边爆款意外大卖" in out8[0], out8
         ev9 = _FakeEvent("/主场事件结算 全部", sender="admin", is_admin=True)
         out9 = [r async for r in handler.settle_events_now(ev9)]
         assert out9 and ("事件结算" in out9[0] or "没有待结算" in out9[0]), out9
