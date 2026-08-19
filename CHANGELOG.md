@@ -5,6 +5,8 @@
 
 ## [Unreleased]
 
+## [1.4.0] - 2026-08-19
+
 ### Added
 
 - **图表字重与清晰度**：标题/表头/合计行在仅内置字体（含云服务器/容器）环境下也真正渲染为粗体——内置 Noto Sans SC 变量字体按字重选择 Bold/Regular，不再全部压在 Regular；全部图表改用 2x 超采样绘制后 LANCZOS 缩回设计尺寸，文字与线条边缘更锐利、不再发虚。
@@ -101,6 +103,7 @@
 - 配置（WebUI / `/主场设置`）与每日自动备份；零依赖测试基建（桩 + 临时库 + LLM 桩）。
 
 [1.3.0]: https://github.com/WHLofficial/astrbot_plugin_whleague_revenue_system/compare/a13c722...a98a161
+[1.4.0]: https://github.com/WHLofficial/astrbot_plugin_whleague_revenue_system/compare/a98a161...443dd79
 [1.2.0]: https://github.com/WHLofficial/astrbot_plugin_whleague_revenue_system/compare/f33cc93...a13c722
 [1.1.0]: https://github.com/WHLofficial/astrbot_plugin_whleague_revenue_system/compare/3bd5d61...f33cc93
 [1.0.0]: https://github.com/WHLofficial/astrbot_plugin_whleague_revenue_system/compare/c2e2cf7...3bd5d61
