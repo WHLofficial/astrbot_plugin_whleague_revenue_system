@@ -1,4 +1,4 @@
-"""球场：属性导入（纯管理员）、越界校验、自动记账、建设券、改名。
+"""球场：属性导入（纯管理员）、越界校验、自动记账、建设券、管理员改名。
 
 属性变更时自动按 S9 定价记支出；建设券 = 扩建/升级支出的 25% 返还，
 仅可抵扣后续建设支出（均为配置项）。
@@ -229,28 +229,24 @@ class StadiumService:
         await self._dao.upsert_facility(team_name, facility_key, level)
         return {"facility": _FACILITY_NAMES[facility_key], "level": level}
 
-    # ─── 改名 ─────────────────────────────────────────────
+    # ─── 改名（管理员） ───────────────────────────────────
 
-    async def rename(self, team_name: str, new_name: str) -> dict:
+    async def admin_rename(self, team_name: str, new_name: str) -> dict:
+        """管理员代改球场名：免费、不记流水；无球场的队伍报错（不自动建场）。"""
         new_name = new_name.strip()
         if not new_name:
             raise StadiumError("名称不能为空")
+        if "\n" in new_name or "\r" in new_name:
+            raise StadiumError("名称不能包含换行")
         if len(new_name) > 30:
             raise StadiumError("名称最长 30 字")
-        stadium = await self.ensure_stadium(team_name)
-        state = await self._dao.get_league_state()
-        season = state["season_number"] if state else 1
-        window_seq = state["window_seq"] if state else 1
-        fee = 0.0
-        if not stadium["free_rename_used"]:
-            await self._dao.mark_rename_used(team_name)
-        else:
-            fee = float(self._cfg.get("rename_fee", 2.0))
-            await self._dao.ensure_balance(team_name, float(self._cfg.get("start_funds", 50.0)))
-            await self._dao.apply_balance(team_name, -fee)
-            await self._dao.add_transaction(team_name, season, window_seq, "rename", -fee, f"改名 {stadium['name']}→{new_name}")
+        stadium = await self._dao.get_stadium(team_name)
+        if not stadium:
+            raise StadiumError(f"{team_name} 还没有球场，无法改名")
+        if new_name == stadium["name"]:
+            raise StadiumError(f"名称未变化（当前已是「{stadium['name']}」）")
         await self._dao.update_stadium_name(team_name, new_name)
-        return {"old": stadium["name"], "new": new_name, "fee": fee}
+        return {"old": stadium["name"], "new": new_name}
 
 
 def parse_tier_table(cfg: dict) -> dict:

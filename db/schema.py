@@ -13,7 +13,6 @@ CREATE TABLE IF NOT EXISTS stadium (
     influence REAL NOT NULL DEFAULT 90,
     fans_diehards REAL NOT NULL DEFAULT 1800,
     next_attendance_mod REAL NOT NULL DEFAULT 1.0,
-    free_rename_used INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
 );

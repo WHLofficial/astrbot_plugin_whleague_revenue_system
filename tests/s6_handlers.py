@@ -45,13 +45,13 @@ async def test_plugin_import_and_commands():
     expected_commands = [
         "主场赛程导入", "主场天气", "主场赛果", "主场轮次统计",
         "主场推进窗口", "主场推进赛季", "主场属性", "主场属性导入",
-        "主场设施", "主场发放", "主场事件", "主场事件生成", "主场事件列表",
+        "主场设施", "主场改名", "主场发放", "主场事件", "主场事件生成", "主场事件列表",
         "主场事件采纳", "主场事件丢弃", "主场事件写",
         "主场事件选择", "主场事件选择导入", "主场事件选择列表", "主场事件结算",
         "主场品牌生成",
         "主场品牌列表", "主场品牌采纳", "主场品牌丢弃", "主场结算",
         "主场设置", "主场查看配置", "主场添加管理", "主场删除管理",
-        "主场", "主场信息", "主场赛季统计", "球场命名", "球场活动",
+        "主场", "主场信息", "主场赛季统计", "球场活动",
         "冠名", "退冠名", "主场财务", "主场轮次统计图", "主场赛季走势图", "主场轮次预告图",
     ]
     for cmd in expected_commands:
@@ -103,6 +103,42 @@ async def test_handler_smoke():
         event4 = _FakeEvent("/主场添加管理 不是数字", sender="admin", is_admin=True)
         results4 = [r async for r in handler.add_admin(event4)]
         assert results4 and "QQ" in results4[0], results4
+    finally:
+        await env.teardown()
+
+
+async def test_admin_rename_handler():
+    env = await TestEnv().setup()
+    try:
+        await env.stadium_service.import_attributes("利物浦", influence=100.0)
+        from astrbot_plugin_whleague_revenue_system.handlers.admin import AdminHandler
+
+        handler = AdminHandler(env.__class__ and type("P", (), {
+            "dao": env.dao,
+            "config_cache": env.cfg,
+            "fixture_service": env.fixture_service,
+            "stadium_service": env.stadium_service,
+            "event_engine": env.event_engine,
+            "brand_service": env.brand_service,
+            "window_service": env.window_service,
+            "bridge": env.bridge,
+            "_persist_config": lambda k, v: None,
+        })())
+
+        # 改名成功（新名可含空格，取队名后的整段）
+        ev = _FakeEvent("/主场改名 利物浦 新 安菲尔德", sender="admin", is_admin=True)
+        out = [r async for r in handler.rename_stadium(ev)]
+        assert out and "新 安菲尔德" in out[0] and "利物浦主场" in out[0], out
+
+        # 缺参 → 用法提示
+        ev2 = _FakeEvent("/主场改名", sender="admin", is_admin=True)
+        out2 = [r async for r in handler.rename_stadium(ev2)]
+        assert out2 and "用法" in out2[0], out2
+
+        # 非管理员拒绝
+        ev3 = _FakeEvent("/主场改名 利物浦 X球场", sender="10001")
+        out3 = [r async for r in handler.rename_stadium(ev3)]
+        assert out3 and "没有权限" in out3[0], out3
     finally:
         await env.teardown()
 

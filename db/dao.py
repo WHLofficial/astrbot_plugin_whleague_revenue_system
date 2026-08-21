@@ -103,12 +103,6 @@ class StadiumDAO:
             (name, team_name),
         )
 
-    async def mark_rename_used(self, team_name: str) -> None:
-        await self._db.execute(
-            "UPDATE stadium SET free_rename_used=1, updated_at=datetime('now','localtime') WHERE team_name=?",
-            (team_name,),
-        )
-
     async def update_attendance_mod(self, team_name: str, mod: float) -> None:
         await self._db.execute(
             "UPDATE stadium SET next_attendance_mod=?, updated_at=datetime('now','localtime') WHERE team_name=?",

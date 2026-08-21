@@ -341,6 +341,25 @@ class AdminHandler:
             return
         yield event.plain_result(f"✅ {parts[1]} 的「{result['facility']}」已更新为 {result['level']} 级")
 
+    async def rename_stadium(self, event) -> AsyncGenerator[MessageEventResult, None]:
+        deny = await self._guard(event)
+        if deny:
+            yield event.plain_result(deny)
+            return
+        parts = event.get_message_str().split(maxsplit=2)
+        if len(parts) < 3:
+            yield event.plain_result("用法: /主场改名 <队名> <新名>（免费，改名收归管理员）")
+            return
+        result = await self._run(
+            event, self._plugin.stadium_service.admin_rename(parts[1], parts[2])
+        )
+        if "error" in result:
+            yield event.plain_result(result["error"])
+            return
+        yield event.plain_result(
+            f"✅ 已将 {parts[1]} 的球场改名为「{result['new']}」（原「{result['old']}」）"
+        )
+
     async def grant_all(self, event) -> AsyncGenerator[MessageEventResult, None]:
         deny = await self._guard(event)
         if deny:

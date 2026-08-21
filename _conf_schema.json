@@ -221,12 +221,6 @@
     "type": "string",
     "default": "{\"concert\":{\"name\":\"演唱会\",\"income_min\":3.0,\"income_max\":8.0,\"pitch_damage_prob\":0.15,\"damage_min\":2.0,\"damage_max\":5.0},\"esports\":{\"name\":\"电竞赛事\",\"income_min\":2.0,\"income_max\":4.0},\"open_day\":{\"name\":\"球迷开放日\",\"income\":0.5,\"fans_pct\":0.05},\"youth_camp\":{\"name\":\"青训夏令营\",\"income\":1.0,\"youth_level_factor\":0.1},\"idle\":{\"name\":\"空置\",\"income\":0.0}}"
   },
-  "rename_fee": {
-    "description": "改名费用",
-    "hint": "球场改名费用（M），首次免费。",
-    "type": "float",
-    "default": 2.0
-  },
   "start_funds": {
     "description": "启动资金",
     "hint": "球场初始化时发放的余额（M）。",

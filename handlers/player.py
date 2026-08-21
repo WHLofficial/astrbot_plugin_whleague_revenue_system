@@ -1,4 +1,4 @@
-"""玩家命令：主场查看、赛季统计、命名、档期活动、冠名、财务。"""
+"""玩家命令：主场查看、赛季统计、档期活动、冠名、财务。"""
 
 from collections.abc import AsyncGenerator
 
@@ -164,27 +164,6 @@ class PlayerHandler:
             yield event.plain_result(result["error"])
             return
         yield event.image_result(result)
-
-    # ─── 改名 ─────────────────────────────────────────────
-
-    async def rename(self, event) -> AsyncGenerator[MessageEventResult, None]:
-        parts = event.get_message_str().split(maxsplit=1)
-        if len(parts) < 2:
-            yield event.plain_result("用法: /球场命名 <名称>（首次免费，之后 2M）")
-            return
-        try:
-            team = await self._my_team(event)
-        except StadiumError as e:
-            yield event.plain_result(str(e))
-            return
-        result = await self._run(
-            event, self._plugin.stadium_service.rename(team, parts[1])
-        )
-        if "error" in result:
-            yield event.plain_result(result["error"])
-            return
-        fee_txt = f"（花费 {result['fee']}M）" if result["fee"] else "（首次免费）"
-        yield event.plain_result(f"✅ 球场已命名为「{result['new']}」{fee_txt}")
 
     # ─── 档期活动 ─────────────────────────────────────────
 

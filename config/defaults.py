@@ -1,7 +1,7 @@
 import json
 import os
 
-PLUGIN_VERSION = "1.5.0"
+PLUGIN_VERSION = "1.6.0"
 """插件版本号，与 metadata.yaml 保持一致。"""
 
 _SCHEMA_PATH = os.path.join(
@@ -73,7 +73,6 @@ _FLOAT_RANGES = {
     "event_money_clamp": (0.0, 1000.0),
     "event_fans_clamp": (0.0, 1.0),
     "event_maintenance_clamp": (0.0, 1000.0),
-    "rename_fee": (0.0, 1000.0),
     "start_funds": (0.0, 1e9),
     "build_credit_ratio": (0.0, 1.0),
     "llm_timeout_seconds": (1, 300),

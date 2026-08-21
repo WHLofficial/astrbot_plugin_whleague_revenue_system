@@ -5,6 +5,16 @@
 
 ## [Unreleased]
 
+## [1.6.0] - 2026-08-22
+
+### Added
+
+- **管理员代改球场名 `/主场改名 <队名> <新名>`**：管理员免费为任意球队改球场名（不记流水、不占用任何额度）；该队还没有球场时报错、不自动建场，防止手滑队名凭空建场；新名需非空、≤30 字、不含换行，可含空格（取队名后的整段），与现名相同则提示「名称未变化」。
+
+### Removed
+
+- **移除玩家 `/球场命名` 命令**：改名收归管理员统一操作。随之清理 `rename_fee` 配置（defaults/配置面板）、`mark_rename_used` DAO 方法与 `stadium.free_rename_used` 列（新建库不再创建该列；存量库留列无害、无需迁移，代码不再引用）。
+
 ## [1.5.0] - 2026-08-19
 
 ### Added
@@ -112,6 +122,7 @@
 - 权限与安全：管理员白名单、群白名单、输入净化、频率限制。
 - 配置（WebUI / `/主场设置`）与每日自动备份；零依赖测试基建（桩 + 临时库 + LLM 桩）。
 
+[1.6.0]: https://github.com/WHLofficial/astrbot_plugin_whleague_revenue_system/compare/147c777...86a86d2
 [1.3.0]: https://github.com/WHLofficial/astrbot_plugin_whleague_revenue_system/compare/a13c722...a98a161
 [1.4.0]: https://github.com/WHLofficial/astrbot_plugin_whleague_revenue_system/compare/a98a161...443dd79
 [1.5.0]: https://github.com/WHLofficial/astrbot_plugin_whleague_revenue_system/compare/38b26a9...4df6983

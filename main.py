@@ -327,6 +327,11 @@ class StadiumPlugin(Star):
         async for r in self._admin_cmd(event, self.admin_handler.import_facility):
             yield r
 
+    @filter.command("主场改名")
+    async def cmd_rename_stadium(self, event: AstrMessageEvent) -> AsyncGenerator[MessageEventResult, None]:
+        async for r in self._admin_cmd(event, self.admin_handler.rename_stadium):
+            yield r
+
     @filter.command("主场发放")
     async def cmd_grant_all(self, event: AstrMessageEvent) -> AsyncGenerator[MessageEventResult, None]:
         async for r in self._admin_cmd(event, self.admin_handler.grant_all):
@@ -450,11 +455,6 @@ class StadiumPlugin(Star):
     @filter.command("主场赛季统计")
     async def cmd_season_stats(self, event: AstrMessageEvent) -> AsyncGenerator[MessageEventResult, None]:
         async for r in self._player_cmd(event, self.player_handler.season_stats):
-            yield r
-
-    @filter.command("球场命名")
-    async def cmd_rename(self, event: AstrMessageEvent) -> AsyncGenerator[MessageEventResult, None]:
-        async for r in self._player_cmd(event, self.player_handler.rename):
             yield r
 
     @filter.command("球场活动")

@@ -107,16 +107,38 @@ async def test_facility_import():
         await env.teardown()
 
 
-async def test_rename_fee():
+async def test_admin_rename():
     env = await TestEnv().setup()
     try:
         await env.stadium_service.import_attributes("利物浦", influence=100.0)
-        r1 = await env.stadium_service.rename("利物浦", "安菲尔德")
-        assert r1["fee"] == 0.0
-        r2 = await env.stadium_service.rename("利物浦", "新安菲尔德")
-        assert abs(r2["fee"] - 2.0) < 1e-9
+        r = await env.stadium_service.admin_rename("利物浦", "安菲尔德")
+        assert r["old"] == "利物浦主场" and r["new"] == "安菲尔德"
+        stadium = await env.dao.get_stadium("利物浦")
+        assert stadium["name"] == "安菲尔德"
+        # 管理员操作免费：余额不变、不产生任何流水
         balance = await env.dao.get_balance("利物浦")
-        assert abs(balance["balance"] - (50.0 - 2.0)) < 1e-6
+        assert abs(balance["balance"] - 50.0) < 1e-6
+        txs = await env.dao.list_transactions("利物浦", season=1, window_seq=1)
+        assert not [t for t in txs if t["kind"] == "rename"]
+        # 无球场的队伍报错（不自动建场）
+        try:
+            await env.stadium_service.admin_rename("不存在队", "X 球场")
+            raise AssertionError("应抛 StadiumError")
+        except StadiumError:
+            pass
+        assert await env.dao.get_stadium("不存在队") is None
+        # 名称校验：空白 / 含换行 / 超 30 字 / 与现名相同
+        for bad in ("  ", "超" * 31, "安菲\n尔德"):
+            try:
+                await env.stadium_service.admin_rename("利物浦", bad)
+                raise AssertionError("应抛 StadiumError")
+            except StadiumError:
+                pass
+        try:
+            await env.stadium_service.admin_rename("利物浦", "安菲尔德")
+            raise AssertionError("同名改名应抛 StadiumError")
+        except StadiumError as e:
+            assert "未变化" in str(e)
     finally:
         await env.teardown()
 
