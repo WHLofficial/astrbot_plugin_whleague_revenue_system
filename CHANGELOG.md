@@ -122,7 +122,7 @@
 - 权限与安全：管理员白名单、群白名单、输入净化、频率限制。
 - 配置（WebUI / `/主场设置`）与每日自动备份；零依赖测试基建（桩 + 临时库 + LLM 桩）。
 
-[1.6.0]: https://github.com/WHLofficial/astrbot_plugin_whleague_revenue_system/compare/147c777...86a86d2
+[1.6.0]: https://github.com/WHLofficial/astrbot_plugin_whleague_revenue_system/compare/147c777...bd33b8d
 [1.3.0]: https://github.com/WHLofficial/astrbot_plugin_whleague_revenue_system/compare/a13c722...a98a161
 [1.4.0]: https://github.com/WHLofficial/astrbot_plugin_whleague_revenue_system/compare/a98a161...443dd79
 [1.5.0]: https://github.com/WHLofficial/astrbot_plugin_whleague_revenue_system/compare/38b26a9...4df6983
