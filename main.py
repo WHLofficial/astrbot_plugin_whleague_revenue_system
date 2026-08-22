@@ -292,29 +292,19 @@ class StadiumPlugin(Star):
         async for r in self._admin_cmd(event, self.admin_handler.forecast_weather):
             yield r
 
-    @filter.command("主场赛果")
+    @filter.command("主场天气覆盖")
+    async def cmd_weather_override(self, event: AstrMessageEvent) -> AsyncGenerator[MessageEventResult, None]:
+        async for r in self._admin_cmd(event, self.admin_handler.weather_override):
+            yield r
+
+    @filter.command("主场赛果录入", alias={"主场赛果"})
     async def cmd_record_results(self, event: AstrMessageEvent) -> AsyncGenerator[MessageEventResult, None]:
         async for r in self._admin_cmd(event, self.admin_handler.record_results):
             yield r
 
-    @filter.command("主场轮次统计")
-    async def cmd_round_stats(self, event: AstrMessageEvent) -> AsyncGenerator[MessageEventResult, None]:
-        async for r in self._admin_cmd(event, self.admin_handler.round_stats):
-            yield r
-
-    @filter.command("主场推进窗口")
-    async def cmd_advance_window(self, event: AstrMessageEvent) -> AsyncGenerator[MessageEventResult, None]:
-        async for r in self._admin_cmd(event, self.admin_handler.advance_window):
-            yield r
-
-    @filter.command("主场推进赛季")
-    async def cmd_advance_season(self, event: AstrMessageEvent) -> AsyncGenerator[MessageEventResult, None]:
-        async for r in self._admin_cmd(event, self.admin_handler.advance_season):
-            yield r
-
-    @filter.command("主场属性")
-    async def cmd_import_attributes(self, event: AstrMessageEvent) -> AsyncGenerator[MessageEventResult, None]:
-        async for r in self._admin_cmd(event, self.admin_handler.import_attributes):
+    @filter.command("主场推进", alias={"主场推进窗口", "主场推进赛季"})
+    async def cmd_advance(self, event: AstrMessageEvent) -> AsyncGenerator[MessageEventResult, None]:
+        async for r in self._admin_cmd(event, self.admin_handler.advance):
             yield r
 
     @filter.command("主场属性导入")
@@ -342,14 +332,9 @@ class StadiumPlugin(Star):
         async for r in self._admin_cmd(event, self.admin_handler.trigger_event):
             yield r
 
-    @filter.command("主场事件选择")
+    @filter.command("主场事件选择", alias={"主场事件选择导入"})
     async def cmd_set_choice(self, event: AstrMessageEvent) -> AsyncGenerator[MessageEventResult, None]:
         async for r in self._admin_cmd(event, self.admin_handler.set_choice):
-            yield r
-
-    @filter.command("主场事件选择导入")
-    async def cmd_import_choices(self, event: AstrMessageEvent) -> AsyncGenerator[MessageEventResult, None]:
-        async for r in self._admin_cmd(event, self.admin_handler.import_choices):
             yield r
 
     @filter.command("主场事件选择列表")
@@ -442,14 +427,19 @@ class StadiumPlugin(Star):
         async for r in handler(event, *args):
             yield r
 
-    @filter.command("主场")
+    @filter.command("主场帮助")
+    async def cmd_help(self, event: AstrMessageEvent) -> AsyncGenerator[MessageEventResult, None]:
+        async for r in self._player_cmd(event, self.player_handler.help):
+            yield r
+
+    @filter.command("主场", alias={"主场信息"})
     async def cmd_my_stadium(self, event: AstrMessageEvent) -> AsyncGenerator[MessageEventResult, None]:
         async for r in self._player_cmd(event, self.player_handler.my_stadium):
             yield r
 
-    @filter.command("主场信息")
-    async def cmd_view_stadium(self, event: AstrMessageEvent) -> AsyncGenerator[MessageEventResult, None]:
-        async for r in self._player_cmd(event, self.player_handler.view_stadium):
+    @filter.command("主场轮次统计")
+    async def cmd_round_stats(self, event: AstrMessageEvent) -> AsyncGenerator[MessageEventResult, None]:
+        async for r in self._player_cmd(event, self.player_handler.round_stats):
             yield r
 
     @filter.command("主场赛季统计")
@@ -457,17 +447,17 @@ class StadiumPlugin(Star):
         async for r in self._player_cmd(event, self.player_handler.season_stats):
             yield r
 
-    @filter.command("球场活动")
+    @filter.command("主场档期", alias={"球场活动"})
     async def cmd_book_activity(self, event: AstrMessageEvent) -> AsyncGenerator[MessageEventResult, None]:
         async for r in self._player_cmd(event, self.player_handler.book_activity):
             yield r
 
-    @filter.command("冠名")
+    @filter.command("主场冠名", alias={"冠名"})
     async def cmd_sign_naming(self, event: AstrMessageEvent) -> AsyncGenerator[MessageEventResult, None]:
         async for r in self._player_cmd(event, self.player_handler.sign_naming):
             yield r
 
-    @filter.command("退冠名")
+    @filter.command("主场退冠名", alias={"退冠名"})
     async def cmd_terminate_naming(self, event: AstrMessageEvent) -> AsyncGenerator[MessageEventResult, None]:
         async for r in self._player_cmd(event, self.player_handler.terminate_naming):
             yield r

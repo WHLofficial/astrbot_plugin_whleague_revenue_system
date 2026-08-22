@@ -13,7 +13,7 @@ from ..services.file_import_service import FileImportError
 from ..services.fixture_service import FixtureError
 from ..services.stadium_service import StadiumError
 from ..services.window_service import SettleError
-from ..utils.security import format_m, parse_choice_no, parse_int, parse_qq, parse_qq_arg
+from ..utils.security import format_m, parse_int, parse_qq, parse_qq_arg
 
 _FACILITY_ALIASES = {
     "商业区": "commercial", "商业": "commercial", "commercial": "commercial",
@@ -97,23 +97,18 @@ class AdminHandler:
             yield event.plain_result(deny)
             return
         parts = event.get_message_str().split()
+        if len(parts) >= 4:
+            yield event.plain_result(
+                "查询整轮预报只带轮次；要覆盖单场天气请用 /主场天气覆盖 <轮次> <主队> <天气>"
+            )
+            return
         if len(parts) < 2:
-            yield event.plain_result("用法: /主场天气 <轮次>（或 /主场天气 <轮次> <主队> <天气> 覆盖）\n轮次支持前缀：顶级9/次级11/冠军3（默认联赛）")
+            yield event.plain_result("用法: /主场天气 <轮次>\n轮次支持前缀：顶级9/次级11/冠军3（默认联赛）")
             return
         try:
             competition, round_no = await self._plugin.fixture_service.resolve_round_arg(parts[1])
         except ValueError as e:
             yield event.plain_result(str(e))
-            return
-        if len(parts) >= 4:
-            result = await self._run(
-                event,
-                self._plugin.fixture_service.set_weather(round_no, parts[2], parts[3], competition),
-            )
-            if "error" in result:
-                yield event.plain_result(result["error"])
-                return
-            yield event.plain_result(f"☀️ 第 {round_no} 轮({competition})「{result['home']}」天气改为 {result['weather']}")
             return
         result = await self._run(event, self._plugin.fixture_service.forecast_round(round_no, competition))
         if "error" in result:
@@ -126,6 +121,29 @@ class AdminHandler:
             lines.append(f"· {m['home']}: {icons.get(m['weather'], '')}{m['weather']}{mark}")
         yield event.plain_result("\n".join(lines))
 
+    async def weather_override(self, event) -> AsyncGenerator[MessageEventResult, None]:
+        deny = await self._guard(event)
+        if deny:
+            yield event.plain_result(deny)
+            return
+        parts = event.get_message_str().split()
+        if len(parts) < 4:
+            yield event.plain_result("用法: /主场天气覆盖 <轮次> <主队> <天气>（晴/多云/雨/雪）")
+            return
+        try:
+            competition, round_no = await self._plugin.fixture_service.resolve_round_arg(parts[1])
+        except ValueError as e:
+            yield event.plain_result(str(e))
+            return
+        result = await self._run(
+            event,
+            self._plugin.fixture_service.set_weather(round_no, parts[2], parts[3], competition),
+        )
+        if "error" in result:
+            yield event.plain_result(result["error"])
+            return
+        yield event.plain_result(f"☀️ 第 {round_no} 轮({competition})「{result['home']}」天气改为 {result['weather']}")
+
     async def record_results(self, event) -> AsyncGenerator[MessageEventResult, None]:
         deny = await self._guard(event)
         if deny:
@@ -134,7 +152,7 @@ class AdminHandler:
         svc = self._plugin.fixture_service
         parts = event.get_message_str().split(maxsplit=2)
         if len(parts) < 2:
-            yield event.plain_result("用法: /主场赛果 <轮次> [赛果文本或赛果文件.csv/xlsx]\n每行：主队 胜/平/负 [比分] 或 主队 取消（如 利物浦 胜 2-1）\n轮次支持前缀：顶级9/次级11/冠军3（默认联赛）；文件来自 imports 目录")
+            yield event.plain_result("用法: /主场赛果录入 <轮次> [赛果文本或赛果文件.csv/xlsx]\n每行：主队 胜/平/负 [比分] 或 主队 取消（如 利物浦 胜 2-1）\n轮次支持前缀：顶级9/次级11/冠军3（默认联赛）；文件来自 imports 目录")
             return
         try:
             competition, round_no = await svc.resolve_round_arg(parts[1])
@@ -143,7 +161,7 @@ class AdminHandler:
             return
         if len(parts) < 3:
             yield event.plain_result(
-                "用法: /主场赛果 <轮次> [赛果文本或赛果文件.csv/xlsx]\n"
+                "用法: /主场赛果录入 <轮次> [赛果文本或赛果文件.csv/xlsx]\n"
                 "每行：主队 胜/平/负 [比分] 或 主队 取消（如 利物浦 胜 2-1）；文件来自 imports 目录\n"
                 f"📁 imports 目录当前有：{self._import_files_hint(svc)}"
             )
@@ -176,88 +194,31 @@ class AdminHandler:
             lines.append(f"⚠️ {e}")
         yield event.plain_result("\n".join(lines))
 
-    async def round_stats(self, event) -> AsyncGenerator[MessageEventResult, None]:
+    async def advance(self, event) -> AsyncGenerator[MessageEventResult, None]:
         deny = await self._guard(event)
         if deny:
             yield event.plain_result(deny)
             return
         parts = event.get_message_str().split()
         if len(parts) < 2:
-            yield event.plain_result("用法: /主场轮次统计 <轮次>\n轮次支持前缀：顶级9/次级11/冠军3（默认联赛）")
+            yield event.plain_result("用法: /主场推进 <窗口|赛季>（推进到下一窗口或下一赛季）")
             return
-        try:
-            competition, round_no = await self._plugin.fixture_service.resolve_round_arg(parts[1])
-        except ValueError as e:
-            yield event.plain_result(str(e))
+        kind = parts[1].strip().lower()
+        svc = self._plugin.fixture_service
+        if kind in ("窗口", "window", "w"):
+            coro = svc.advance_window(event.get_sender_id())
+        elif kind in ("赛季", "season", "s"):
+            coro = svc.advance_season(event.get_sender_id())
+        else:
+            yield event.plain_result("参数需为 窗口 或 赛季（如 /主场推进 窗口）")
             return
-        result = await self._run(event, self._plugin.fixture_service.round_stats(round_no, competition))
-        if "error" in result:
-            yield event.plain_result(result["error"])
-            return
-        lines = [f"📊 第 {result['round_no']} 轮({competition})统计（赛季{result['season']} 窗口{result['window_seq']}）"]
-        lines.extend(result["lines"])
-        t = result["totals"]
-        lines.append(f"合计: 上座 {t['attendance']:,} / 票房 {t['ticket']:.2f}M")
-        yield event.plain_result("\n".join(lines))
-
-    async def advance_window(self, event) -> AsyncGenerator[MessageEventResult, None]:
-        deny = await self._guard(event)
-        if deny:
-            yield event.plain_result(deny)
-            return
-        result = await self._run(
-            event, self._plugin.fixture_service.advance_window(event.get_sender_id())
-        )
-        if "error" in result:
-            yield event.plain_result(result["error"])
-            return
-        yield event.plain_result(f"✅ 已进入第 {result['season_number']} 赛季窗口 {result['window_seq']}")
-
-    async def advance_season(self, event) -> AsyncGenerator[MessageEventResult, None]:
-        deny = await self._guard(event)
-        if deny:
-            yield event.plain_result(deny)
-            return
-        result = await self._run(
-            event, self._plugin.fixture_service.advance_season(event.get_sender_id())
-        )
+        result = await self._run(event, coro)
         if "error" in result:
             yield event.plain_result(result["error"])
             return
         yield event.plain_result(f"✅ 已进入第 {result['season_number']} 赛季窗口 {result['window_seq']}")
 
     # ─── 属性导入 ─────────────────────────────────────────
-
-    async def import_attributes(self, event) -> AsyncGenerator[MessageEventResult, None]:
-        deny = await self._guard(event)
-        if deny:
-            yield event.plain_result(deny)
-            return
-        parts = event.get_message_str().split()
-        if len(parts) < 2:
-            yield event.plain_result("用法: /主场属性 <队名> [影响力] [容量] [等级]（- 表示不改）")
-            return
-        team = parts[1]
-        influence = capacity = tier = None
-        try:
-            if len(parts) >= 3 and parts[2] != "-":
-                influence = float(parts[2])
-            if len(parts) >= 4 and parts[3] != "-":
-                capacity = parse_int(parts[3], min_val=1)
-            if len(parts) >= 5 and parts[4] != "-":
-                tier = parse_int(parts[4], min_val=0)
-        except ValueError:
-            yield event.plain_result("参数格式错误：影响力为数字，容量/等级为整数")
-            return
-        result = await self._run(
-            event, self._plugin.stadium_service.import_attributes(team, influence, capacity, tier)
-        )
-        if "error" in result:
-            yield event.plain_result(result["error"])
-            return
-        lines = [f"✅ {result['team']} 属性已更新"]
-        lines.extend(f"· {n}" for n in result["notes"])
-        yield event.plain_result("\n".join(lines))
 
     async def import_attributes_batch(self, event) -> AsyncGenerator[MessageEventResult, None]:
         deny = await self._guard(event)
@@ -269,7 +230,7 @@ class AdminHandler:
         if len(parts) < 2:
             yield event.plain_result(
                 "用法: /主场属性导入 <属性文件.csv/xlsx> 或直接粘贴\n"
-                "每行：队名 影响力 容量 等级（- 表示不改）\n"
+                "每行：队名 影响力 容量 等级（- 表示不改；单行即单队更新）\n"
                 f"📁 imports 目录当前有：{self._import_files_hint(svc)}"
             )
             return
@@ -394,7 +355,7 @@ class AdminHandler:
             hit = result["hits"][0]
             if hit.get("type") == "choice":
                 yield event.plain_result(
-                    (hit.get("broadcast") or hit["event"]) + "\n📤 请收集球员回应后，用 /主场事件选择导入 统一录入"
+                    (hit.get("broadcast") or hit["event"]) + "\n📤 请收集球员回应后，用 /主场事件选择 统一录入"
                 )
             else:
                 yield event.plain_result(self._format_hit(hit))
@@ -411,7 +372,7 @@ class AdminHandler:
         lines = [f"🎲 事件触发：{result['triggered']} 队命中"]
         for hit in result["hits"]:
             lines.append(self._format_hit(hit))
-        lines.append("📤 选择型事件请收集球员回应后，用 /主场事件选择导入 统一录入（/主场事件选择列表 查看待定）")
+        lines.append("📤 选择型事件请收集球员回应后，用 /主场事件选择 多行批量录入（/主场事件选择列表 查看待定）")
         yield event.plain_result("\n".join(lines))
 
     @staticmethod
@@ -430,49 +391,28 @@ class AdminHandler:
         if deny:
             yield event.plain_result(deny)
             return
-        parts = event.get_message_str().split()
-        if len(parts) < 4:
-            yield event.plain_result("用法: /主场事件选择 <队名> <事件名> <选项号>\n（选项号见 /主场事件选择列表 的广播文案）")
-            return
-        try:
-            choice_no = parse_choice_no(parts[3])
-        except ValueError:
-            yield event.plain_result("选项号需为正整数或 ①②③④")
-            return
-        state = await self._plugin.dao.get_league_state()
-        season = state["season_number"] if state else 1
-        window_seq = state["window_seq"] if state else 1
-        result = await self._run(
-            event,
-            self._plugin.event_engine.record_choice(parts[1], season, window_seq, parts[2], choice_no),
-        )
-        if "error" in result:
-            yield event.plain_result(result["error"])
-            return
-        yield event.plain_result(f"✅ {result['team']}「{result['event']}」已选 {result['choice_no']} {result['option']}")
-
-    async def import_choices(self, event) -> AsyncGenerator[MessageEventResult, None]:
-        deny = await self._guard(event)
-        if deny:
-            yield event.plain_result(deny)
-            return
         parts = event.get_message_str().split(maxsplit=1)
-        if len(parts) < 2:
-            yield event.plain_result("用法: /主场事件选择导入\n每行：队名 事件名 选项号\n例：\n利物浦 周边爆款 1\n巴塞罗那 草皮病害 ②")
+        if len(parts) < 2 or not parts[1].strip():
+            yield event.plain_result(
+                "用法: /主场事件选择 <队名> <事件名> <选项号>\n"
+                "也可多行批量（每行：队名 事件名 选项号，支持 ①②③④）\n"
+                "例：\n利物浦 周边爆款 1\n巴塞罗那 草皮病害 ②"
+            )
             return
         results = await self._run(event, self._plugin.event_engine.import_choices(parts[1]))
-        if "error" in results:
+        if isinstance(results, dict):
             yield event.plain_result(results["error"])
             return
         ok = [r for r in results if r["ok"]]
         bad = [r for r in results if not r["ok"]]
-        lines = [f"📥 已导入 {len(ok)} 条选择"]
+        if not ok and not bad:
+            yield event.plain_result("没有可录入的选择，每行格式：队名 事件名 选项号（支持 ①②③④）")
+            return
+        lines = [f"📥 已录入 {len(ok)} 条选择"]
         for r in ok:
             lines.append(f"✅ {r['team']} {r['event']} → 选{r['choice_no']} {r['option']}")
         for r in bad:
             lines.append(f"⚠️ {r['team']} {r['event']}: {r['error']}")
-        if not ok and not bad:
-            lines.append("（没有可解析的行）")
         yield event.plain_result("\n".join(lines))
 
     async def list_choices(self, event) -> AsyncGenerator[MessageEventResult, None]:
@@ -504,7 +444,7 @@ class AdminHandler:
             elif r["choice_no"] is not None:
                 lines.append(f"· {r['team']} {r['event']}：已选 {r['choice_no']} {r['option']}")
             else:
-                lines.append(f"· {r['team']} {r['event']}：⏳ 未定（收集回应用 /主场事件选择导入）")
+                lines.append(f"· {r['team']} {r['event']}：⏳ 未定（收集回应用 /主场事件选择）")
         yield event.plain_result("\n".join(lines))
 
     async def settle_events_now(self, event) -> AsyncGenerator[MessageEventResult, None]:
@@ -527,7 +467,7 @@ class AdminHandler:
             return
         if not result["resolved"]:
             hint = "没有待结算的选择事件" if include else "没有已导入选择的选择事件"
-            yield event.plain_result(f"窗口 {window_seq}：{hint}（用 /主场事件 触发、/主场事件选择导入 录入）")
+            yield event.plain_result(f"窗口 {window_seq}：{hint}（用 /主场事件 触发、/主场事件选择 录入）")
             return
         lines = [f"🎲 第 {season} 赛季窗口 {window_seq} 事件结算 {len(result['resolved'])} 条"]
         for r in result["resolved"]:

@@ -1,4 +1,4 @@
-"""玩家命令：主场查看、赛季统计、档期活动、冠名、财务。"""
+"""玩家命令：主场查看、统计与图表、档期、冠名、财务、帮助。"""
 
 from collections.abc import AsyncGenerator
 
@@ -9,6 +9,7 @@ from ..services.brand_service import BrandError
 from ..services.chart_service import ChartError
 from ..services import formula
 from ..services.stadium_service import StadiumError
+from ..utils.help_text import build_help
 from ..utils.security import format_m
 
 _FACILITY_DISPLAY = {
@@ -50,23 +51,24 @@ class PlayerHandler:
     def _tier_name(tier: int) -> str:
         return _TIER_NAMES[tier] if 0 <= tier < len(_TIER_NAMES) else f"等级{tier}"
 
+    # ─── 帮助 ─────────────────────────────────────────────
+
+    async def help(self, event) -> AsyncGenerator[MessageEventResult, None]:
+        is_admin = event.is_admin() or await self._plugin.dao.is_admin(event.get_sender_id())
+        yield event.plain_result(build_help(is_admin))
+
     # ─── 查看 ─────────────────────────────────────────────
 
     async def my_stadium(self, event) -> AsyncGenerator[MessageEventResult, None]:
-        try:
-            team = await self._my_team(event)
-        except StadiumError as e:
-            yield event.plain_result(str(e))
-            return
-        result = await self._run(event, self._build_view(team))
-        yield event.plain_result(result if isinstance(result, str) else str(result))
-
-    async def view_stadium(self, event) -> AsyncGenerator[MessageEventResult, None]:
         parts = event.get_message_str().split(maxsplit=1)
-        if len(parts) < 2:
-            yield event.plain_result("用法: /主场信息 <队名>")
-            return
-        team = parts[1].strip()
+        if len(parts) >= 2:
+            team = parts[1].strip()
+        else:
+            try:
+                team = await self._my_team(event)
+            except StadiumError as e:
+                yield event.plain_result(str(e))
+                return
         result = await self._run(event, self._build_view(team))
         yield event.plain_result(result if isinstance(result, str) else str(result))
 
@@ -120,6 +122,26 @@ class PlayerHandler:
         lines.append(f"合计: {g['attendance']:,} 人次 / {g['ticket']:.2f}M 票房")
         yield event.plain_result("\n".join(lines))
 
+    async def round_stats(self, event) -> AsyncGenerator[MessageEventResult, None]:
+        parts = event.get_message_str().split()
+        if len(parts) < 2:
+            yield event.plain_result("用法: /主场轮次统计 <轮次>\n轮次支持前缀：顶级9/次级11/冠军3（默认联赛）")
+            return
+        try:
+            competition, round_no = await self._plugin.fixture_service.resolve_round_arg(parts[1])
+        except ValueError as e:
+            yield event.plain_result(str(e))
+            return
+        result = await self._run(event, self._plugin.fixture_service.round_stats(round_no, competition))
+        if "error" in result:
+            yield event.plain_result(result["error"])
+            return
+        lines = [f"📊 第 {result['round_no']} 轮({competition})统计（赛季{result['season']} 窗口{result['window_seq']}）"]
+        lines.extend(result["lines"])
+        t = result["totals"]
+        lines.append(f"合计: 上座 {t['attendance']:,} / 票房 {t['ticket']:.2f}M")
+        yield event.plain_result("\n".join(lines))
+
     # ─── 统计图（全体群友可查） ───────────────────────────
 
     async def round_chart(self, event) -> AsyncGenerator[MessageEventResult, None]:
@@ -170,7 +192,7 @@ class PlayerHandler:
     async def book_activity(self, event) -> AsyncGenerator[MessageEventResult, None]:
         parts = event.get_message_str().split()
         if len(parts) < 2:
-            yield event.plain_result(f"用法: /球场活动 <类型> [档位1-2]（类型: {_ACTIVITY_HINT}）")
+            yield event.plain_result(f"用法: /主场档期 <类型> [档位1-2]（类型: {_ACTIVITY_HINT}）")
             return
         try:
             team = await self._my_team(event)
@@ -222,7 +244,7 @@ class PlayerHandler:
     async def sign_naming(self, event) -> AsyncGenerator[MessageEventResult, None]:
         parts = event.get_message_str().split(maxsplit=1)
         if len(parts) < 2:
-            yield event.plain_result("用法: /冠名 <品牌>（可用 /主场信息 查看品牌列表提示）")
+            yield event.plain_result("用法: /主场冠名 <品牌>")
             return
         try:
             team = await self._my_team(event)
