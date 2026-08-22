@@ -1,4 +1,4 @@
-"""数据库结构：v4→v6 / v5→v6 迁移（事件列 + 选择表 + 命名轮次表）与幂等。"""
+"""数据库结构：v4/v5/v6 旧库迁移到最新（事件列 + 选择表 + 命名轮次表 + 赛季命名表）与幂等。"""
 
 import os
 import sys
@@ -108,7 +108,7 @@ async def test_v4_to_latest_migration():
             row = await db.fetchone(
                 "SELECT value FROM plugin_config WHERE key='schema_version'"
             )
-            assert row["value"] == "8"
+            assert row["value"] == "9"
             # 事件池新增列
             cols = await _table_columns(db.conn, "event_pool")
             assert {"event_type", "options_json"} <= cols, cols
@@ -123,12 +123,15 @@ async def test_v4_to_latest_migration():
             # 命名轮次登记表存在
             rn = await _table_columns(db.conn, "round_names")
             assert {"season_number", "token", "round_no"} <= rn, rn
+            # 赛季命名表存在（v9）
+            sn = await _table_columns(db.conn, "season_names")
+            assert {"season_number", "name", "updated_by"} <= sn, sn
             # 重复初始化幂等（不重复加列/重建）
             await init_schema(db)
             row2 = await db.fetchone(
                 "SELECT value FROM plugin_config WHERE key='schema_version'"
             )
-            assert row2["value"] == "8"
+            assert row2["value"] == "9"
         finally:
             await db.close()
     finally:
@@ -148,9 +151,11 @@ async def test_v5_to_latest_migration():
             row = await db.fetchone(
                 "SELECT value FROM plugin_config WHERE key='schema_version'"
             )
-            assert row["value"] == "8"
+            assert row["value"] == "9"
             cols = await _table_columns(db.conn, "round_names")
             assert {"season_number", "competition", "token", "round_no"} <= cols, cols
+            sn = await _table_columns(db.conn, "season_names")
+            assert {"season_number", "name"} <= sn, sn
             # 登记 API 可用：同名同号、递增分配
             n1 = await db.fetchone(
                 "INSERT INTO round_names (season_number, competition, token, round_no) "
@@ -229,7 +234,7 @@ async def test_v6_to_latest_migration():
             row = await db.fetchone(
                 "SELECT value FROM plugin_config WHERE key='schema_version'"
             )
-            assert row["value"] == "8"
+            assert row["value"] == "9"
             # 迁移后旧数据保留
             rows = await db.fetchall("SELECT * FROM matches")
             assert rows and rows[0]["home_team"] == "利物浦"
@@ -323,5 +328,12 @@ async def test_fresh_db_has_choice_schema():
         assert await env.dao.get_named_round(1, "顶级联赛", "顶级") == 1
         assert await env.dao.get_named_round(1, "顶级联赛", "未导入") is None
         assert await env.dao.add_named_round(2, "顶级联赛", "顶级") == 1  # 跨赛季归一
+        # 赛季命名 DAO：写入/覆写/读取 + 展示标签回退
+        assert await env.dao.get_season_name(1) is None
+        await env.dao.set_season_name(1, "S8 黄金联赛", "tester")
+        await env.dao.set_season_name(1, "S8 黄金联赛·修订", "tester")  # 覆写
+        assert await env.dao.get_season_name(1) == "S8 黄金联赛·修订"
+        assert await env.dao.season_label(1) == "S8 黄金联赛·修订"
+        assert await env.dao.season_label(3) == "第 3 赛季"  # 未命名回退
     finally:
         await env.teardown()

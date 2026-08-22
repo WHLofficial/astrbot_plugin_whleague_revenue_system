@@ -187,7 +187,8 @@ class StadiumPlugin(Star):
         """钩子接到的文件自动导入并返回汇总文案（与命令报告的格式保持一致）。"""
         if kind == "fixture":
             result = await self.fixture_service.import_fixtures_by_name(name)
-            lines = [f"📋 已导入第 {result['season']} 赛季窗口 {result['window_seq']} "
+            season_label = await self.dao.season_label(result["season"])
+            lines = [f"📋 已导入 {season_label} 窗口 {result['window_seq']} "
                      f"赛程 {result['imported']} 场（跳过 {result['skipped']}）"]
             for e in list(result.get("file_errors", [])) + list(result.get("errors", [])):
                 lines.append(f"⚠️ {e}")
@@ -305,6 +306,11 @@ class StadiumPlugin(Star):
     @filter.command("主场推进", alias={"主场推进窗口", "主场推进赛季"})
     async def cmd_advance(self, event: AstrMessageEvent) -> AsyncGenerator[MessageEventResult, None]:
         async for r in self._admin_cmd(event, self.admin_handler.advance):
+            yield r
+
+    @filter.command("主场赛季命名")
+    async def cmd_name_season(self, event: AstrMessageEvent) -> AsyncGenerator[MessageEventResult, None]:
+        async for r in self._admin_cmd(event, self.admin_handler.name_season):
             yield r
 
     @filter.command("主场属性导入")

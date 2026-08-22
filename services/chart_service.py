@@ -486,8 +486,9 @@ class ChartService:
             rows.append(head + [score_text, m["away_team"], name,
                                 f"{int(m['attendance']):,}", rate])
         avg = total / counted if counted else 0
-        subtitle = f"第 {season} 赛季 · 窗口 {window_seq} · 共 {len(played)} 场"
-        title = f"WHL 第{season}赛季{competition}现场观众统计（第{round_no}轮）"
+        season_label = await self._dao.season_label(season)
+        subtitle = f"{season_label} · 窗口 {window_seq} · 共 {len(played)} 场"
+        title = f"WHL {season_label} {competition}现场观众统计（第{round_no}轮）"
         header_fill, header_text = COMPETITION_COLORS.get(competition, DEFAULT_COMPETITION_COLOR)
         headers = [
             ("周", 90, "c"), ("天", 70, "c"), ("星期", 80, "c"), ("时间", 110, "c"),
@@ -559,8 +560,9 @@ class ChartService:
         S = _SUPERSAMPLE
         img = Image.new("RGB", (width * S, height * S), BG)
         dr = ImageDraw.Draw(img)
-        title1 = f"WHL 第{season}赛季{competition} 第{round_no}轮 对阵表"
-        subtitle1 = f"第 {season} 赛季 · 窗口 {window_seq} · 共 {n} 场"
+        season_label = await self._dao.season_label(season)
+        title1 = f"WHL {season_label} {competition} 第{round_no}轮 对阵表"
+        subtitle1 = f"{season_label} · 窗口 {window_seq} · 共 {n} 场"
         y = _draw_table_block(dr, 0, width, title1, subtitle1, sched_headers,
                               sched_rows, None, header_fill, header_text, scale=S)
         title2 = "天气预报"
@@ -597,7 +599,8 @@ class ChartService:
         if not series:
             raise ChartError("本赛季还没有已录赛果的上座数据")
         series.sort(key=lambda item: sum(y for _, y in item[1]) / len(item[1]), reverse=True)
-        title = f"WHL 第 {season} 赛季 各队主场观众走势"
+        season_label = await self._dao.season_label(season)
+        title = f"WHL {season_label} 各队主场观众走势"
         subtitle = "横轴为球队本赛季按顺序的第几次主场 · 图例按场均上座排序"
         out = self.charts_dir / f"season_s{season}_trend.png"
         try:

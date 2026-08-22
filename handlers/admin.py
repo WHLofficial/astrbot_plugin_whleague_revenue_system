@@ -1,4 +1,4 @@
-"""管理命令：赛程/天气/赛果/统计、属性导入、事件与品牌（含 LLM 设计）、结算、配置。"""
+"""管理命令：赛程/天气/赛果/统计、赛季推进与命名、属性导入、事件与品牌（含 LLM 设计）、结算、配置。"""
 
 import json
 from collections.abc import AsyncGenerator
@@ -86,7 +86,8 @@ class AdminHandler:
         if "error" in result:
             yield event.plain_result(result["error"])
             return
-        lines = [f"📋 已导入第 {result['season']} 赛季窗口 {result['window_seq']} 赛程 {result['imported']} 场（跳过 {result['skipped']}）"]
+        season_label = await self._plugin.dao.season_label(result['season'])
+        lines = [f"📋 已导入 {season_label} 窗口 {result['window_seq']} 赛程 {result['imported']} 场（跳过 {result['skipped']}）"]
         for e in list(result.get("file_errors", [])) + list(result.get("errors", [])):
             lines.append(f"⚠️ {e}")
         yield event.plain_result("\n".join(lines))
@@ -199,16 +200,20 @@ class AdminHandler:
         if deny:
             yield event.plain_result(deny)
             return
-        parts = event.get_message_str().split()
+        parts = event.get_message_str().split(maxsplit=2)
         if len(parts) < 2:
-            yield event.plain_result("用法: /主场推进 <窗口|赛季>（推进到下一窗口或下一赛季）")
+            yield event.plain_result(
+                "用法: /主场推进 <窗口|赛季> [赛季名称]（推进到下一窗口或下一赛季；赛季可在推进时直接命名）"
+            )
             return
         kind = parts[1].strip().lower()
         svc = self._plugin.fixture_service
         if kind in ("窗口", "window", "w"):
             coro = svc.advance_window(event.get_sender_id())
         elif kind in ("赛季", "season", "s"):
-            coro = svc.advance_season(event.get_sender_id())
+            coro = svc.advance_season(
+                event.get_sender_id(), parts[2].strip() if len(parts) >= 3 else None
+            )
         else:
             yield event.plain_result("参数需为 窗口 或 赛季（如 /主场推进 窗口）")
             return
@@ -216,7 +221,28 @@ class AdminHandler:
         if "error" in result:
             yield event.plain_result(result["error"])
             return
-        yield event.plain_result(f"✅ 已进入第 {result['season_number']} 赛季窗口 {result['window_seq']}")
+        season_label = await self._plugin.dao.season_label(result["season_number"])
+        yield event.plain_result(f"✅ 已进入 {season_label} 窗口 {result['window_seq']}")
+
+    async def name_season(self, event) -> AsyncGenerator[MessageEventResult, None]:
+        deny = await self._guard(event)
+        if deny:
+            yield event.plain_result(deny)
+            return
+        parts = event.get_message_str().split(maxsplit=1)
+        if len(parts) < 2 or not parts[1].strip():
+            yield event.plain_result("用法: /主场赛季命名 <名称>（给当前赛季命名，可反复改名；≤30 字）")
+            return
+        result = await self._run(
+            event, self._plugin.fixture_service.name_season(parts[1], event.get_sender_id())
+        )
+        if "error" in result:
+            yield event.plain_result(result["error"])
+            return
+        if result["old"]:
+            yield event.plain_result(f"✅ 已将本赛季由「{result['old']}」改名为「{result['new']}」")
+        else:
+            yield event.plain_result(f"✅ 本赛季已命名为「{result['new']}」")
 
     # ─── 属性导入 ─────────────────────────────────────────
 
@@ -437,7 +463,8 @@ class AdminHandler:
         if not rows:
             yield event.plain_result(f"窗口 {window_seq} 没有选择型事件（可用 /主场事件 触发分配）")
             return
-        lines = [f"📋 第 {season} 赛季窗口 {window_seq} 事件选择（{len(rows)} 条）"]
+        season_label = await self._plugin.dao.season_label(season)
+        lines = [f"📋 {season_label} 窗口 {window_seq} 事件选择（{len(rows)} 条）"]
         for r in rows:
             if r["resolved"]:
                 lines.append(f"· {r['team']} {r['event']}：✅ 已结算")
@@ -469,7 +496,8 @@ class AdminHandler:
             hint = "没有待结算的选择事件" if include else "没有已导入选择的选择事件"
             yield event.plain_result(f"窗口 {window_seq}：{hint}（用 /主场事件 触发、/主场事件选择 录入）")
             return
-        lines = [f"🎲 第 {season} 赛季窗口 {window_seq} 事件结算 {len(result['resolved'])} 条"]
+        season_label = await self._plugin.dao.season_label(season)
+        lines = [f"🎲 {season_label} 窗口 {window_seq} 事件结算 {len(result['resolved'])} 条"]
         for r in result["resolved"]:
             if r.get("skipped"):
                 lines.append(f"· {r['team']} {r['event']}：跳过（无选项信息）")
@@ -694,7 +722,8 @@ class AdminHandler:
         if "error" in result:
             yield event.plain_result(result["error"])
             return
-        lines = [f"🧾 第 {result['season']} 赛季窗口 {result['window_seq']} 结算"]
+        season_label = await self._plugin.dao.season_label(result["season"])
+        lines = [f"🧾 {season_label} 窗口 {result['window_seq']} 结算"]
         lines.extend(result["lines"])
         yield event.plain_result("\n".join(lines))
 

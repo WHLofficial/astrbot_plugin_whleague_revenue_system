@@ -34,7 +34,8 @@ class WindowService:
         season, window_seq = int(state["season_number"]), int(state["window_seq"])
         was_settled = await self._dao.has_window_summary(season, window_seq)
         if was_settled and not force:
-            raise SettleError(f"第 {season} 赛季窗口 {window_seq} 已结算（可加「强制」撤销重算）")
+            season_label = await self._dao.season_label(season)
+            raise SettleError(f"{season_label} 窗口 {window_seq} 已结算（可加「强制」撤销重算）")
 
         stadiums = await self._dao.list_stadiums()
         if not stadiums:

@@ -50,6 +50,26 @@ class StadiumDAO:
             (season, window_seq, current_round, updated_by),
         )
 
+    async def get_season_name(self, season: int) -> str | None:
+        row = await self._db.fetchone(
+            "SELECT name FROM season_names WHERE season_number=?", (int(season),)
+        )
+        return row["name"] if row else None
+
+    async def set_season_name(self, season: int, name: str, updated_by: str) -> None:
+        await self._db.execute(
+            "INSERT INTO season_names (season_number, name, updated_by, updated_at) "
+            "VALUES (?, ?, ?, datetime('now','localtime')) "
+            "ON CONFLICT(season_number) DO UPDATE SET "
+            "name=excluded.name, updated_by=excluded.updated_by, updated_at=datetime('now','localtime')",
+            (int(season), name, updated_by),
+        )
+
+    async def season_label(self, season: int) -> str:
+        """展示用赛季标签：有名只显名，无名回退「第 N 赛季」。"""
+        name = await self.get_season_name(season)
+        return name if name else f"第 {int(season)} 赛季"
+
     # ─── 球场 ─────────────────────────────────────────────
 
     async def get_stadium(self, team_name: str):

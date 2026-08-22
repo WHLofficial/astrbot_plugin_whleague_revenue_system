@@ -122,6 +122,48 @@ async def test_advance_window_season():
         await env.teardown()
 
 
+async def test_season_naming():
+    """赛季命名：校验/改名/未变化；推进带名（非法名不推进）。"""
+    from astrbot_plugin_whleague_revenue_system.services.fixture_service import FixtureError
+
+    env = await TestEnv().setup()
+    try:
+        r1 = await env.fixture_service.name_season("  S8 黄金联赛  ", "tester")
+        assert r1 == {"season": 1, "old": None, "new": "S8 黄金联赛"}  # 去空白
+        assert await env.dao.get_season_name(1) == "S8 黄金联赛"
+        r2 = await env.fixture_service.name_season("S8 修订版", "tester")
+        assert r2["old"] == "S8 黄金联赛" and r2["new"] == "S8 修订版"
+        # 校验：空 / 换行 / 超长 / 未变化
+        for bad in ("   ", "S8\n黄金", "超" * 31, "S8 修订版"):
+            try:
+                await env.fixture_service.name_season(bad, "tester")
+                assert False, f"应拒绝: {bad!r}"
+            except FixtureError:
+                pass
+        # 推进带名：命名新赛季且窗口归位
+        st = await env.fixture_service.advance_season("tester", "S9 新赛季")
+        assert st["season_number"] == 2 and st["name"] == "S9 新赛季"
+        assert await env.dao.season_label(2) == "S9 新赛季"
+        assert await env.dao.season_label(1) == "S8 修订版"  # 旧赛季名保留
+        # 推进带非法名（含纯空白名）：整体不推进（窗口/轮次状态不动）
+        state_before = await env.dao.get_league_state()
+        for bad in ("非\n法", "   "):
+            try:
+                await env.fixture_service.advance_season("tester", bad)
+                assert False, f"非法名应整体失败: {bad!r}"
+            except FixtureError:
+                pass
+        state_after = await env.dao.get_league_state()
+        assert state_before["season_number"] == state_after["season_number"] == 2
+        assert state_after["window_seq"] == 1
+        # 推进不带名：回退 第 N 赛季
+        st3 = await env.fixture_service.advance_season("tester")
+        assert st3["name"] is None and st3["season_number"] == 3
+        assert await env.dao.season_label(3) == "第 3 赛季"
+    finally:
+        await env.teardown()
+
+
 async def test_parse_result_aliases():
     from astrbot_plugin_whleague_revenue_system.services.fixture_service import (
         parse_result_lines,

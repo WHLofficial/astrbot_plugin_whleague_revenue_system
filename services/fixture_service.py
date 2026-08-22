@@ -1,4 +1,4 @@
-"""赛程导入、天气预报、赛果录入、轮次与赛季统计。
+"""赛程导入、天气预报、赛果录入、轮次与赛季统计、赛季推进与命名。
 
 按轮次驱动：管理员导入赛程 → 轮前掷天气 → 轮后录入胜平负，
 录入赛果时立即按 S8 三维修正公式计算该场上座与票房并记账。
@@ -57,6 +57,18 @@ def _parse_schedule_extra(extra) -> tuple[int | None, int | None, str | None]:
 
 class FixtureError(Exception):
     pass
+
+
+def _validate_season_name(name) -> str:
+    """赛季名校验（与 admin_rename 同规则）：非空、无换行、≤30 字，返回去空白结果。"""
+    s = str(name or "").strip()
+    if not s:
+        raise FixtureError("名称不能为空")
+    if "\n" in s or "\r" in s:
+        raise FixtureError("名称不能包含换行")
+    if len(s) > 30:
+        raise FixtureError("名称最长 30 字")
+    return s
 
 
 def parse_fixture_lines(text: str, cfg: dict) -> list[tuple]:
@@ -143,10 +155,24 @@ class FixtureService:
         await self._dao.update_league_state(season, window_seq, 0, updated_by)
         return {"season_number": season, "window_seq": window_seq}
 
-    async def advance_season(self, updated_by: str) -> dict:
+    async def advance_season(self, updated_by: str, name: str | None = None) -> dict:
+        # 名称先校验再推进：非法（含空白名）时整体不推进（窗口/轮次状态不动）
+        new_name = _validate_season_name(name) if name is not None else None
         season = (await self.get_state())["season_number"] + 1
         await self._dao.update_league_state(season, 1, 0, updated_by)
-        return {"season_number": season, "window_seq": 1}
+        if new_name:
+            await self._dao.set_season_name(season, new_name, updated_by)
+        return {"season_number": season, "window_seq": 1, "name": new_name}
+
+    async def name_season(self, name: str, updated_by: str) -> dict:
+        """给当前赛季命名/改名（纯展示标签，可反复改；身份仍是整数序号）。"""
+        new_name = _validate_season_name(name)
+        season = (await self.get_state())["season_number"]
+        old = await self._dao.get_season_name(season)
+        if old == new_name:
+            raise FixtureError(f"名称未变化（当前已是「{old}」）")
+        await self._dao.set_season_name(season, new_name, updated_by)
+        return {"season": season, "old": old, "new": new_name}
 
     # ─── 赛程导入 ─────────────────────────────────────────
 

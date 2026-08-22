@@ -100,7 +100,8 @@ class PlayerHandler:
         if balance:
             lines.append(f"· 余额: {format_m(balance['balance'])}M（建设券 {format_m(balance['build_credit'])}M）")
         if state:
-            lines.append(f"· 赛季 {state['season_number']} 窗口 {state['window_seq']} 轮次 {state['current_round']}")
+            season_label = await self._plugin.dao.season_label(state["season_number"])
+            lines.append(f"· {season_label} 窗口 {state['window_seq']} 轮次 {state['current_round']}")
         return "\n".join(lines)
 
     async def season_stats(self, event) -> AsyncGenerator[MessageEventResult, None]:
@@ -136,7 +137,8 @@ class PlayerHandler:
         if "error" in result:
             yield event.plain_result(result["error"])
             return
-        lines = [f"📊 第 {result['round_no']} 轮({competition})统计（赛季{result['season']} 窗口{result['window_seq']}）"]
+        season_label = await self._plugin.dao.season_label(result["season"])
+        lines = [f"📊 第 {result['round_no']} 轮({competition})统计（{season_label} 窗口{result['window_seq']}）"]
         lines.extend(result["lines"])
         t = result["totals"]
         lines.append(f"合计: 上座 {t['attendance']:,} / 票房 {t['ticket']:.2f}M")
@@ -303,7 +305,8 @@ class PlayerHandler:
             yield event.plain_result("本窗口暂无流水")
             return
         balance = await self._plugin.dao.get_balance(team)
-        lines = [f"💳 {team} 财务（赛季{season}" + (f" 窗口{window_seq}" if window_seq else "") + "）"]
+        season_label = await self._plugin.dao.season_label(season)
+        lines = [f"💳 {team} 财务（{season_label}" + (f" 窗口{window_seq}" if window_seq else "") + "）"]
         total = 0.0
         for r in reversed(rows):
             total += r["amount"]

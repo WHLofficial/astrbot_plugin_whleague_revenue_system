@@ -1,6 +1,6 @@
 from astrbot.api import logger
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 
 SQL_CREATE_TABLES = r"""
 
@@ -205,6 +205,14 @@ CREATE TABLE IF NOT EXISTS round_names (
     round_no INTEGER NOT NULL,
     created_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
     UNIQUE(season_number, competition, token)
+);
+
+-- 赛季命名：纯展示标签（身份仍是 league_state.season_number 整数，查询过滤一律用序号）
+CREATE TABLE IF NOT EXISTS season_names (
+    season_number INTEGER PRIMARY KEY,
+    name TEXT NOT NULL,
+    updated_by TEXT NOT NULL DEFAULT '',
+    updated_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
 );
 
 """
@@ -469,3 +477,17 @@ async def _migrate(db, current_version: int):
             await db.rollback()
             raise
         logger.info("Migrated round_names: per (season, competition) import-order numbering.")
+    if current_version < 9:
+        # 赛季命名表：每赛季一条展示名（有名只显名，无名回退 第N赛季）；CREATE IF NOT EXISTS 幂等
+        await db.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS season_names (
+                season_number INTEGER PRIMARY KEY,
+                name TEXT NOT NULL,
+                updated_by TEXT NOT NULL DEFAULT '',
+                updated_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
+            );
+            """
+        )
+        await db.commit()
+        logger.info("Migrated season_names table for nameable seasons.")

@@ -40,10 +40,10 @@ class _FakeEvent:
 async def test_plugin_import_and_commands():
     from astrbot_plugin_whleague_revenue_system import main as plugin_main
 
-    # 检查注册的命令名（v2.0：38 个，管理 27 + 玩家 11）
+    # 检查注册的命令名（v2.1：39 个，管理 28 + 玩家 11）
     src = inspect.getsource(plugin_main)
     expected_commands = [
-        "主场赛程导入", "主场天气", "主场天气覆盖", "主场赛果录入", "主场推进",
+        "主场赛程导入", "主场天气", "主场天气覆盖", "主场赛果录入", "主场推进", "主场赛季命名",
         "主场属性导入", "主场设施", "主场改名", "主场发放",
         "主场事件", "主场事件选择", "主场事件选择列表", "主场事件结算",
         "主场事件生成", "主场事件列表", "主场事件采纳", "主场事件丢弃", "主场事件写",
@@ -289,11 +289,32 @@ async def test_v2_consolidation_admin():
 
         # 主场推进：枚举参数 / 非法值 / 缺参（放最后——推进会变更赛季状态）
         out = [r async for r in handler.advance(_FakeEvent("/主场推进 赛季", sender="admin", is_admin=True))]
-        assert out and "已进入第 2 赛季" in out[0], out
+        assert out and "已进入 第 2 赛季" in out[0], out
         out = [r async for r in handler.advance(_FakeEvent("/主场推进 明天", sender="admin", is_admin=True))]
         assert out and "参数需为" in out[0], out
         out = [r async for r in handler.advance(_FakeEvent("/主场推进", sender="admin", is_admin=True))]
         assert out and "用法" in out[0], out
+
+        # 主场赛季命名：缺参用法 / 首次命名 / 改名 / 未变化 / 超长（当前=第 2 赛季）
+        out = [r async for r in handler.name_season(_FakeEvent("/主场赛季命名", sender="admin", is_admin=True))]
+        assert out and "用法" in out[0], out
+        out = [r async for r in handler.name_season(
+            _FakeEvent("/主场赛季命名 S8 黄金联赛", sender="admin", is_admin=True))]
+        assert out and "已命名为「S8 黄金联赛」" in out[0], out
+        out = [r async for r in handler.name_season(
+            _FakeEvent("/主场赛季命名 S8 修订版", sender="admin", is_admin=True))]
+        assert out and "由「S8 黄金联赛」改名为「S8 修订版」" in out[0], out
+        out = [r async for r in handler.name_season(
+            _FakeEvent("/主场赛季命名 S8 修订版", sender="admin", is_admin=True))]
+        assert out and "未变化" in out[0], out
+        out = [r async for r in handler.name_season(
+            _FakeEvent(f"/主场赛季命名 {'超' * 31}", sender="admin", is_admin=True))]
+        assert out and "名称最长" in out[0], out
+        # 推进时直接命名新赛季：成功文案与落库
+        out = [r async for r in handler.advance(
+            _FakeEvent("/主场推进 赛季 S9 新赛季", sender="admin", is_admin=True))]
+        assert out and "已进入 S9 新赛季 窗口 1" in out[0], out
+        assert await env.dao.get_season_name(3) == "S9 新赛季"
     finally:
         await env.teardown()
 
@@ -316,9 +337,10 @@ async def test_v2_player_home_arg_and_help():
             "bridge": env.bridge,
         })())
 
-        # /主场 <队名> 直接查任意队（无需绑定）
+        # /主场 <队名> 直接查任意队（无需绑定）；卡片与轮次统计头展示赛季名
+        await env.dao.set_season_name(1, "测试赛季", "tester")
         out = [r async for r in ph.my_stadium(_FakeEvent("/主场 利物浦", sender="99999"))]
-        assert out and "利物浦" in out[0], out
+        assert out and "利物浦" in out[0] and "测试赛季" in out[0], out
 
         # /主场帮助：玩家只见玩家段，管理员追加管理段
         out = [r async for r in ph.help(_FakeEvent("/主场帮助", sender="10001"))]
@@ -326,9 +348,9 @@ async def test_v2_player_home_arg_and_help():
         out = [r async for r in ph.help(_FakeEvent("/主场帮助", sender="admin", is_admin=True))]
         assert out and "管理命令" in out[0], out
 
-        # 轮次统计（玩家 handler，无管理门禁）
+        # 轮次统计（玩家 handler，无管理门禁），标题含赛季名
         out = [r async for r in ph.round_stats(_FakeEvent("/主场轮次统计 1", sender="10001"))]
-        assert out and "统计" in out[0], out
+        assert out and "统计" in out[0] and "测试赛季" in out[0], out
     finally:
         await env.teardown()
 
