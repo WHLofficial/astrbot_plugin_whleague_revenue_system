@@ -107,6 +107,31 @@ def set_font_override(path: str) -> None:
 
 _RESULT_CN = {"W": "胜", "D": "平", "L": "负", "C": "取消"}
 
+
+def match_sort_key(m: dict) -> tuple:
+    """轮次图行序键：按 开球周→日→时间 升序。
+
+    match_time 经 norm_time 归一为零填充 HH:MM，字典序即时间序；
+    缺失的周/日/时间垫底；Python 排序稳定，同键保持导入原序。
+    """
+    week = m.get("week_no")
+    day = m.get("day_no")
+    return (
+        int(week) if week else 0,
+        int(day) if day else 99,
+        m.get("match_time") or "99:99",
+    )
+
+
+def build_totals_strip(total: int, avg: float) -> list[tuple[str, str, int, int]]:
+    """合计行四格条带：(合计 跨周/天/星期)(总上座 居中于时间~客队)(场均 对齐球场列)(场均值)。"""
+    return [
+        ("合计", "label", 0, 3),
+        (f"{int(total):,}", "value", 3, 8),
+        ("场均", "label", 8, 9),
+        (f"{float(avg):,.0f}", "value", 9, 11),
+    ]
+
 # 超采样倍率：按 2x 画布绘制再 LANCZOS 缩回设计尺寸，文字边缘更清晰
 _SUPERSAMPLE = 2
 
@@ -240,11 +265,13 @@ def _draw_cell_text(dr, text, x, y, w, h, font, fill, align: str, scale: int = 1
 
 
 def _draw_table_block(dr, y_base: int, width: int, title: str, subtitle: str,
-                      headers, rows, totals, header_fill, header_text,
+                      headers, rows, totals_strip, header_fill, header_text,
                       row_colors=None, scale: int = 1) -> int:
     """在画布 y_base（已按 scale 缩放的设备坐标）起绘制一个表格区块，返回区块结束的 y（同坐标系）。
 
-    headers: (文本, 列宽, 对齐 l/c/r)；totals 可为 None（不画合计行）；
+    headers: (文本, 列宽, 对齐 l/c/r)；totals_strip 为 None（不画合计行）或
+    [(文本, kind, 起始列, 结束列)]——"label" 格填表头色白字、"value" 格白底黑粗体，
+    文字均居中；条带自起始列左缘横排至结束列左缘（结束列越界取行右缘）。
     row_colors: 与 rows 同构的每格颜色（None 用默认深色）。
     """
     pad, title_h, sub_h, gap = 24 * scale, 48 * scale, 30 * scale, 8 * scale
@@ -280,31 +307,40 @@ def _draw_table_block(dr, y_base: int, width: int, title: str, subtitle: str,
             _draw_cell_text(dr, cell, col_x[i], y, w * scale, row_h, f_row, fill, align, scale)
         y += row_h
 
-    if totals is not None:
-        dr.rectangle([pad, y, W - pad, y + total_h], fill=header_fill)
-        for i, (cell, (_, w, align)) in enumerate(zip(totals, headers)):
-            _draw_cell_text(dr, cell, col_x[i], y, w * scale, total_h, f_tot, header_text, align, scale, bold=True)
+    if totals_strip is not None:
+        dr.line([pad, y, W - pad, y], fill=GRID, width=scale)
+        n_cols = len(headers)
+        for text, kind, c0, c1 in totals_strip:
+            x0 = col_x[c0]
+            x1 = col_x[c1] if c1 < n_cols else W - pad
+            if kind == "label":
+                dr.rectangle([x0, y, x1, y + total_h], fill=header_fill)
+                _draw_cell_text(dr, text, x0, y, x1 - x0, total_h, f_tot,
+                                header_text, "center", scale, bold=True)
+            else:
+                _draw_cell_text(dr, text, x0, y, x1 - x0, total_h, f_tot,
+                                TEXT_DARK, "center", scale, bold=True)
         y += total_h
         dr.rectangle([pad, y, W - pad, y + 3 * scale], fill=ACCENT)
     return y
 
 
-def _draw_table(title: str, subtitle: str, headers, rows, totals, out_path: str,
+def _draw_table(title: str, subtitle: str, headers, rows, totals_strip, out_path: str,
                 header_fill=HEADER_FILL, header_text=HEADER_TEXT) -> str:
-    """单表格图（headers/rows/totals: (文本, 列宽, 对齐 l/c/r)）。"""
+    """单表格图（headers/rows: (文本, 列宽, 对齐 l/c/r)；totals_strip 见 _draw_table_block）。"""
     from PIL import Image, ImageDraw
 
     S = _SUPERSAMPLE
     pad, title_h, sub_h, gap = 24, 48, 30, 8
     header_h, row_h, total_h = 46, 42, 46
     width = sum(w for _, w, _ in headers) + pad * 2
-    has_totals = totals is not None
+    has_totals = totals_strip is not None
     height = pad + title_h + sub_h + gap + header_h + len(rows) * row_h \
         + (total_h + 3 if has_totals else 0) + pad
 
     img = Image.new("RGB", (width * S, height * S), BG)
     dr = ImageDraw.Draw(img)
-    _draw_table_block(dr, 0, width, title, subtitle, headers, rows, totals,
+    _draw_table_block(dr, 0, width, title, subtitle, headers, rows, totals_strip,
                       header_fill, header_text, scale=S)
     img = img.resize((width, height), Image.LANCZOS)
     img.save(out_path)
@@ -455,12 +491,11 @@ class ChartService:
         season = state["season_number"] if state else 1
         window_seq = state["window_seq"] if state else 1
         matches = await self._dao.get_round_matches(season, window_seq, round_no, competition)
-        played = [m for m in matches if m["result"]]
+        played = sorted((dict(m) for m in matches if m["result"]), key=match_sort_key)
         if not played:
             raise ChartError(f"第 {round_no} 轮({competition})还没有已录入赛果的比赛")
         rows, total, counted = [], 0, 0
-        for raw in played:
-            m = dict(raw)
+        for m in played:
             st = await self._dao.get_stadium(m["home_team"])
             capacity = int(st["capacity"]) if st else 0
             name = st["name"] if st else f"{m['home_team']}主场"
@@ -482,7 +517,7 @@ class ChartService:
             counted += 1
             rate = f"{int(m['attendance']) / capacity * 100:.1f}%" if capacity else "—"
             result_cn = _RESULT_CN.get(m["result"], "?")
-            score_text = f"{m['score']} {result_cn}" if m.get("score") else result_cn
+            score_text = m["score"] or result_cn
             rows.append(head + [score_text, m["away_team"], name,
                                 f"{int(m['attendance']):,}", rate])
         avg = total / counted if counted else 0
@@ -496,10 +531,10 @@ class ChartService:
             ("客队", 180, "l"), ("球场", 250, "l"),
             ("观众人数", 140, "r"), ("上座率", 110, "r"),
         ]
-        totals = ["合计", "", "", "", "", "", "", "", "", f"{total:,}", f"场均 {avg:,.0f}"]
+        totals_strip = build_totals_strip(total, avg)
         out = self.charts_dir / f"round_s{season}_w{window_seq}_{competition}_r{round_no}.png"
         try:
-            _draw_table(title, subtitle, headers, rows, totals, str(out),
+            _draw_table(title, subtitle, headers, rows, totals_strip, str(out),
                         header_fill=header_fill, header_text=header_text)
         except ChartError:
             raise
@@ -518,11 +553,11 @@ class ChartService:
         matches = await self._dao.get_round_matches(season, window_seq, round_no, competition)
         if not matches:
             raise ChartError(f"第 {round_no} 轮({competition})还没有赛程")
+        matches = sorted((dict(m) for m in matches), key=match_sort_key)
         header_fill, header_text = COMPETITION_COLORS.get(competition, DEFAULT_COMPETITION_COLOR)
 
         sched_rows, wx_rows, wx_colors = [], [], []
-        for raw in matches:
-            m = dict(raw)
+        for m in matches:
             st = await self._dao.get_stadium(m["home_team"])
             name = st["name"] if st else f"{m['home_team']}主场"
             sched_rows.append([

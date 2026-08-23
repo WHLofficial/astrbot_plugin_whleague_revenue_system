@@ -10,6 +10,8 @@ from tests.common import TestEnv  # noqa: E402
 from astrbot_plugin_whleague_revenue_system.services.chart_service import (  # noqa: E402
     ChartError,
     ChartService,
+    build_totals_strip,
+    match_sort_key,
 )
 
 _PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
@@ -455,3 +457,30 @@ async def test_chart_cancelled_match():
         assert _png_ok(pt), pt
     finally:
         await env.teardown()
+
+
+async def test_match_sort_key_and_totals_strip():
+    """行序键：周→日→时间升序、缺失垫底；合计四格条带：跨列与文本格式。"""
+    rows = [
+        {"week_no": 9, "day_no": 7, "match_time": "20:00"},
+        {"week_no": 9, "day_no": None, "match_time": None},
+        {"week_no": 9, "day_no": 6, "match_time": "15:00"},
+        {"week_no": 9, "day_no": 6, "match_time": "12:30"},
+        {"week_no": None, "day_no": 5, "match_time": "21:00"},
+    ]
+    ordered = sorted(rows, key=match_sort_key)
+    assert [(r["day_no"], r["match_time"]) for r in ordered] == [
+        (5, "21:00"),
+        (6, "12:30"),
+        (6, "15:00"),
+        (7, "20:00"),
+        (None, None),
+    ]
+    assert build_totals_strip(218115, 43623.0) == [
+        ("合计", "label", 0, 3),
+        ("218,115", "value", 3, 8),
+        ("场均", "label", 8, 9),
+        ("43,623", "value", 9, 11),
+    ]
+    zero = build_totals_strip(0, 0)
+    assert zero[1][0] == "0" and zero[3][0] == "0"
