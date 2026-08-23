@@ -506,6 +506,24 @@ class StadiumDAO:
             "SELECT * FROM event_pool WHERE event_id=?", (event_id,)
         )
 
+    async def delete_event_log_by_id(self, log_id: int) -> None:
+        """取消即发事件：删除其单条日志行（最新一条实例）。"""
+        await self._db.execute(
+            "DELETE FROM events_log WHERE id=?", (int(log_id),)
+        )
+
+    async def delete_event_logs(self, team_name: str, season: int, window_seq: int,
+                                event_id: str) -> int:
+        """取消选择事件：删除该实例（同队同窗口同事件）的全部广播/结果日志行。"""
+        cur = await self._db.execute(
+            "DELETE FROM events_log WHERE team_name=? AND season_number=? AND window_seq=? AND event_id=?",
+            (team_name, season, window_seq, event_id),
+        )
+        try:
+            return cur.rowcount or 0
+        finally:
+            await cur.close()
+
     # ─── 事件选择（玩家决策） ─────────────────────────────
 
     async def add_event_choice(self, team_name: str, season: int, window_seq: int,
@@ -563,6 +581,14 @@ class StadiumDAO:
         finally:
             await cur.close()
 
+    async def delete_event_choice(self, team_name: str, season: int, window_seq: int,
+                                  event_id: str) -> None:
+        """取消选择事件：删除待定/已选未结的实例行（之后可重新触发）。"""
+        await self._db.execute(
+            "DELETE FROM event_choices WHERE team_name=? AND season_number=? AND window_seq=? AND event_id=?",
+            (team_name, season, window_seq, event_id),
+        )
+
     async def next_event_counter(self) -> int:
         """生成唯一草稿 ID 序号：基于 MAX(id)，避免 REPLACE 后 COUNT 复用撞号。"""
         row = await self._db.fetchone(
@@ -606,6 +632,21 @@ class StadiumDAO:
         placeholders = ", ".join("?" * len(ids))
         cur = await self._db.execute(
             f"DELETE FROM revenue_transactions WHERE id IN ({placeholders})", ids
+        )
+        try:
+            return cur.rowcount or 0
+        finally:
+            await cur.close()
+
+    async def delete_latest_event_tx(self, team_name: str, season: int, window_seq: int,
+                                     note: str) -> int:
+        """删除该队该窗口指定 note 的最新一条 event 流水（取消即发事件回退用）。"""
+        cur = await self._db.execute(
+            "DELETE FROM revenue_transactions WHERE id = "
+            "(SELECT id FROM revenue_transactions "
+            " WHERE team_name=? AND season_number=? AND window_seq=? AND kind='event' AND note=? "
+            " ORDER BY id DESC LIMIT 1)",
+            (team_name, season, window_seq, note),
         )
         try:
             return cur.rowcount or 0

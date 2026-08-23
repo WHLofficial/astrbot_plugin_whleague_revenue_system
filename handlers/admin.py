@@ -513,6 +513,55 @@ class AdminHandler:
                 lines.append(f"⏳ 另有 {len(remaining)} 条未收到选择（可用 /主场事件结算 全部 按最差兜底，或留到窗口结算自动处理）")
         yield event.plain_result("\n".join(lines))
 
+    async def cancel_event(self, event) -> AsyncGenerator[MessageEventResult, None]:
+        """取消本窗口分配给球队的事件：即发回退数值；选择型仅未定/已选未结可取消。"""
+        deny = await self._guard(event)
+        if deny:
+            yield event.plain_result(deny)
+            return
+        parts = event.get_message_str().split(maxsplit=2)
+        if len(parts) < 2:
+            yield event.plain_result(
+                "用法: /主场事件取消 <队名> [事件名|事件id]\n"
+                "只带队名则列出该队本窗口事件；选择型仅未定/已选未结可取消（已结算用 /主场结算 强制 重算）；"
+                "即发型取消时回退资金流水/死忠/上座修正（每次取消最新一条）"
+            )
+            return
+        state = await self._plugin.dao.get_league_state()
+        season = state["season_number"] if state else 1
+        window_seq = state["window_seq"] if state else 1
+        svc = self._plugin.event_engine
+        if len(parts) == 2:
+            rows = await svc.list_team_events(parts[1], season, window_seq)
+            if not rows:
+                yield event.plain_result(f"球队「{parts[1]}」本窗口没有分配任何事件")
+                return
+            lines = [f"📋 {parts[1]} 本窗口事件（取消用 /主场事件取消 {parts[1]} <事件名|id>）"]
+            for r in rows:
+                lines.append(f"· {r['event']}（{r['kind']}·{r['status']}，id {r['event_id']}）")
+            yield event.plain_result("\n".join(lines))
+            return
+        result = await self._run(
+            event, svc.cancel_team_event(parts[1], parts[2], season, window_seq)
+        )
+        if "error" in result:
+            yield event.plain_result(result["error"])
+            return
+        team = parts[1]
+        if result["kind"] == "choice":
+            yield event.plain_result(
+                f"✅ 已取消 {team} 的选择事件「{result['event']}」（待定已移除，未动账目，可重新触发）"
+            )
+            return
+        lines = [f"✅ 已取消 {team} 的即发事件「{result['event']}」并回退生效数值"]
+        for n in result["notes"]:
+            lines.append(f"· {n}")
+        for w in result["warnings"]:
+            lines.append(f"⚠️ {w}")
+        if result["occurrences"] > 0:
+            lines.append(f"· 该事件本窗口还有 {result['occurrences']} 条实例（再执行一次取消下一条）")
+        yield event.plain_result("\n".join(lines))
+
     async def generate_events(self, event) -> AsyncGenerator[MessageEventResult, None]:
         deny = await self._guard(event)
         if deny:

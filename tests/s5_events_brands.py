@@ -151,6 +151,138 @@ async def test_choice_trigger_pending_and_broadcast():
         await env.teardown()
 
 
+async def test_cancel_instant_event_reverses_effects():
+    """取消即发事件：删流水重算余额、死忠/上座修正按原比例回退、日志删除。"""
+    from astrbot_plugin_whleague_revenue_system.services.event_engine import EventError
+
+    env = await TestEnv().setup()
+    try:
+        await env.stadium_service.import_attributes("利物浦", influence=150.0)
+        bal_before = (await env.dao.get_balance("利物浦"))["balance"]
+        fans_before = (await env.dao.get_stadium("利物浦"))["fans_diehards"]
+        await env.event_engine.trigger_team("利物浦", 1, 1, event_id="tifo_viral")  # +1.0M 死忠+3%
+        await env.event_engine.trigger_team("利物浦", 1, 1, event_id="storm_buzz")  # 上座×0.85
+
+        # 按【名】取消 TIFO出圈：资金流水删除+余额复原+死忠回退，不影响另一事件
+        res = await env.event_engine.cancel_team_event("利物浦", "TIFO出圈", 1, 1)
+        assert res["kind"] == "instant" and res["event"] == "TIFO出圈"
+        txs = [t for t in await env.dao.list_transactions("利物浦", season=1, window_seq=1)
+               if t["kind"] == "event"]
+        assert not [t for t in txs if t["note"] == "TIFO出圈"], txs
+        assert abs((await env.dao.get_balance("利物浦"))["balance"] - bal_before) < 1e-6
+        st = await env.dao.get_stadium("利物浦")
+        assert abs(st["fans_diehards"] - fans_before) < 1e-6  # ×1.03 后回退复原
+        assert abs(st["next_attendance_mod"] - 0.85) < 1e-9  # storm_buzz 的修正未动
+
+        # 按【id】取消 暴雨滂沱：上座修正回退归 1，日志全部清空
+        res2 = await env.event_engine.cancel_team_event("利物浦", "storm_buzz", 1, 1)
+        assert res2["kind"] == "instant"
+        st2 = await env.dao.get_stadium("利物浦")
+        assert abs(st2["next_attendance_mod"] - 1.0) < 1e-9
+        assert await env.dao.get_window_events("利物浦", 1, 1) == []
+
+        # 再取消 → 报错（无任何分配）
+        try:
+            await env.event_engine.cancel_team_event("利物浦", "TIFO出圈", 1, 1)
+            assert False, "应无可取消事件"
+        except EventError as e:
+            assert "没有分配任何事件" in str(e)
+    finally:
+        await env.teardown()
+
+
+async def test_cancel_instant_latest_occurrence_only():
+    """同名即发事件多次触发：每次取消最新一条，流水逐条回退。"""
+    env = await TestEnv().setup()
+    try:
+        await env.stadium_service.import_attributes("利物浦", influence=150.0)
+        bal0 = (await env.dao.get_balance("利物浦"))["balance"]
+        await env.event_engine.trigger_team("利物浦", 1, 1, event_id="subsidy")  # +4.0
+        await env.event_engine.trigger_team("利物浦", 1, 1, event_id="subsidy")  # +4.0
+
+        res = await env.event_engine.cancel_team_event("利物浦", "subsidy", 1, 1)
+        assert res["occurrences"] == 1
+        assert abs((await env.dao.get_balance("利物浦"))["balance"] - (bal0 + 4.0)) < 1e-6
+
+        res2 = await env.event_engine.cancel_team_event("利物浦", "政府补贴", 1, 1)  # 按中文名
+        assert res2["occurrences"] == 0
+        assert abs((await env.dao.get_balance("利物浦"))["balance"] - bal0) < 1e-6
+    finally:
+        await env.teardown()
+
+
+async def test_cancel_choice_pending_and_refused_when_resolved():
+    """选择型取消：待定/已选未结可删行重触发；已结算拒绝并引导强制重算。"""
+    from astrbot_plugin_whleague_revenue_system.services.event_engine import EventError
+
+    env = await TestEnv().setup()
+    try:
+        await env.stadium_service.import_attributes("利物浦", influence=150.0)
+        # 待定取消：删选择行+广播日志，无流水
+        await env.event_engine.trigger_team("利物浦", 1, 1, event_id="merch_hit")
+        res = await env.event_engine.cancel_team_event("利物浦", "周边爆款", 1, 1)
+        assert res["kind"] == "choice" and res["removed_logs"] >= 1
+        assert await env.dao.get_event_choice("利物浦", 1, 1, "merch_hit") is None
+        assert await env.dao.get_window_events("利物浦", 1, 1) == []
+        assert not [t for t in await env.dao.list_transactions("利物浦", season=1, window_seq=1)
+                    if t["kind"] == "event"]
+        # 重新触发 → 全新待定；已选未结也可取消（按 id 引用）
+        await env.event_engine.trigger_team("利物浦", 1, 1, event_id="merch_hit")
+        await env.dao.set_event_choice("利物浦", 1, 1, "merch_hit", 1)
+        res2 = await env.event_engine.cancel_team_event("利物浦", "merch_hit", 1, 1)
+        assert res2["kind"] == "choice"
+        assert await env.dao.get_event_choice("利物浦", 1, 1, "merch_hit") is None
+        # 已结算 → 拒绝
+        await env.event_engine.trigger_team("利物浦", 1, 1, event_id="merch_hit")
+        await env.dao.set_event_choice("利物浦", 1, 1, "merch_hit", 1)
+        await env.event_engine.settle_now(1, 1)
+        try:
+            await env.event_engine.cancel_team_event("利物浦", "周边爆款", 1, 1)
+            assert False, "已结算应拒绝取消"
+        except EventError as e:
+            assert "强制" in str(e)
+    finally:
+        await env.teardown()
+
+
+async def test_cancel_attendance_mod_consumed():
+    """上座修正已随赛果消耗：取消时跳过回退并提示，日志照删。"""
+    env = await TestEnv().setup()
+    try:
+        await env.stadium_service.import_attributes("利物浦", influence=150.0)
+        await env.event_engine.trigger_team("利物浦", 1, 1, event_id="storm_buzz")  # 上座×0.85
+        await env.dao.reset_attendance_mod("利物浦")  # 模拟赛果录入后修正被消耗归 1
+        res = await env.event_engine.cancel_team_event("利物浦", "暴雨滂沱", 1, 1)
+        assert any("消耗" in w for w in res["warnings"]), res
+        assert (await env.dao.get_stadium("利物浦"))["next_attendance_mod"] == 1.0
+        assert await env.dao.get_window_events("利物浦", 1, 1) == []
+    finally:
+        await env.teardown()
+
+
+async def test_list_team_events_and_unknown_ref():
+    """列出该队本窗口事件（类型/状态）；未知引用的错误信息列出可取消项。"""
+    from astrbot_plugin_whleague_revenue_system.services.event_engine import EventError
+
+    env = await TestEnv().setup()
+    try:
+        await env.stadium_service.import_attributes("利物浦", influence=150.0)
+        assert await env.event_engine.list_team_events("利物浦", 1, 1) == []
+        await env.event_engine.trigger_team("利物浦", 1, 1, event_id="merch_hit")
+        await env.event_engine.trigger_team("利物浦", 1, 1, event_id="subsidy")
+        rows = {r["event_id"]: r for r in
+                await env.event_engine.list_team_events("利物浦", 1, 1)}
+        assert rows["merch_hit"]["kind"] == "选择" and rows["merch_hit"]["status"] == "待定"
+        assert rows["subsidy"]["kind"] == "即发" and rows["subsidy"]["status"] == "已生效"
+        try:
+            await env.event_engine.cancel_team_event("利物浦", "不存在的事件", 1, 1)
+            assert False, "未知引用应报错"
+        except EventError as e:
+            assert "周边爆款" in str(e) and "政府补贴" in str(e)  # 错误信息列出可取消项
+    finally:
+        await env.teardown()
+
+
 async def test_settle_now_decided_and_all():
     env = await TestEnv().setup()
     try:
@@ -509,6 +641,38 @@ async def test_add_custom_choice_event():
         assert hit["hits"][0]["type"] == "choice"
         c = await env.dao.get_event_choice("利物浦", 1, 1, ev["event_id"])
         assert c is not None and c["resolved"] == 0
+    finally:
+        await env.teardown()
+
+
+async def test_event_name_uniqueness_guard():
+    """重名防护：手写与采纳均拒绝与池内已有事件同名（防流水 note 撞名/按名匹配歧义）。"""
+    from astrbot_plugin_whleague_revenue_system.services.event_engine import EventError
+
+    env = await TestEnv().setup()
+    try:
+        # 手写重名（内置已有「政府补贴」）→ 拒绝；换名成功
+        try:
+            await env.event_engine.add_custom("政府补贴", "分类", 5, '{"money": 3}')
+            assert False, "重名手写应拒绝"
+        except EventError as e:
+            assert "已存在" in str(e)
+        await env.event_engine.add_custom("政府补贴·二期", "分类", 5, '{"money": 3}')
+        # 采纳路径：手工造一条与池内同名的 pending 草稿 → 拒绝
+        await env.dao.upsert_event(
+            "dup_draft", "政府补贴", "草稿类", 5, "{}", "{}", "",
+            source="llm", status="pending",
+        )
+        pending = [r for r in await env.dao.list_events("pending")
+                   if r["event_id"] == "dup_draft"]
+        assert pending, "草稿应已写入"
+        try:
+            await env.event_engine.adopt(pending[0]["id"])
+            assert False, "重名草稿采纳应拒绝"
+        except EventError as e:
+            assert "重名" in str(e)
+        assert not [r for r in await env.dao.list_events("adopted")
+                    if r["event_id"] == "dup_draft"], "拒绝后不应进入采纳池"
     finally:
         await env.teardown()
 

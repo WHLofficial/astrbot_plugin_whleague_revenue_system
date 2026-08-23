@@ -40,12 +40,12 @@ class _FakeEvent:
 async def test_plugin_import_and_commands():
     from astrbot_plugin_whleague_revenue_system import main as plugin_main
 
-    # 检查注册的命令名（v2.1：39 个，管理 28 + 玩家 11）
+    # 检查注册的命令名（v2.2：40 个，管理 29 + 玩家 11）
     src = inspect.getsource(plugin_main)
     expected_commands = [
         "主场赛程导入", "主场天气", "主场天气覆盖", "主场赛果录入", "主场推进", "主场赛季命名",
         "主场属性导入", "主场设施", "主场改名", "主场发放",
-        "主场事件", "主场事件选择", "主场事件选择列表", "主场事件结算",
+        "主场事件", "主场事件选择", "主场事件选择列表", "主场事件结算", "主场事件取消",
         "主场事件生成", "主场事件列表", "主场事件采纳", "主场事件丢弃", "主场事件写",
         "主场品牌生成", "主场品牌列表", "主场品牌采纳", "主场品牌丢弃", "主场结算",
         "主场设置", "主场查看配置", "主场添加管理", "主场删除管理",
@@ -218,6 +218,61 @@ async def test_choice_handlers_flow():
         ev9 = _FakeEvent("/主场事件结算 全部", sender="admin", is_admin=True)
         out9 = [r async for r in handler.settle_events_now(ev9)]
         assert out9 and ("事件结算" in out9[0] or "没有待结算" in out9[0]), out9
+    finally:
+        await env.teardown()
+
+
+async def test_cancel_event_handler_flow():
+    """v2.2：/主场事件取消——用法/只带队名列出/取消即发回退/取消选择/未知引用。"""
+    env = await TestEnv().setup()
+    try:
+        await env.stadium_service.import_attributes("利物浦", influence=150.0)
+        from astrbot_plugin_whleague_revenue_system.handlers.admin import AdminHandler
+
+        handler = AdminHandler(type("P", (), {
+            "dao": env.dao,
+            "config_cache": env.cfg,
+            "fixture_service": env.fixture_service,
+            "stadium_service": env.stadium_service,
+            "event_engine": env.event_engine,
+            "brand_service": env.brand_service,
+            "window_service": env.window_service,
+            "bridge": env.bridge,
+            "_persist_config": lambda k, v: None,
+        })())
+
+        # 无参用法
+        out = [r async for r in handler.cancel_event(
+            _FakeEvent("/主场事件取消", sender="admin", is_admin=True))]
+        assert out and "用法" in out[0], out
+
+        # 只带队名：该队本窗口事件（此时为空）
+        out2 = [r async for r in handler.cancel_event(
+            _FakeEvent("/主场事件取消 利物浦", sender="admin", is_admin=True))]
+        assert out2 and "没有分配任何事件" in out2[0], out2
+
+        # 触发即发 + 选择各一 → 列表显示类型/状态与事件 id
+        await env.event_engine.trigger_team("利物浦", 1, 1, event_id="subsidy")
+        await env.event_engine.trigger_team("利物浦", 1, 1, event_id="merch_hit")
+        out3 = [r async for r in handler.cancel_event(
+            _FakeEvent("/主场事件取消 利物浦", sender="admin", is_admin=True))]
+        assert out3 and "即发·已生效" in out3[0] and "选择·待定" in out3[0], out3
+        assert "subsidy" in out3[0] and "merch_hit" in out3[0], out3
+
+        # 取消即发：成功文案 + 回退明细
+        out4 = [r async for r in handler.cancel_event(
+            _FakeEvent("/主场事件取消 利物浦 政府补贴", sender="admin", is_admin=True))]
+        assert out4 and "已取消" in out4[0] and "资金流水已撤销" in out4[0], out4
+
+        # 取消选择：待定移除、可重新触发
+        out5 = [r async for r in handler.cancel_event(
+            _FakeEvent("/主场事件取消 利物浦 周边爆款", sender="admin", is_admin=True))]
+        assert out5 and "选择事件" in out5[0] and "可重新触发" in out5[0], out5
+
+        # 未知引用（此前事件均已取消）→ 错误信息可读
+        out6 = [r async for r in handler.cancel_event(
+            _FakeEvent("/主场事件取消 利物浦 不存在的事件", sender="admin", is_admin=True))]
+        assert out6 and "没有分配任何事件" in out6[0], out6
     finally:
         await env.teardown()
 

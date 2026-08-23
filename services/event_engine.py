@@ -637,6 +637,142 @@ class EventEngine:
                         "resolved": bool(c["resolved"]), "outcome": c["outcome"]})
         return out
 
+    # ─── 取消分配（管理员撤销本窗口分配给球队的事件） ───────
+
+    async def list_team_events(self, team_name: str, season: int, window_seq: int) -> list[dict]:
+        """该队本窗口已分配的事件（类型 + 状态），供取消命令列出可选项。"""
+        rows = []
+        logs = await self._dao.get_window_events(team_name, season, window_seq)
+        choices = [c for c in await self._dao.list_event_choices(season, window_seq)
+                   if c["team_name"] == team_name]
+        for c in choices:
+            event = await self._dao.fetch_event_by_id(c["event_id"])
+            name = event["name"] if event else c["event_id"]
+            if c["resolved"]:
+                status = "已结算"
+            elif c["choice_no"] is not None:
+                status = "已选未结"
+            else:
+                status = "待定"
+            rows.append({"event": name, "event_id": c["event_id"],
+                         "kind": "选择", "status": status})
+        choice_ids = {c["event_id"] for c in choices}
+        for lg in logs:
+            if lg["event_id"] in choice_ids:
+                continue
+            event = await self._dao.fetch_event_by_id(lg["event_id"])
+            name = event["name"] if event else lg["event_id"]
+            rows.append({"event": name, "event_id": lg["event_id"],
+                         "kind": "即发", "status": "已生效"})
+        return rows
+
+    async def cancel_team_event(self, team_name: str, ref: str,
+                                season: int, window_seq: int) -> dict:
+        """取消本窗口分配给该队的指定事件（每次取消最新一条实例）。
+
+        选择型：未定/已选未结 → 删待定行与广播日志（触发时未动账，无需回退，
+        可重新触发）；已结算 → 拒绝（引导 /主场结算 强制 重算）。
+        即发型：按该实例日志的 effect_json 回退——删对应最新 event 流水并重算余额、
+        死忠按原比例反漴（乘法可交换，多事件叠加同样正确；触及 0/上限钳制有微小误差）、
+        上座修正未被消耗（当前值≠1）才回退，已随赛果消耗则跳过并提示。
+        """
+        logs = await self._dao.get_window_events(team_name, season, window_seq)
+        choices = [c for c in await self._dao.list_event_choices(season, window_seq)
+                   if c["team_name"] == team_name]
+        event_id = await self._resolve_event_ref(ref, logs, choices)
+        if event_id is None:
+            avail = await self.list_team_events(team_name, season, window_seq)
+            if avail:
+                listing = "、".join(f"{r['event']}({r['kind']}·{r['status']})" for r in avail)
+                raise EventError(f"球队「{team_name}」本窗口没有匹配「{ref}」的事件。现有：{listing}")
+            raise EventError(f"球队「{team_name}」本窗口没有分配任何事件")
+
+        event = await self._dao.fetch_event_by_id(event_id)
+        name = event["name"] if event else event_id
+
+        choice = next((c for c in choices if c["event_id"] == event_id), None)
+        if choice is not None:
+            if choice["resolved"]:
+                raise EventError(f"「{name}」已结算，无法取消（如需重算可用 /主场结算 强制）")
+            await self._dao.delete_event_choice(team_name, season, window_seq, event_id)
+            removed_logs = await self._dao.delete_event_logs(team_name, season, window_seq, event_id)
+            return {"kind": "choice", "event": name, "event_id": event_id,
+                    "removed_logs": removed_logs}
+
+        rows = [lg for lg in logs if lg["event_id"] == event_id]
+        if not rows:
+            raise EventError(f"球队「{team_name}」本窗口没有「{name}」的即发记录")
+        latest = rows[-1]  # get_window_events 按 id 升序 → 取最新一条实例
+        try:
+            effects = json.loads(latest["effect_json"] or "{}")
+        except (ValueError, TypeError):
+            effects = {}
+        if not isinstance(effects, dict):
+            effects = {}
+        notes, warnings = [], []
+        money = float(effects.get("money", 0.0) or 0.0)
+        maintenance = float(effects.get("maintenance", 0.0) or 0.0)
+        fans_pct = float(effects.get("fans_pct", 0.0) or 0.0)
+        attendance_mod = float(effects.get("attendance_mod", 1.0) or 1.0)
+
+        if (money or maintenance) and event is None:
+            warnings.append("事件已不在事件池，资金流水无法按名匹配，请手动核对账目")
+        else:
+            if money:
+                if await self._dao.delete_latest_event_tx(team_name, season, window_seq, name):
+                    notes.append(f"资金流水已撤销（{money:+.1f}M）")
+                else:
+                    warnings.append("未找到对应资金流水（可能已被处理过），跳过")
+            if maintenance:
+                if await self._dao.delete_latest_event_tx(
+                        team_name, season, window_seq, f"{name}（维护）"):
+                    notes.append(f"维护流水已撤销（−{maintenance:.1f}M）")
+                else:
+                    warnings.append("未找到对应维护流水（可能已被处理过），跳过")
+            if money or maintenance:
+                await self._dao.recompute_balance(team_name)
+
+        if fans_pct:
+            stadium = await self._dao.get_stadium(team_name)
+            factor = 1.0 + fans_pct
+            if stadium and factor > 0:
+                cap = float(self._cfg.get("fans_cap", 10000))
+                raw = stadium["fans_diehards"] / factor
+                fans = min(max(raw, 0.0), cap)
+                await self._dao.update_fans(team_name, fans)
+                notes.append(f"死忠已按原比例回退（{fans_pct * 100:+.1f}%）")
+                if abs(fans - raw) > 1e-9:
+                    warnings.append("死忠回退触及 0/上限边界，存在微小误差")
+            else:
+                warnings.append("死忠比例异常或球队无球场，跳过回退")
+
+        if attendance_mod != 1.0:
+            stadium = await self._dao.get_stadium(team_name)
+            if stadium and stadium["next_attendance_mod"] != 1.0:
+                await self._dao.update_attendance_mod(
+                    team_name, stadium["next_attendance_mod"] / attendance_mod)
+                notes.append(f"上座修正已回退（×{attendance_mod:.2f}）")
+            else:
+                warnings.append("上座修正已随赛果消耗（或不存在），跳过回退")
+
+        await self._dao.delete_event_log_by_id(latest["id"])
+        return {"kind": "instant", "event": name, "event_id": event_id,
+                "occurrences": len(rows) - 1, "notes": notes, "warnings": warnings}
+
+    async def _resolve_event_ref(self, ref, logs, choices) -> str | None:
+        """引用解析：先按事件 id 直配，再按池中事件名匹配（fetch 不限状态）。"""
+        s = str(ref or "").strip()
+        if not s:
+            return None
+        ids = {lg["event_id"] for lg in logs} | {c["event_id"] for c in choices}
+        if s in ids:
+            return s
+        for eid in sorted(ids):
+            event = await self._dao.fetch_event_by_id(eid)
+            if event is not None and event["name"] == s:
+                return eid
+        return None
+
     # ─── LLM 设计 ─────────────────────────────────────────
 
     async def generate_drafts(self, count: int, topic: str = "") -> list[dict]:
@@ -664,6 +800,11 @@ class EventEngine:
         target = next((r for r in rows if r["id"] == event_id), None)
         if target is None:
             raise EventError("待采纳事件不存在（事件通过 主场事件列表 查看 id）")
+        # 重名防护：与已采纳事件同名则拒绝（流水 note 与选择录入都按名匹配；
+        # 仅看 adopted——pending 草稿不可触发，同名草稿间不算冲突）
+        if any(r["name"] == target["name"] and r["event_id"] != target["event_id"]
+               for r in await self._dao.list_events("adopted")):
+            raise EventError(f"事件名「{target['name']}」与已采纳事件重名，无法采纳（可丢弃后换名重写）")
         await self._dao.adopt_event(event_id)
 
     async def discard(self, event_id: int) -> None:
@@ -684,6 +825,11 @@ class EventEngine:
         """
         from .llm_writer import _clamp_event
 
+        name = str(name or "").strip()
+        # 重名防护：与已采纳事件同名即拒绝（流水 note 与选择录入都按名匹配，
+        # 同名不同 id 会造成歧义/误删；手写直接入池，故对标已采纳集合）
+        if any(r["name"] == name for r in await self._dao.list_events("adopted")):
+            raise EventError(f"事件名「{name}」已存在（与已采纳事件重名会导致按名匹配歧义），请换名")
         money_clamp = float(self._cfg.get("event_money_clamp", 8.0))
         fans_clamp = float(self._cfg.get("event_fans_clamp", 0.05))
         maintenance_clamp = float(self._cfg.get("event_maintenance_clamp", 5.0))

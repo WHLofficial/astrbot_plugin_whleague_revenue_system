@@ -353,6 +353,11 @@ class StadiumPlugin(Star):
         async for r in self._admin_cmd(event, self.admin_handler.settle_events_now):
             yield r
 
+    @filter.command("主场事件取消")
+    async def cmd_cancel_event(self, event: AstrMessageEvent) -> AsyncGenerator[MessageEventResult, None]:
+        async for r in self._admin_cmd(event, self.admin_handler.cancel_event):
+            yield r
+
     @filter.command("主场事件生成")
     async def cmd_generate_events(self, event: AstrMessageEvent) -> AsyncGenerator[MessageEventResult, None]:
         async for r in self._admin_cmd(event, self.admin_handler.generate_events):
