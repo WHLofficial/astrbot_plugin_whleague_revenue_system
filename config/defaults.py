@@ -1,7 +1,7 @@
 import json
 import os
 
-PLUGIN_VERSION = "2.3.0"
+PLUGIN_VERSION = "2.4.0"
 """插件版本号，与 metadata.yaml 保持一致。"""
 
 _SCHEMA_PATH = os.path.join(
@@ -84,6 +84,7 @@ _INT_UPPER_BOUNDS = {
     "naming_windows": 1000,
     "activity_slots": 20,
     "max_open_tier": 4,
+    "event_max_occurrences": 20,
     "llm_max_calls": 100,
     "backup_keep_count": 10_000,
 }
@@ -93,6 +94,7 @@ _INT_LOWER_BOUNDS = {
     "naming_windows": 1,
     "activity_slots": 0,
     "max_open_tier": 0,
+    "event_max_occurrences": 1,
     "llm_max_calls": 0,
     "backup_keep_count": 1,
 }

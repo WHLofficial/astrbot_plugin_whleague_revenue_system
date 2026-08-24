@@ -185,6 +185,12 @@
     "type": "float",
     "default": 0.4
   },
+  "event_max_occurrences": {
+    "description": "同事件分配上限",
+    "hint": "一次全员分配（/主场事件）中同一事件最多被抽中的次数（1-20）。",
+    "type": "int",
+    "default": 2
+  },
   "import_max_file_size_mb": {
     "description": "单文件导入大小上限",
     "hint": "赛程/赛果/属性导入的 xlsx/csv 附件大小上限（MB）。",

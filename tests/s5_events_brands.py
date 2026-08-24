@@ -440,6 +440,130 @@ async def test_trigger_all_hit_bound():
         await env.teardown()
 
 
+async def test_trigger_all_event_occurrence_cap():
+    """v2.4：一次全员分配中同一事件最多被抽中 event_max_occurrences（默认 2）次。"""
+    from collections import Counter
+
+    from astrbot_plugin_whleague_revenue_system.config.defaults import DEFAULT_CONFIG
+
+    assert DEFAULT_CONFIG["event_max_occurrences"] == 2
+    env = await TestEnv(cfg_override={"event_hit_probability": 1.0}).setup()
+    try:
+        # 事件池收敛为 3 个无条件自定义事件，保证上限必然生效
+        await env.db.execute(
+            "UPDATE event_pool SET status='discarded' WHERE source='builtin'")
+        for i in range(3):
+            await env.dao.upsert_event(
+                f"cap_ev{i}", f"上限测试{i}", "测试", 1, "{}", "{}", "t",
+                source="custom", status="adopted",
+            )
+        for team in ("利物浦", "巴塞罗那", "纽卡斯尔联", "勒沃库森", "曼城", "AC米兰"):
+            await env.stadium_service.import_attributes(team, influence=120.0)
+
+        result = await env.event_engine.trigger_all(1, 1)
+        assert result["triggered"] == 6, result
+        assert result["capped"] == 0, result
+        counts = Counter(h["event_id"] for h in result["hits"])
+        assert len(counts) == 3 and max(counts.values()) == 2, counts
+
+        # 上限=1：每事件至多一次，其余 3 队因上限未中彩
+        env.cfg["event_max_occurrences"] = 1
+        result2 = await env.event_engine.trigger_all(1, 1)
+        assert result2["triggered"] == 3, result2
+        assert result2["capped"] == 3, result2
+        counts2 = Counter(h["event_id"] for h in result2["hits"])
+        assert len(counts2) == 3 and max(counts2.values()) == 1, counts2
+    finally:
+        await env.teardown()
+
+
+async def test_cancel_team_events_latest_batch_cleanup():
+    """v2.4：all 取消=最近一次分配（按 created_at 取最新一批），更早批次保留。"""
+    from astrbot_plugin_whleague_revenue_system.services.event_engine import EventError
+
+    env = await TestEnv().setup()
+    try:
+        await env.stadium_service.import_attributes("利物浦", influence=150.0)
+        bal0 = (await env.dao.get_balance("利物浦"))["balance"]
+        # 批1（同一秒 10:00:00）：subsidy(即发 +4.0M) + 周边爆款(选择·待定)
+        await env.event_engine.trigger_team("利物浦", 1, 1, event_id="subsidy")
+        await env.event_engine.trigger_team("利物浦", 1, 1, event_id="merch_hit")
+        await env.db.execute(
+            "UPDATE events_log SET created_at='2026-08-24 10:00:00' WHERE team_name='利物浦'")
+        await env.db.execute(
+            "UPDATE event_choices SET created_at='2026-08-24 10:00:00' WHERE team_name='利物浦'")
+        # 批2（后 2 秒）：暴雨滂沱(即发·上座×0.85)
+        await env.event_engine.trigger_team("利物浦", 1, 1, event_id="storm_buzz")
+        await env.db.execute(
+            "UPDATE events_log SET created_at='2026-08-24 10:00:02' "
+            "WHERE team_name='利物浦' AND event_id='storm_buzz'")
+
+        # 第一次 all：只撤批2 的暴雨滂沱；批1 完整保留
+        res = await env.event_engine.cancel_team_events("利物浦", 1, 1)
+        assert res["cancelled"] == 1 and res["instant"] == 1 and res["choice"] == 0, res
+        assert res["skipped"] == [], res
+        assert (await env.dao.get_stadium("利物浦"))["next_attendance_mod"] == 1.0
+        logs = {lg["event_id"] for lg in await env.dao.get_window_events("利物浦", 1, 1)}
+        assert logs == {"subsidy", "merch_hit"}, logs
+        assert (await env.dao.get_event_choice("利物浦", 1, 1, "merch_hit")) is not None
+
+        # 第二次 all：批1 全部清空（即发回退数值 + 选择待定移除）
+        res2 = await env.event_engine.cancel_team_events("利物浦", 1, 1)
+        assert res2["cancelled"] == 2, res2
+        assert res2["instant"] == 1 and res2["choice"] == 1 and res2["skipped"] == [], res2
+        assert await env.dao.get_window_events("利物浦", 1, 1) == []
+        assert (await env.dao.get_event_choice("利物浦", 1, 1, "merch_hit")) is None
+        txs = [t for t in await env.dao.list_transactions("利物浦", season=1, window_seq=1)
+               if t["kind"] == "event"]
+        assert not [t for t in txs if t["note"] == "政府补贴"], txs  # subsidy 流水已撤
+        assert abs((await env.dao.get_balance("利物浦"))["balance"] - bal0) < 1e-6
+
+        # 第三次 all：无可取消 → 报错
+        try:
+            await env.event_engine.cancel_team_events("利物浦", 1, 1)
+            assert False, "应已无任何分配"
+        except EventError as e:
+            assert "没有分配任何事件" in str(e)
+    finally:
+        await env.teardown()
+
+
+async def test_cancel_team_events_skips_resolved_choice():
+    """v2.4：最近一次分配含已结算选择 → 跳过并提示，账目/行保留，更早批次不受波及。"""
+    env = await TestEnv().setup()
+    try:
+        await env.stadium_service.import_attributes("利物浦", influence=150.0)
+        # 批1（10:00:00）：subsidy(即发 +4.0M)
+        await env.event_engine.trigger_team("利物浦", 1, 1, event_id="subsidy")
+        await env.db.execute(
+            "UPDATE events_log SET created_at='2026-08-24 10:00:00' WHERE team_name='利物浦'")
+        # 批2（后 2 秒）：德比热度(选择·已结算，账已动)
+        await env.event_engine.trigger_team("利物浦", 1, 1, event_id="derby_buzz")
+        await env.dao.set_event_choice("利物浦", 1, 1, "derby_buzz", 1)
+        await env.event_engine.settle_now(1, 1)
+        await env.db.execute(
+            "UPDATE events_log SET created_at='2026-08-24 10:00:02' "
+            "WHERE team_name='利物浦' AND event_id='derby_buzz'")
+        await env.db.execute(
+            "UPDATE event_choices SET created_at='2026-08-24 10:00:02' "
+            "WHERE team_name='利物浦' AND event_id='derby_buzz'")
+
+        # all：最近一批只有已结算事件 → 0 取消、跳过名单含德比热度
+        res = await env.event_engine.cancel_team_events("利物浦", 1, 1)
+        assert res["cancelled"] == 0 and res["instant"] == 0 and res["choice"] == 0, res
+        assert res["skipped"] == ["德比热度"], res
+        # 批1 与已结算批次均原样保留（日志/选择行/流水）
+        logs = {lg["event_id"] for lg in await env.dao.get_window_events("利物浦", 1, 1)}
+        assert logs == {"subsidy", "derby_buzz"}, logs
+        assert (await env.dao.get_event_choice("利物浦", 1, 1, "derby_buzz"))["resolved"] == 1
+        txs = [t for t in await env.dao.list_transactions("利物浦", season=1, window_seq=1)
+               if t["kind"] == "event"]
+        assert [t for t in txs if t["note"] == "政府补贴"], txs  # subsidy 流水未被波及
+        assert [t for t in txs if t["note"].startswith("德比热度")], txs  # 已结算账目保留
+    finally:
+        await env.teardown()
+
+
 async def test_llm_design_drafts():
     env = await TestEnv().setup()
     try:

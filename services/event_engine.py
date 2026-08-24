@@ -246,6 +246,8 @@ class EventEngine:
     async def trigger_all(self, season: int, window_seq: int, updated_by: str = "") -> dict:
         """全员分配：每队独立命中（默认 40%），命中队抽 1 条符合条件的。
 
+        同一事件在一次分配内最多被 event_max_occurrences 支球队抽中
+        （默认 2），达到上限后从后续球队候选中剔除。
         即发型立即生效；选择型进入待定并返回广播文案。
         """
         stadiums = await self._dao.list_stadiums()
@@ -253,18 +255,26 @@ class EventEngine:
             raise EventError("没有已建球场的球队")
         events_pool = await self._dao.list_events("adopted")
         hit_prob = float(self._cfg.get("event_hit_probability", 0.4))
+        max_occ = int(self._cfg.get("event_max_occurrences", 2))
+        picked: dict[str, int] = {}
         hits = []
+        capped = 0
         for s in stadiums:
             if random.random() >= hit_prob:
                 continue
+            excluded = {eid for eid, n in picked.items() if n >= max_occ}
             bookings = [b["activity_type"] for b in
                         await self._dao.get_bookings(s["team_name"], season, window_seq)]
-            ev = await self._pick(s, events_pool, bookings)
+            cap_out = {}
+            ev = await self._pick(s, events_pool, bookings, excluded=excluded, cap_out=cap_out)
             if ev is None:
+                if cap_out.get("yes"):
+                    capped += 1
                 continue
             hits.append(await self._dispatch(ev, s["team_name"], season, window_seq))
+            picked[ev["event_id"]] = picked.get(ev["event_id"], 0) + 1
         await self._decorate(hits)
-        return {"triggered": len(hits), "hits": hits}
+        return {"triggered": len(hits), "hits": hits, "capped": capped}
 
     async def trigger_team(self, team_name: str, season: int, window_seq: int,
                            event_id: str | None = None, updated_by: str = "") -> dict:
@@ -293,14 +303,28 @@ class EventEngine:
             return await self._trigger_choice(event, team_name, season, window_seq)
         return await self._apply(event, team_name, season, window_seq)
 
-    async def _pick(self, stadium, events_pool, bookings: list[str]):
-        """条件过滤 + 权重抽取一条。"""
+    async def _pick(self, stadium, events_pool, bookings: list[str],
+                    excluded: set | None = None, cap_out: dict | None = None):
+        """条件过滤 + 权重抽取一条。
+
+        excluded 非空时先剔除此集合内的事件（同事件分配上限用）；
+        结果为「有符合条件但全部被排除」时，cap_out["yes"] 置 True
+        （供 trigger_all 统计因上限未中彩的队数）。
+        """
+        if excluded is None:
+            excluded = set()
         has_naming = await self._dao.get_active_naming(stadium["team_name"]) is not None
         eligible = [
             e for e in events_pool
-            if await self._condition_ok(e, stadium, has_naming, bookings)
+            if e["event_id"] not in excluded
+            and await self._condition_ok(e, stadium, has_naming, bookings)
         ]
         if not eligible:
+            if cap_out is not None and excluded:
+                cap_out["yes"] = any([
+                    await self._condition_ok(e, stadium, has_naming, bookings)
+                    for e in events_pool
+                ])
             return None
         weights = [max(1, int(e["weight"])) for e in eligible]
         return random.choices(eligible, weights=weights, k=1)[0]
@@ -758,6 +782,64 @@ class EventEngine:
         await self._dao.delete_event_log_by_id(latest["id"])
         return {"kind": "instant", "event": name, "event_id": event_id,
                 "occurrences": len(rows) - 1, "notes": notes, "warnings": warnings}
+
+    async def cancel_team_events(self, team_name: str, season: int, window_seq: int) -> dict:
+        """取消该队本窗口最近一次分配的全部事件（以事件生成时间为准）。
+
+        events_log / event_choices 的 created_at 取该队最新时间戳，时间戳相同的
+        一批行视为同一次分配：即发型逐条复用 cancel_team_event 回退数值，选择型
+        未定/已选未结删除待定行与日志；已结算跳过并提示。
+        已知边界：同一秒内发生的多次分配会被视为同一批，更早批次保留（可继续
+        用事件名/id 逐条取消）。
+        """
+        logs = await self._dao.get_window_events(team_name, season, window_seq)
+        choices = [c for c in await self._dao.list_event_choices(season, window_seq)
+                   if c["team_name"] == team_name]
+        if not logs and not choices:
+            raise EventError(f"球队「{team_name}」本窗口没有分配任何事件")
+        latest = max([lg["created_at"] for lg in logs]
+                     + [c["created_at"] for c in choices])
+        batch_logs = [lg for lg in logs if lg["created_at"] == latest]
+        batch_choices = [c for c in choices if c["created_at"] == latest]
+        choice_ids = {c["event_id"] for c in batch_choices}
+        skipped: list[str] = []
+        lines: list[str] = []
+        instant = choice = 0
+        for c in batch_choices:
+            event = await self._dao.fetch_event_by_id(c["event_id"])
+            name = event["name"] if event else c["event_id"]
+            if c["resolved"]:
+                skipped.append(name)
+                continue
+            await self._dao.delete_event_choice(team_name, season, window_seq, c["event_id"])
+            await self._dao.delete_event_logs(team_name, season, window_seq, c["event_id"])
+            choice += 1
+            lines.append(f"选择「{name}」（待定已移除，未动账目，可重新触发）")
+        for eid in sorted({lg["event_id"] for lg in batch_logs} - choice_ids):
+            event = await self._dao.fetch_event_by_id(eid)
+            name = event["name"] if event else eid
+            notes, warnings = [], []
+            for _ in [lg for lg in batch_logs if lg["event_id"] == eid]:
+                try:
+                    r = await self.cancel_team_event(team_name, eid, season, window_seq)
+                except EventError as exc:
+                    warnings.append(str(exc))
+                    break
+                for n in r.get("notes") or []:
+                    if n not in notes:
+                        notes.append(n)
+                for w in r.get("warnings") or []:
+                    if w not in warnings:
+                        warnings.append(w)
+            instant += 1
+            line = f"即发「{name}」"
+            if notes:
+                line += "：" + "；".join(notes)
+            lines.append(line)
+            for w in warnings:
+                lines.append(f"⚠️ {w}")
+        return {"cancelled": instant + choice, "instant": instant, "choice": choice,
+                "skipped": skipped, "lines": lines}
 
     async def _resolve_event_ref(self, ref, logs, choices) -> str | None:
         """引用解析：先按事件 id 直配，再按池中事件名匹配（fetch 不限状态）。"""

@@ -277,6 +277,60 @@ async def test_cancel_event_handler_flow():
         await env.teardown()
 
 
+async def test_cancel_all_handler_flow():
+    """v2.4：all 参数——只撤最近一次分配（按生成时间），大小写不敏感，无记录提示。"""
+    env = await TestEnv().setup()
+    try:
+        await env.stadium_service.import_attributes("利物浦", influence=150.0)
+        from astrbot_plugin_whleague_revenue_system.handlers.admin import AdminHandler
+
+        handler = AdminHandler(type("P", (), {
+            "dao": env.dao,
+            "config_cache": env.cfg,
+            "fixture_service": env.fixture_service,
+            "stadium_service": env.stadium_service,
+            "event_engine": env.event_engine,
+            "brand_service": env.brand_service,
+            "window_service": env.window_service,
+            "bridge": env.bridge,
+            "_persist_config": lambda k, v: None,
+        })())
+
+        # 用法含 all
+        out = [r async for r in handler.cancel_event(
+            _FakeEvent("/主场事件取消", sender="admin", is_admin=True))]
+        assert out and "[事件名|事件id|all]" in out[0], out
+
+        # 批1 政府补贴 → 隔 1.1 秒 → 批2 暴雨滂沱（保证秒级时间戳不同）
+        await env.event_engine.trigger_team("利物浦", 1, 1, event_id="subsidy")
+        import asyncio
+
+        await asyncio.sleep(1.1)
+        await env.event_engine.trigger_team("利物浦", 1, 1, event_id="storm_buzz")
+
+        # all：只撤批2，回复含明细；批1 保留
+        out2 = [r async for r in handler.cancel_event(
+            _FakeEvent("/主场事件取消 利物浦 all", sender="admin", is_admin=True))]
+        assert out2 and "最近一次分配" in out2[0] and "共 1 个" in out2[0], out2
+        assert "暴雨滂沱" in out2[0] and "上座修正已回退" in out2[0], out2
+        rows = await env.event_engine.list_team_events("利物浦", 1, 1)
+        assert [r for r in rows if r["event_id"] == "subsidy"], rows
+        assert not [r for r in rows if r["event_id"] == "storm_buzz"], rows
+
+        # 再 all（大写）撤批1
+        out3 = [r async for r in handler.cancel_event(
+            _FakeEvent("/主场事件取消 利物浦 ALL", sender="admin", is_admin=True))]
+        assert out3 and "共 1 个" in out3[0] and "政府补贴" in out3[0], out3
+        assert await env.event_engine.list_team_events("利物浦", 1, 1) == []
+
+        # 无记录 → 提示
+        out4 = [r async for r in handler.cancel_event(
+            _FakeEvent("/主场事件取消 利物浦 all", sender="admin", is_admin=True))]
+        assert out4 and "没有分配任何事件" in out4[0], out4
+    finally:
+        await env.teardown()
+
+
 async def test_named_round_command_resolution():
     """天气/赛果命令输入纯文字轮次：解析到与导入登记一致的轮次号。"""
     env = await TestEnv().setup()

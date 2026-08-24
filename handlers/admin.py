@@ -398,6 +398,8 @@ class AdminHandler:
         lines = [f"🎲 事件触发：{result['triggered']} 队命中"]
         for hit in result["hits"]:
             lines.append(self._format_hit(hit))
+        if result.get("capped"):
+            lines.append(f"（另有 {result['capped']} 队因同事件重复上限未抽中）")
         lines.append("📤 选择型事件请收集球员回应后，用 /主场事件选择 多行批量录入（/主场事件选择列表 查看待定）")
         yield event.plain_result("\n".join(lines))
 
@@ -522,9 +524,10 @@ class AdminHandler:
         parts = event.get_message_str().split(maxsplit=2)
         if len(parts) < 2:
             yield event.plain_result(
-                "用法: /主场事件取消 <队名> [事件名|事件id]\n"
+                "用法: /主场事件取消 <队名> [事件名|事件id|all]\n"
                 "只带队名则列出该队本窗口事件；选择型仅未定/已选未结可取消（已结算用 /主场结算 强制 重算）；"
-                "即发型取消时回退资金流水/死忠/上座修正（每次取消最新一条）"
+                "即发型取消时回退资金流水/死忠/上座修正（每次取消最新一条）；"
+                "all 取消最近一次分配的全部事件（按事件生成时间）"
             )
             return
         state = await self._plugin.dao.get_league_state()
@@ -539,6 +542,25 @@ class AdminHandler:
             lines = [f"📋 {parts[1]} 本窗口事件（取消用 /主场事件取消 {parts[1]} <事件名|id>）"]
             for r in rows:
                 lines.append(f"· {r['event']}（{r['kind']}·{r['status']}，id {r['event_id']}）")
+            yield event.plain_result("\n".join(lines))
+            return
+        if parts[2].strip().lower() == "all":
+            result = await self._run(
+                event, svc.cancel_team_events(parts[1], season, window_seq)
+            )
+            if "error" in result:
+                yield event.plain_result(result["error"])
+                return
+            lines = [
+                f"✅ 已取消 {parts[1]} 最近一次分配的全部事件"
+                f"（共 {result['cancelled']} 个：即发 {result['instant']}、选择 {result['choice']}）"
+            ]
+            for ln in result["lines"]:
+                lines.append(f"· {ln}")
+            if result["skipped"]:
+                lines.append(
+                    f"⚠️ 已结算跳过：{'、'.join(result['skipped'])}（如需重算可用 /主场结算 强制）"
+                )
             yield event.plain_result("\n".join(lines))
             return
         result = await self._run(
