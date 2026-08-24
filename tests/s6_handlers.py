@@ -301,12 +301,15 @@ async def test_cancel_all_handler_flow():
             _FakeEvent("/主场事件取消", sender="admin", is_admin=True))]
         assert out and "[事件名|事件id|all]" in out[0], out
 
-        # 批1 政府补贴 → 隔 1.1 秒 → 批2 暴雨滂沱（保证秒级时间戳不同）
+        # 批1 政府补贴 与 批2 暴雨滂沱（间隔 >60 秒超出批次窗口，钉时间戳保证分批）
         await env.event_engine.trigger_team("利物浦", 1, 1, event_id="subsidy")
-        import asyncio
-
-        await asyncio.sleep(1.1)
         await env.event_engine.trigger_team("利物浦", 1, 1, event_id="storm_buzz")
+        await env.db.execute(
+            "UPDATE events_log SET created_at='2026-08-24 10:00:00' "
+            "WHERE team_name='利物浦' AND event_id='subsidy'")
+        await env.db.execute(
+            "UPDATE events_log SET created_at='2026-08-24 10:02:00' "
+            "WHERE team_name='利物浦' AND event_id='storm_buzz'")
 
         # all：只撤批2，回复含明细；批1 保留
         out2 = [r async for r in handler.cancel_event(
@@ -327,6 +330,49 @@ async def test_cancel_all_handler_flow():
         out4 = [r async for r in handler.cancel_event(
             _FakeEvent("/主场事件取消 利物浦 all", sender="admin", is_admin=True))]
         assert out4 and "没有分配任何事件" in out4[0], out4
+    finally:
+        await env.teardown()
+
+
+async def test_cancel_latest_all_handler_flow():
+    """v2.5：/主场事件取消 all（无队名）——回退全局最近一次分配，按队分列。"""
+    env = await TestEnv().setup()
+    try:
+        await env.stadium_service.import_attributes("利物浦", influence=150.0)
+        await env.stadium_service.import_attributes("巴塞罗那", influence=150.0)
+        from astrbot_plugin_whleague_revenue_system.handlers.admin import AdminHandler
+
+        handler = AdminHandler(type("P", (), {
+            "dao": env.dao,
+            "config_cache": env.cfg,
+            "fixture_service": env.fixture_service,
+            "stadium_service": env.stadium_service,
+            "event_engine": env.event_engine,
+            "brand_service": env.brand_service,
+            "window_service": env.window_service,
+            "bridge": env.bridge,
+            "_persist_config": lambda k, v: None,
+        })())
+
+        # 同一批（钉同一秒）：利物浦 政府补贴 + 巴塞罗那 周边爆款
+        await env.event_engine.trigger_team("利物浦", 1, 1, event_id="subsidy")
+        await env.event_engine.trigger_team("巴塞罗那", 1, 1, event_id="merch_hit")
+        await env.db.execute(
+            "UPDATE events_log SET created_at='2026-08-24 11:00:00'")
+        await env.db.execute("UPDATE event_choices SET created_at='2026-08-24 11:00:00'")
+
+        out = [r async for r in handler.cancel_event(
+            _FakeEvent("/主场事件取消 all", sender="admin", is_admin=True))]
+        assert out and "最近一次分配" in out[0] and "共 2 个" in out[0], out
+        assert "利物浦：" in out[0] and "政府补贴" in out[0], out
+        assert "巴塞罗那：" in out[0] and "周边爆款" in out[0], out
+        assert await env.event_engine.list_team_events("利物浦", 1, 1) == []
+        assert await env.event_engine.list_team_events("巴塞罗那", 1, 1) == []
+
+        # 无记录 → 提示
+        out2 = [r async for r in handler.cancel_event(
+            _FakeEvent("/主场事件取消 all", sender="admin", is_admin=True))]
+        assert out2 and "没有分配任何事件" in out2[0], out2
     finally:
         await env.teardown()
 

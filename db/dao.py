@@ -501,6 +501,13 @@ class StadiumDAO:
             (team_name, season, window_seq),
         )
 
+    async def get_window_events_all(self, season: int, window_seq: int) -> list:
+        """窗口内全部球队的事件日志（回退全局最近一次分配用）。"""
+        return await self._db.fetchall(
+            "SELECT * FROM events_log WHERE season_number=? AND window_seq=? ORDER BY id",
+            (season, window_seq),
+        )
+
     async def fetch_event_by_id(self, event_id: str):
         return await self._db.fetchone(
             "SELECT * FROM event_pool WHERE event_id=?", (event_id,)

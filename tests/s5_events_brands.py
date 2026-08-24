@@ -492,10 +492,10 @@ async def test_cancel_team_events_latest_batch_cleanup():
             "UPDATE events_log SET created_at='2026-08-24 10:00:00' WHERE team_name='利物浦'")
         await env.db.execute(
             "UPDATE event_choices SET created_at='2026-08-24 10:00:00' WHERE team_name='利物浦'")
-        # 批2（后 2 秒）：暴雨滂沱(即发·上座×0.85)
+        # 批2（间隔 >60 秒，超出批次窗口）：暴雨滂沱(即发·上座×0.85)
         await env.event_engine.trigger_team("利物浦", 1, 1, event_id="storm_buzz")
         await env.db.execute(
-            "UPDATE events_log SET created_at='2026-08-24 10:00:02' "
+            "UPDATE events_log SET created_at='2026-08-24 10:02:00' "
             "WHERE team_name='利物浦' AND event_id='storm_buzz'")
 
         # 第一次 all：只撤批2 的暴雨滂沱；批1 完整保留
@@ -537,15 +537,15 @@ async def test_cancel_team_events_skips_resolved_choice():
         await env.event_engine.trigger_team("利物浦", 1, 1, event_id="subsidy")
         await env.db.execute(
             "UPDATE events_log SET created_at='2026-08-24 10:00:00' WHERE team_name='利物浦'")
-        # 批2（后 2 秒）：德比热度(选择·已结算，账已动)
+        # 批2（间隔 >60 秒，超出批次窗口）：德比热度(选择·已结算，账已动)
         await env.event_engine.trigger_team("利物浦", 1, 1, event_id="derby_buzz")
         await env.dao.set_event_choice("利物浦", 1, 1, "derby_buzz", 1)
         await env.event_engine.settle_now(1, 1)
         await env.db.execute(
-            "UPDATE events_log SET created_at='2026-08-24 10:00:02' "
+            "UPDATE events_log SET created_at='2026-08-24 10:02:00' "
             "WHERE team_name='利物浦' AND event_id='derby_buzz'")
         await env.db.execute(
-            "UPDATE event_choices SET created_at='2026-08-24 10:00:02' "
+            "UPDATE event_choices SET created_at='2026-08-24 10:02:00' "
             "WHERE team_name='利物浦' AND event_id='derby_buzz'")
 
         # all：最近一批只有已结算事件 → 0 取消、跳过名单含德比热度
@@ -560,6 +560,149 @@ async def test_cancel_team_events_skips_resolved_choice():
                if t["kind"] == "event"]
         assert [t for t in txs if t["note"] == "政府补贴"], txs  # subsidy 流水未被波及
         assert [t for t in txs if t["note"].startswith("德比热度")], txs  # 已结算账目保留
+    finally:
+        await env.teardown()
+
+
+async def test_cancel_latest_assignment_multi_team():
+    """v2.5：裸 all（全局）——同一批跨两队的即发+选择一并回退，按队分列。"""
+    from astrbot_plugin_whleague_revenue_system.services.event_engine import EventError
+
+    env = await TestEnv().setup()
+    try:
+        await env.stadium_service.import_attributes("利物浦", influence=150.0)
+        await env.stadium_service.import_attributes("巴塞罗那", influence=150.0)
+        await env.event_engine.trigger_team("利物浦", 1, 1, event_id="subsidy")
+        await env.event_engine.trigger_team("巴塞罗那", 1, 1, event_id="merch_hit")
+        await env.db.execute(
+            "UPDATE events_log SET created_at='2026-08-24 11:00:00' "
+            "WHERE team_name IN ('利物浦', '巴塞罗那')")
+        await env.db.execute(
+            "UPDATE event_choices SET created_at='2026-08-24 11:00:00'")
+
+        res = await env.event_engine.cancel_latest_assignment(1, 1)
+        assert res["cancelled"] == 2 and res["instant"] == 1 and res["choice"] == 1, res
+        assert res["skipped"] == [], res
+        assert any("利物浦：" in ln and "政府补贴" in ln for ln in res["lines"]), res
+        assert any("巴塞罗那：" in ln and "周边爆款" in ln for ln in res["lines"]), res
+        assert await env.event_engine.list_team_events("利物浦", 1, 1) == []
+        assert await env.event_engine.list_team_events("巴塞罗那", 1, 1) == []
+        try:
+            await env.event_engine.cancel_latest_assignment(1, 1)
+            assert False, "应已无任何分配"
+        except EventError as e:
+            assert "没有分配任何事件" in str(e)
+    finally:
+        await env.teardown()
+
+
+async def test_cancel_latest_assignment_later_batches_and_skip():
+    """v2.5：全局最新一批=最大时间戳——单队补触发/已结算批依次占位，更早批保留。"""
+    env = await TestEnv().setup()
+    try:
+        await env.stadium_service.import_attributes("利物浦", influence=150.0)
+        await env.stadium_service.import_attributes("巴塞罗那", influence=150.0)
+        await env.stadium_service.import_attributes("曼城", influence=150.0)
+        # 批1（11:00:00）：利物浦 政府补贴
+        await env.event_engine.trigger_team("利物浦", 1, 1, event_id="subsidy")
+        await env.db.execute(
+            "UPDATE events_log SET created_at='2026-08-24 11:00:00' WHERE team_name='利物浦'")
+        # 批2（11:02:00）：巴塞罗那 德比热度（选择·已结算）
+        await env.event_engine.trigger_team("巴塞罗那", 1, 1, event_id="derby_buzz")
+        await env.dao.set_event_choice("巴塞罗那", 1, 1, "derby_buzz", 1)
+        await env.event_engine.settle_now(1, 1)
+        await env.db.execute(
+            "UPDATE events_log SET created_at='2026-08-24 11:02:00' "
+            "WHERE team_name='巴塞罗那' AND event_id='derby_buzz'")
+        await env.db.execute(
+            "UPDATE event_choices SET created_at='2026-08-24 11:02:00' "
+            "WHERE team_name='巴塞罗那' AND event_id='derby_buzz'")
+        # 批3（11:04:00）：曼城 暴雨滂沱（单队补触发 → 成为全局最新一批）
+        await env.event_engine.trigger_team("曼城", 1, 1, event_id="storm_buzz")
+        await env.db.execute(
+            "UPDATE events_log SET created_at='2026-08-24 11:04:00' WHERE team_name='曼城'")
+
+        # 第一次：只撤批3（曼城）
+        res = await env.event_engine.cancel_latest_assignment(1, 1)
+        assert res["cancelled"] == 1 and res["instant"] == 1 and res["choice"] == 0, res
+        assert res["skipped"] == [], res
+        assert (await env.dao.get_stadium("曼城"))["next_attendance_mod"] == 1.0
+        logs = {lg["event_id"] for lg in await env.dao.get_window_events("利物浦", 1, 1)}
+        assert logs == {"subsidy"}, logs  # 批1 未受波及
+        # 第二次：批2 全为已结算 → 0 取消 + 跳过（带队名前缀）
+        res2 = await env.event_engine.cancel_latest_assignment(1, 1)
+        assert res2["cancelled"] == 0, res2
+        assert res2["skipped"] == ["巴塞罗那·德比热度"], res2
+        assert (await env.dao.get_event_choice("巴塞罗那", 1, 1, "derby_buzz"))["resolved"] == 1
+        assert {lg["event_id"] for lg in await env.dao.get_window_events("利物浦", 1, 1)} \
+            == {"subsidy"}
+    finally:
+        await env.teardown()
+
+
+async def test_cancel_team_events_window_merge():
+    """v2.5+：批次窗口 60 秒——间隔不足 60 秒的两次触发视为同一批，一次撤净。"""
+    env = await TestEnv().setup()
+    try:
+        await env.stadium_service.import_attributes("利物浦", influence=150.0)
+        await env.event_engine.trigger_team("利物浦", 1, 1, event_id="subsidy")
+        await env.event_engine.trigger_team("利物浦", 1, 1, event_id="merch_hit")
+        await env.db.execute(
+            "UPDATE events_log SET created_at='2026-08-24 10:00:00' "
+            "WHERE team_name='利物浦' AND event_id='subsidy'")
+        await env.db.execute(
+            "UPDATE events_log SET created_at='2026-08-24 10:00:40' "
+            "WHERE team_name='利物浦' AND event_id='merch_hit'")
+        await env.db.execute(
+            "UPDATE event_choices SET created_at='2026-08-24 10:00:40' "
+            "WHERE team_name='利物浦'")
+
+        res = await env.event_engine.cancel_team_events("利物浦", 1, 1)
+        assert res["cancelled"] == 2 and res["instant"] == 1 and res["choice"] == 1, res
+        assert res["skipped"] == [], res
+        assert await env.dao.get_window_events("利物浦", 1, 1) == []
+        assert (await env.dao.get_event_choice("利物浦", 1, 1, "merch_hit")) is None
+    finally:
+        await env.teardown()
+
+
+async def test_cancel_latest_assignment_window_merge():
+    """v2.5+：窗口内跨队合并（40 秒间隔视为一批），窗口外批次（90 秒间隔）先撤。"""
+    env = await TestEnv().setup()
+    try:
+        await env.stadium_service.import_attributes("利物浦", influence=150.0)
+        await env.stadium_service.import_attributes("巴塞罗那", influence=150.0)
+        await env.stadium_service.import_attributes("曼城", influence=150.0)
+        # 利物浦/巴塞罗那 间隔 40 秒 → 同一批；曼城 90 秒后 → 下一批
+        await env.event_engine.trigger_team("利物浦", 1, 1, event_id="subsidy")
+        await env.event_engine.trigger_team("巴塞罗那", 1, 1, event_id="merch_hit")
+        await env.event_engine.trigger_team("曼城", 1, 1, event_id="storm_buzz")
+        await env.db.execute(
+            "UPDATE events_log SET created_at='2026-08-24 11:00:10' "
+            "WHERE team_name='利物浦' AND event_id='subsidy'")
+        await env.db.execute(
+            "UPDATE events_log SET created_at='2026-08-24 11:00:50' "
+            "WHERE team_name='巴塞罗那' AND event_id='merch_hit'")
+        await env.db.execute(
+            "UPDATE event_choices SET created_at='2026-08-24 11:00:50' "
+            "WHERE team_name='巴塞罗那'")
+        await env.db.execute(
+            "UPDATE events_log SET created_at='2026-08-24 11:02:00' "
+            "WHERE team_name='曼城' AND event_id='storm_buzz'")
+
+        # 第一次：最新一批=窗口外的曼城
+        res = await env.event_engine.cancel_latest_assignment(1, 1)
+        assert res["cancelled"] == 1 and res["instant"] == 1, res
+        assert (await env.dao.get_stadium("曼城"))["next_attendance_mod"] == 1.0
+        # 第二次：利物浦+巴塞罗那（40 秒间隔）合并为一批撤净
+        res2 = await env.event_engine.cancel_latest_assignment(1, 1)
+        assert res2["cancelled"] == 2 and res2["instant"] == 1 and res2["choice"] == 1, res2
+        assert res2["skipped"] == [], res2
+        assert any("利物浦：" in ln for ln in res2["lines"]), res2
+        assert any("巴塞罗那：" in ln for ln in res2["lines"]), res2
+        assert await env.event_engine.list_team_events("利物浦", 1, 1) == []
+        assert await env.event_engine.list_team_events("巴塞罗那", 1, 1) == []
+        assert await env.event_engine.list_team_events("曼城", 1, 1) == []
     finally:
         await env.teardown()
 

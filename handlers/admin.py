@@ -524,16 +524,35 @@ class AdminHandler:
         parts = event.get_message_str().split(maxsplit=2)
         if len(parts) < 2:
             yield event.plain_result(
-                "用法: /主场事件取消 <队名> [事件名|事件id|all]\n"
+                "用法: /主场事件取消 <队名> [事件名|事件id|all] ；或 /主场事件取消 all\n"
                 "只带队名则列出该队本窗口事件；选择型仅未定/已选未结可取消（已结算用 /主场结算 强制 重算）；"
                 "即发型取消时回退资金流水/死忠/上座修正（每次取消最新一条）；"
-                "all 取消最近一次分配的全部事件（按事件生成时间）"
+                "<队名> all 取消该队最近一次分配，仅 all 回退全局最近一次分配（均按事件生成时间）"
             )
             return
         state = await self._plugin.dao.get_league_state()
         season = state["season_number"] if state else 1
         window_seq = state["window_seq"] if state else 1
         svc = self._plugin.event_engine
+        if len(parts) == 2 and parts[1].strip().lower() == "all":
+            result = await self._run(
+                event, svc.cancel_latest_assignment(season, window_seq)
+            )
+            if "error" in result:
+                yield event.plain_result(result["error"])
+                return
+            lines = [
+                f"✅ 已取消最近一次分配的全部事件"
+                f"（共 {result['cancelled']} 个：即发 {result['instant']}、选择 {result['choice']}）"
+            ]
+            for ln in result["lines"]:
+                lines.append(f"· {ln}")
+            if result["skipped"]:
+                lines.append(
+                    f"⚠️ 已结算跳过：{'、'.join(result['skipped'])}（如需重算可用 /主场结算 强制）"
+                )
+            yield event.plain_result("\n".join(lines))
+            return
         if len(parts) == 2:
             rows = await svc.list_team_events(parts[1], season, window_seq)
             if not rows:

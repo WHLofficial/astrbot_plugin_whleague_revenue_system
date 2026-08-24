@@ -7,6 +7,7 @@
 
 import json
 import random
+from datetime import datetime, timedelta
 
 from . import formula
 from .llm_writer import _fill_template
@@ -786,11 +787,11 @@ class EventEngine:
     async def cancel_team_events(self, team_name: str, season: int, window_seq: int) -> dict:
         """取消该队本窗口最近一次分配的全部事件（以事件生成时间为准）。
 
-        events_log / event_choices 的 created_at 取该队最新时间戳，时间戳相同的
-        一批行视为同一次分配：即发型逐条复用 cancel_team_event 回退数值，选择型
-        未定/已选未结删除待定行与日志；已结算跳过并提示。
-        已知边界：同一秒内发生的多次分配会被视为同一批，更早批次保留（可继续
-        用事件名/id 逐条取消）。
+        events_log / event_choices 的 created_at 取该队最新时间戳，落在
+        [最新时间戳−批次窗口, 最新时间戳] 内的行视为同一次分配（窗口默认 60 秒，
+        可配 event_batch_window_seconds，0=仅同一秒）：即发型逐条复用
+        cancel_team_event 回退数值，选择型未定/已选未结删除待定行与日志；
+        已结算跳过并提示。窗口外的更早批次保留（可继续用事件名/id 逐条取消）。
         """
         logs = await self._dao.get_window_events(team_name, season, window_seq)
         choices = [c for c in await self._dao.list_event_choices(season, window_seq)
@@ -799,8 +800,75 @@ class EventEngine:
             raise EventError(f"球队「{team_name}」本窗口没有分配任何事件")
         latest = max([lg["created_at"] for lg in logs]
                      + [c["created_at"] for c in choices])
-        batch_logs = [lg for lg in logs if lg["created_at"] == latest]
-        batch_choices = [c for c in choices if c["created_at"] == latest]
+        window = int(self._cfg.get("event_batch_window_seconds", 60))
+        return await self._cancel_batch(
+            team_name, season, window_seq,
+            self._batch_rows(logs, latest, window),
+            self._batch_rows(choices, latest, window),
+        )
+
+    async def cancel_latest_assignment(self, season: int, window_seq: int) -> dict:
+        """回退全局最近一次分配的全部事件（按生成时间取全窗口最新一批）。
+
+        全窗口 created_at 最大值即为最近一次分配时刻，落在 [该时刻−批次窗口,
+        该时刻] 内的行（可跨多队）视为同一次分配，逐队复用 _cancel_batch：
+        即发回退数值、选择型未定/已选未结删除，已结算跳过；窗口外批次保留。
+        若最近一次分配后隔了超过窗口时长又单队触发，全局最新一批就是该单队
+        批次（按时间规则的自然结果）。
+        """
+        logs = await self._dao.get_window_events_all(season, window_seq)
+        choices = await self._dao.list_event_choices(season, window_seq)
+        if not logs and not choices:
+            raise EventError("本窗口没有分配任何事件")
+        latest = max([lg["created_at"] for lg in logs]
+                     + [c["created_at"] for c in choices])
+        window = int(self._cfg.get("event_batch_window_seconds", 60))
+        teams = sorted({lg["team_name"] for lg in logs}
+                       | {c["team_name"] for c in choices})
+        total = {"cancelled": 0, "instant": 0, "choice": 0,
+                 "skipped": [], "lines": []}
+        for team in teams:
+            batch_logs = self._batch_rows(
+                [lg for lg in logs if lg["team_name"] == team], latest, window)
+            batch_choices = self._batch_rows(
+                [c for c in choices if c["team_name"] == team], latest, window)
+            if not batch_logs and not batch_choices:
+                continue
+            r = await self._cancel_batch(team, season, window_seq,
+                                         batch_logs, batch_choices)
+            total["cancelled"] += r["cancelled"]
+            total["instant"] += r["instant"]
+            total["choice"] += r["choice"]
+            total["skipped"].extend(f"{team}·{n}" for n in r["skipped"])
+            total["lines"].extend(f"{team}：{ln}" for ln in r["lines"])
+        return total
+
+    def _batch_rows(self, rows: list, latest: str, window: int) -> list:
+        """取一批：created_at 落在 [latest−window 秒, latest] 内的行（0=仅同一秒）。
+
+        时间解析失败的行按「与 latest 完全同秒」的旧行为兜底。
+        """
+        if window <= 0:
+            return [r for r in rows if r["created_at"] == latest]
+        try:
+            cutoff = datetime.fromisoformat(latest) - timedelta(seconds=window)
+        except (ValueError, TypeError):
+            return [r for r in rows if r["created_at"] == latest]
+        out = []
+        for r in rows:
+            try:
+                dt = datetime.fromisoformat(r["created_at"])
+            except (ValueError, TypeError):
+                if r["created_at"] == latest:
+                    out.append(r)
+                continue
+            if dt >= cutoff:
+                out.append(r)
+        return out
+
+    async def _cancel_batch(self, team_name: str, season: int, window_seq: int,
+                            batch_logs: list, batch_choices: list) -> dict:
+        """取消指定一批事件（已按时间戳过滤好的行）：即发逐条回退、选择待定移除、已结算跳过。"""
         choice_ids = {c["event_id"] for c in batch_choices}
         skipped: list[str] = []
         lines: list[str] = []

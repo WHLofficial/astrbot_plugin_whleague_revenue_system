@@ -1,7 +1,7 @@
 name: astrbot_plugin_whleague_revenue_system # 插件唯一识别名，以 astrbot_plugin_ 前缀开头
 display_name: 主场营收系统 for WHL # 用于展示的名字
 desc: 球队主场系统：赛程导入、天气预报、赛果录入、上座/票房统计、球场建设、球迷演化、档期活动、冠名权、随机事件。 # 插件简短描述
-version: v2.4.0 # 插件版本号
+version: v2.5.0 # 插件版本号
 author: WHLofficial # 作者
 repo: "https://github.com/WHLofficial/astrbot_plugin_whleague_revenue_system"
 support_platforms:

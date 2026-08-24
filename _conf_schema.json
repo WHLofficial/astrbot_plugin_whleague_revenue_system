@@ -191,6 +191,12 @@
     "type": "int",
     "default": 2
   },
+  "event_batch_window_seconds": {
+    "description": "事件批次窗口",
+    "hint": "事件取消 all 判定「最近一次分配」的时间窗口（秒，0=仅同一秒；最近一次分配时刻向前 N 秒内的记录视为同一批）。",
+    "type": "int",
+    "default": 60
+  },
   "import_max_file_size_mb": {
     "description": "单文件导入大小上限",
     "hint": "赛程/赛果/属性导入的 xlsx/csv 附件大小上限（MB）。",
