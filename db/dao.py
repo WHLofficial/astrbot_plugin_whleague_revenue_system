@@ -18,6 +18,10 @@ class StadiumDAO:
             (key, value),
         )
 
+    async def get_config(self, key: str) -> str | None:
+        row = await self._db.fetchone("SELECT value FROM plugin_config WHERE key=?", (key,))
+        return row["value"] if row else None
+
     async def get_all_config(self) -> list:
         return await self._db.fetchall("SELECT key, value FROM plugin_config")
 
@@ -622,6 +626,12 @@ class StadiumDAO:
         return await self._db.fetchone(
             "SELECT * FROM window_summaries WHERE season_number=? AND window_seq=?",
             (season, window_seq),
+        )
+
+    async def list_window_summaries(self, season: int) -> list:
+        return await self._db.fetchall(
+            "SELECT * FROM window_summaries WHERE season_number=? ORDER BY window_seq",
+            (season,),
         )
 
     async def save_window_summary_tx_ids(self, season: int, window_seq: int,

@@ -7,13 +7,14 @@ from astrbot.api import logger
 from astrbot.api.event import MessageEventResult
 
 from ..config.defaults import validate_and_cast
+from ..services.backfill_service import BackfillError
 from ..services.brand_service import BrandError
 from ..services.event_engine import EventError
 from ..services.file_import_service import FileImportError
 from ..services.fixture_service import FixtureError
 from ..services.stadium_service import StadiumError
 from ..services.window_service import SettleError
-from ..utils.security import format_m, parse_int, parse_qq, parse_qq_arg
+from ..utils.security import format_int, format_m, parse_int, parse_qq, parse_qq_arg
 
 _FACILITY_ALIASES = {
     "商业区": "commercial", "商业": "commercial", "commercial": "commercial",
@@ -40,7 +41,7 @@ class AdminHandler:
             # 避免上层 `"error" in None`；list（选择列表/批量导入）原样保留
             return result if result is not None else {}
         except (StadiumError, FixtureError, EventError, BrandError, SettleError,
-                FileImportError, ValueError) as e:
+                FileImportError, BackfillError, ValueError) as e:
             return {"error": str(e)}
         except Exception as e:
             logger.error(f"Admin handler error: {e}")
@@ -854,6 +855,61 @@ class AdminHandler:
             else:
                 lines.append(f"· {key}: {val}")
         yield event.plain_result("\n".join(lines))
+
+    async def form_backfill(self, event) -> AsyncGenerator[MessageEventResult, None]:
+        """战绩系数补差：默认预览只读，「确认」才落库（幂等，标记后拒绝重复执行）。"""
+        deny = await self._guard(event)
+        if deny:
+            yield event.plain_result(deny)
+            return
+        parts = event.get_message_str().split()
+        if len(parts) > 1 and parts[1] != "确认":
+            yield event.plain_result("用法: /主场战绩补差 [确认]")
+            return
+        svc = self._plugin.backfill_service
+        result = await self._run(event, svc.apply() if len(parts) > 1 else svc.scan())
+        if "error" in result:
+            yield event.plain_result(f"❌ {result['error']}")
+            return
+        yield event.plain_result(self._format_backfill(result))
+
+    @staticmethod
+    def _format_backfill(r: dict) -> str:
+        lines: list[str] = []
+        if r.get("done"):
+            mk = r.get("marker") or {}
+            return (f"✅ 战绩系数补差已执行过：赛季 S{mk.get('executed_season')}，"
+                    f"{mk.get('matches', 0)} 场票房补差、{mk.get('fans_teams', 0)} 队死忠回补。无需重复执行")
+        head = f"🧮 战绩系数补差预览（赛季 S{r['season']}，尚未生效）" + ("｜✅ 已落库" if r.get("applied") else "")
+        affected = r["affected"]
+        fans = r["fans"]
+        if not affected and not fans:
+            return head + "\n✅ 未发现受影响的数据（可能已无 1~2 场历史的场次）。\n仍要写入完成标记请发：/主场战绩补差 确认"
+        d_money = sum(t["d_ticket"] + t["d_commercial"] for t in r["teams"])
+        lines.append(head)
+        lines.append(f"受影响 {len(affected)} 场（转播收入不动），票房净差额 {format_m(d_money)} M")
+        for a in affected[:30]:
+            updown = "↑" if a["d_ticket"] > 0 or a["d_att"] > 0 else "↓"
+            lines.append(
+                f"· {updown} 第{a['round_no']}轮({a['competition']}) {a['home']} vs {a['away']}："
+                f"历史{a['n']}场旧分{a['old_pts']}({a['coef_old']:.2f})→中性4分({a['coef_new']:.2f})，"
+                f"上座 {format_int(a['att_old'])}→{format_int(a['att_new'])}，"
+                f"票 {format_m(a['d_ticket'])} 商 {format_m(a['d_commercial'])} M"
+            )
+        if len(affected) > 30:
+            lines.append(f"· …其余 {len(affected) - 30} 场从略")
+        if r["teams"]:
+            lines.append("队伍票房汇总：")
+            for t in r["teams"]:
+                lines.append(f"· {t['team']}：上座 {t['d_attendance']:+d}，票房净 "
+                             f"{format_m(t['d_ticket'] + t['d_commercial'])} M（票 {format_m(t['d_ticket'])}／商 {format_m(t['d_commercial'])}）")
+        if fans:
+            lines.append("死忠近似回补（0.95^k）：")
+            for f in fans:
+                lines.append(f"· {f['team']}：k={f['k']}，死忠 {format_int(f['before'])}→{format_int(f['after'])}")
+        if not r.get("applied"):
+            lines.append("⚠️ 请在部署后、下一次窗口结算前执行；确认落库请发：/主场战绩补差 确认")
+        return "\n".join(lines)
 
     async def add_admin(self, event) -> AsyncGenerator[MessageEventResult, None]:
         deny = await self._guard(event)

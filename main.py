@@ -54,6 +54,7 @@ class StadiumPlugin(Star):
         self.config_cache = await self._load_config_cache()
         self.rate_limiter = RateLimiter()
 
+        from .services.backfill_service import BackfillService
         from .services.backup_service import BackupService
         from .services.brand_service import BrandService
         from .services.chart_service import ChartService
@@ -80,6 +81,7 @@ class StadiumPlugin(Star):
             self.event_engine,
         )
         self.backup_service = BackupService(self.db, self.config_cache)
+        self.backfill_service = BackfillService(self.db, self.dao, self.config_cache)
         self.chart_service = ChartService(self.db, self.dao, self.config_cache)
 
         await self.brand_service.init_brand_pool()
@@ -300,6 +302,11 @@ class StadiumPlugin(Star):
     @filter.command("主场赛程导入")
     async def cmd_import_fixtures(self, event: AstrMessageEvent) -> AsyncGenerator[MessageEventResult, None]:
         async for r in self._admin_cmd(event, self.admin_handler.import_fixtures):
+            yield r
+
+    @filter.command("主场战绩补差")
+    async def cmd_form_backfill(self, event: AstrMessageEvent) -> AsyncGenerator[MessageEventResult, None]:
+        async for r in self._admin_cmd(event, self.admin_handler.form_backfill):
             yield r
 
     @filter.command("主场天气")

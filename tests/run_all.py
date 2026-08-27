@@ -18,6 +18,7 @@ MODULES = [
     "tests.s7_file_import",
     "tests.s8_charts",
     "tests.s9_listeners",
+    "tests.s10_backfill",
 ]
 
 

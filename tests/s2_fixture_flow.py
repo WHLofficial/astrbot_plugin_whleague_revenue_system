@@ -380,6 +380,28 @@ async def test_record_cancelled_match():
         await env.teardown()
 
 
+async def test_first_two_rounds_neutral_form():
+    """历史不足 3 场时录入一律按中性 4 分（v2.5.1 规则），第 4 场起恢复实际积分。"""
+    env = await TestEnv().setup()
+    try:
+        await env.fixture_service.import_fixtures(
+            "1 利物浦 巴塞罗那\n2 利物浦 巴塞罗那\n"
+            "3 利物浦 巴塞罗那\n4 利物浦 巴塞罗那\n"
+        )
+        r1 = await env.fixture_service.record_results(1, "利物浦 胜")
+        assert r1["results"][0]["form_pts"] == 4, r1
+        r2 = await env.fixture_service.record_results(2, "利物浦 胜")
+        assert r2["results"][0]["form_pts"] == 4, r2
+        # 第 3 场录入时历史仍只有 2 场，实际积分已是 6 也强制中性（旧规则会返回 6）
+        r3 = await env.fixture_service.record_results(3, "利物浦 胜")
+        assert r3["results"][0]["form_pts"] == 4, r3
+        # 第 4 场起近 3 场凑满，恢复真实积分（W,W,W → 9）
+        r4 = await env.fixture_service.record_results(4, "利物浦 平")
+        assert r4["results"][0]["form_pts"] == 9, r4
+    finally:
+        await env.teardown()
+
+
 async def test_cancelled_excluded_from_form_points():
     """状态积分忽略取消场次：不占「近 3 场」窗口，往前补足 3 场已赛。"""
     env = await TestEnv().setup()

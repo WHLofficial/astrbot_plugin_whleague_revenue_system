@@ -234,6 +234,21 @@ async def test_form_pts_skips_cancelled():
     assert formula.form_pts(["C", "C", "C"]) == 0
 
 
+async def test_effective_form_pts():
+    """非取消场次不足 3 场一律按中性 4 分；满 3 场恢复实际积分。"""
+    assert formula.NEUTRAL_FORM_PTS == 4
+    assert formula.effective_form_pts([]) == 4
+    assert formula.effective_form_pts(["W"]) == 4
+    assert formula.effective_form_pts(["L", "D"]) == 4  # 实际仅 1 分也强制中性
+    assert formula.effective_form_pts(["C", "W"]) == 4
+    assert formula.effective_form_pts(["C", "C"]) == 4
+    assert formula.effective_form_pts(["W", "W"]) == 4
+    # 满 3 场后走真实路径（取消不占名额照常跳过）
+    assert formula.effective_form_pts(["W", "L", "L"]) == 3
+    assert formula.effective_form_pts(["W", "W", "D"]) == 7
+    assert formula.effective_form_pts(["C", "L", "L", "W"]) == 3
+
+
 def run_all():
     import asyncio
 

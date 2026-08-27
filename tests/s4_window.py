@@ -100,17 +100,17 @@ async def test_settle_fans_evolution_asymmetric():
 async def test_evolve_once_per_settle():
     env = await TestEnv().setup()
     try:
-        # 4 队均离目标、无已录赛果（上座率中性 1.0、战绩修正 ×0.95）
+        # 4 队均离目标、无已录赛果（上座率中性 1.0；v2.5.1 起不足 3 场按中性
+        # 4 分，不再触发 ±5% 战绩修正）；单轮演化：
+        # 1800 + 1200×0.5×(0.6+0.4×1.0) = 2400；
+        # 旧实现会按球队数重复演化（4 队 → 约 2668）
         for team, infl in (("利物浦", 150.0), ("巴塞罗那", 100.0),
                            ("纽卡斯尔联", 120.0), ("勒沃库森", 120.0)):
             await env.stadium_service.import_attributes(team, influence=infl)
         await env.window_service.settle()
-        from astrbot_plugin_whleague_revenue_system.services import formula
 
         fans = (await env.dao.get_stadium("利物浦"))["fans_diehards"]
-        # 单轮演化：1800 + 1200×0.5×(0.6+0.4×1.0) = 2400，再 ×0.95 = 2280；
-        # 旧实现会按球队数重复演化（4 队 → 约 2668）
-        assert abs(fans - 2280.0) < 0.01, f"应仅演化一轮: {fans}"
+        assert abs(fans - 2400.0) < 0.01, f"应仅演化一轮: {fans}"
     finally:
         await env.teardown()
 

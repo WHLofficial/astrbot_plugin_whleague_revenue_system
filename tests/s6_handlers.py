@@ -16,6 +16,8 @@ class _FakeEvent:
         self.sender = sender
         self.admin = is_admin
         self.results = []
+        # advance() 记录推进来源会话用
+        self.unified_msg_origin = f"fake_session_{sender}"
 
     def get_message_str(self):
         return self.message
@@ -40,7 +42,7 @@ class _FakeEvent:
 async def test_plugin_import_and_commands():
     from astrbot_plugin_whleague_revenue_system import main as plugin_main
 
-    # 检查注册的命令名（v2.2：40 个，管理 29 + 玩家 11）
+    # 检查注册的命令名（v2.5.1：41 个，管理 30 + 玩家 11）
     src = inspect.getsource(plugin_main)
     expected_commands = [
         "主场赛程导入", "主场天气", "主场天气覆盖", "主场赛果录入", "主场推进", "主场赛季命名",
@@ -52,6 +54,7 @@ async def test_plugin_import_and_commands():
         "主场帮助", "主场", "主场轮次统计", "主场赛季统计",
         "主场档期", "主场冠名", "主场退冠名", "主场财务",
         "主场轮次统计图", "主场赛季走势图", "主场轮次预告图",
+        "主场战绩补差",
     ]
     for cmd in expected_commands:
         assert f'@filter.command("{cmd}"' in src, f"缺少命令注册: {cmd}"
