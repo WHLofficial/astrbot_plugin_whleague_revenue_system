@@ -212,6 +212,10 @@
 - 只读谈判系统数据库（`negotiation_db_path` 配置，留空自动探测）：球队列表、QQ↔球队绑定
 - 玩家命令通过绑定关系定位自己的球队；谈判库不可用时自动回退纯管理员模式
 - 赛季/窗口节奏由本插件独立维护（`/主场推进 窗口` 与谈判插件的 `/进入下个窗口` 各自推进）
+- v2.6 起提供联赛状态监听器扩展点：外部插件经 `register_state_listener(fn)` 幂等登记，
+  `/主场推进 窗口|赛季` 成功后广播
+  `{"event": "window_advanced"|"season_advanced", "season_number", "window_seq"[, "name"]}`；
+  单个监听器异常仅告警、不影响推进流程（成长系统的「赛程对齐提醒」即基于此）
 
 ## 十二、配置与数据
 
@@ -230,7 +234,7 @@
 ## 十三、开发
 
 ```
-python tests/run_all.py    # 129 项零依赖测试（astrbot 桩 + 临时数据库 + LLM 桩）
+python tests/run_all.py    # 133 项零依赖测试（astrbot 桩 + 临时数据库 + LLM 桩）
 ```
 
 目录结构照搬谈判系统分层惯例：`main.py`（薄命令层）→ `handlers/` → `services/` →

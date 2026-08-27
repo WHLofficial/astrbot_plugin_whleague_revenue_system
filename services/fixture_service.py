@@ -133,11 +133,14 @@ def parse_result_lines(text: str) -> list[tuple[str, str, str | None]]:
 
 
 class FixtureService:
-    def __init__(self, db, dao, cfg, stadium_service: StadiumService | None = None):
+    def __init__(self, db, dao, cfg, stadium_service: StadiumService | None = None,
+                 state_listeners: list | None = None):
         self._db = db
         self._dao = dao
         self._cfg = cfg
         self._stadium_service = stadium_service
+        # 联赛状态监听器（由 main 注入共享列表；外部插件可经 register_state_listener 登记）
+        self.state_listeners = state_listeners if state_listeners is not None else []
 
     # ─── 赛季状态 ─────────────────────────────────────────
 
@@ -148,12 +151,24 @@ class FixtureService:
             state = await self._dao.get_league_state()
         return state
 
+    async def _notify_state(self, event: dict) -> None:
+        """推进成功后广播给已注册监听器；单个异常只告警，不影响主流程与其余监听器。"""
+        for fn in list(self.state_listeners):
+            try:
+                res = fn(event)
+                if hasattr(res, "__await__"):
+                    await res
+            except Exception as e:
+                logger.warning(f"联赛状态监听器执行失败（已忽略）: {e}")
+
     async def advance_window(self, updated_by: str) -> dict:
         state = await self.get_state()
         season = state["season_number"]
         window_seq = state["window_seq"] + 1
         await self._dao.update_league_state(season, window_seq, 0, updated_by)
-        return {"season_number": season, "window_seq": window_seq}
+        result = {"season_number": season, "window_seq": window_seq}
+        await self._notify_state({"event": "window_advanced", **result})
+        return result
 
     async def advance_season(self, updated_by: str, name: str | None = None) -> dict:
         # 名称先校验再推进：非法（含空白名）时整体不推进（窗口/轮次状态不动）
@@ -162,7 +177,9 @@ class FixtureService:
         await self._dao.update_league_state(season, 1, 0, updated_by)
         if new_name:
             await self._dao.set_season_name(season, new_name, updated_by)
-        return {"season_number": season, "window_seq": 1, "name": new_name}
+        result = {"season_number": season, "window_seq": 1, "name": new_name}
+        await self._notify_state({"event": "season_advanced", **result})
+        return result
 
     async def name_season(self, name: str, updated_by: str) -> dict:
         """给当前赛季命名/改名（纯展示标签，可反复改；身份仍是整数序号）。"""

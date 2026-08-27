@@ -1,7 +1,7 @@
 import json
 import os
 
-PLUGIN_VERSION = "2.5.0"
+PLUGIN_VERSION = "2.6.0"
 """插件版本号，与 metadata.yaml 保持一致。"""
 
 _SCHEMA_PATH = os.path.join(

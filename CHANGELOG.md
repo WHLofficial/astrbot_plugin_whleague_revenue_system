@@ -5,6 +5,17 @@
 
 ## [Unreleased]
 
+## [2.6.0] - 2026-08-27
+
+### Added
+
+- **联赛状态监听器扩展点**：`StadiumPlugin.register_state_listener(fn)`（幂等登记）——
+  `/主场推进 窗口`、`/主场推进 赛季 [名称]` 成功后向全部监听器广播
+  `{"event": "window_advanced"|"season_advanced", "season_number", "window_seq"[, "name"]}`；
+  支持同步与异步回调，单个监听器异常仅记 warning、不阻断推进流程亦不影响其余监听器。
+  供成长系统（astrbot_plugin_whleague_growth_system）等外部插件做实时联动提醒。
+
+
 ## [2.5.0] - 2026-08-24
 
 ### Added

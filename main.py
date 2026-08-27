@@ -29,6 +29,17 @@ class StadiumPlugin(Star):
         super().__init__(context)
         self.config = config
         """AstrBot 托管的插件配置（WebUI 中可见、可修改），见 _conf_schema.json。"""
+        self._state_listeners: list = []
+        """联赛状态变更监听器（advance_window/advance_season 后广播），供外部插件登记。"""
+
+    def register_state_listener(self, fn) -> bool:
+        """注册联赛状态监听器（幂等）。fn(event) 收到：
+        {"event": "window_advanced"|"season_advanced", "season_number": int, "window_seq": int[, "name"]}
+        返回是否为新注册。"""
+        if any(existing is fn for existing in self._state_listeners):
+            return False
+        self._state_listeners.append(fn)
+        return True
 
     async def initialize(self) -> None:
         self.db = DatabaseManager()
@@ -59,7 +70,8 @@ class StadiumPlugin(Star):
         self.brand_service = BrandService(self.db, self.dao, self.config_cache, self.llm_writer)
         self.event_engine = EventEngine(self.db, self.dao, self.config_cache, self.llm_writer)
         self.fixture_service = FixtureService(
-            self.db, self.dao, self.config_cache, self.stadium_service
+            self.db, self.dao, self.config_cache, self.stadium_service,
+            state_listeners=self._state_listeners,
         )
         self.window_service = WindowService(
             self.db, self.dao, self.config_cache, self.fans_service, self.brand_service,
