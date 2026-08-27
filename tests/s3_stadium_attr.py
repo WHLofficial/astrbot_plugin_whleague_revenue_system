@@ -72,11 +72,17 @@ async def test_validation_errors():
             raise AssertionError("tier 2 未开放应被拒绝")
         except StadiumError:
             pass
-        # 等级内容量下限（1 级下限 2 万）
+        # 档位不再限制座位下限（1 级下限 2 万，1.5 万座应被接受并照常收扩建费）
         await env.stadium_service.import_attributes("利物浦", tier=1)
+        result = await env.stadium_service.import_attributes("利物浦", capacity=15000)
+        assert result["stadium"]["capacity"] == 15000
+        txs = await env.dao.list_transactions("利物浦", season=1, window_seq=1)
+        expand = [t for t in txs if t["kind"] == "expand"]
+        assert expand and abs(expand[0]["amount"] + 3.0) < 1e-6, expand  # 3000 座 × 0.1/100
+        # 上限仍然生效（1 级上限 3.5 万）
         try:
-            await env.stadium_service.import_attributes("利物浦", capacity=15000)
-            raise AssertionError("1 级容量 1.5 万应被拒绝")
+            await env.stadium_service.import_attributes("利物浦", capacity=40000)
+            raise AssertionError("1 级容量 4 万应被拒绝")
         except StadiumError:
             pass
     finally:

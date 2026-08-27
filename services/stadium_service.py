@@ -96,10 +96,9 @@ class StadiumService:
             raise StadiumError(f"未知等级 {tier}")
 
     def _validate_capacity_for_tier(self, tier: int, capacity: int) -> None:
-        t = formula.tier_config(self._cfg, tier)
-        lo, hi = int(t["min_seats"]), int(t["max_seats"])
-        if not (lo <= capacity <= hi):
-            raise StadiumError(f"容量 {capacity:,} 不在等级 {tier} 的座位范围 [{lo:,}, {hi:,}] 内")
+        hi = int(formula.tier_config(self._cfg, tier)["max_seats"])
+        if capacity > hi:
+            raise StadiumError(f"容量 {capacity:,} 超过等级 {tier} 的座位上限 {hi:,}")
 
     # ─── 属性导入 ─────────────────────────────────────────
 
