@@ -24,8 +24,9 @@ class FansService:
         return total / (capacity * len(played))
 
     async def window_form_pts(self, team_name: str) -> int:
+        """近 3 场 Pts；非取消场次不足 3 场时按中性（与赛果录入路径一致）。"""
         results = await self._dao.get_last_results(team_name, 3)
-        return formula.form_pts([r["result"] for r in results])
+        return formula.effective_form_pts([r["result"] for r in results])
 
     async def evolve(self, season: int, window_seq: int) -> list[dict]:
         """对所有球场执行一次死忠演化，返回各队变动摘要。"""

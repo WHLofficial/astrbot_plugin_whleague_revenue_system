@@ -31,6 +31,8 @@ class StadiumPlugin(Star):
         """AstrBot 托管的插件配置（WebUI 中可见、可修改），见 _conf_schema.json。"""
         self._state_listeners: list = []
         """联赛状态变更监听器（advance_window/advance_season 后广播），供外部插件登记。"""
+        self.last_advance_session: str | None = None
+        """最近一次 /主场推进 命令的会话（unified_msg_origin），供监听方回发提醒。"""
 
     def register_state_listener(self, fn) -> bool:
         """注册联赛状态监听器（幂等）。fn(event) 收到：

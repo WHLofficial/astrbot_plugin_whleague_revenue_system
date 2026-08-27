@@ -200,6 +200,8 @@ class AdminHandler:
         if deny:
             yield event.plain_result(deny)
             return
+        # 供状态监听方（如成长插件）定位提醒回发的会话
+        self._plugin.last_advance_session = event.unified_msg_origin
         parts = event.get_message_str().split(maxsplit=2)
         if len(parts) < 2:
             yield event.plain_result(

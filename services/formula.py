@@ -271,6 +271,15 @@ def form_coef(cfg: dict, pts: int) -> float:
     return float(table.get(key, 1.0))
 
 
+NEUTRAL_FORM_PTS = 4
+
+
+def effective_form_pts(results: list) -> int:
+    """近 3 场 Pts，非取消场次不足 3 场时按中性（S8 默认 Pts=4 → 系数 1.0）。"""
+    played = sum(1 for r in results if str(r).strip().upper() != "C")
+    return form_pts(results) if played >= 3 else NEUTRAL_FORM_PTS
+
+
 def opponent_coef(home_influence: float, away_influence: float) -> float:
     """对手系数 = 1 + 5%×客队影响力/主队影响力（S8 真实拉力）。"""
     if home_influence <= 0:

@@ -5,6 +5,11 @@
 
 ## [Unreleased]
 
+### Added
+
+- **推进命令来源会话记录**：`/主场推进` 执行时暂存 `StadiumPlugin.last_advance_session`
+  （unified_msg_origin），供状态监听方（成长插件）在推进后向原群回发联动提醒。
+
 ## [2.6.0] - 2026-08-27
 
 ### Added

@@ -391,10 +391,8 @@ class FixtureService:
             away_stadium["influence"]
             if away_stadium else float(self._cfg.get("default_influence", 90.0))
         )
-        form_pts = 4  # 无历史赛果时按中性（S8 默认 Pts=4）
         recent = await self._dao.get_last_results(home, 3)
-        if recent:
-            form_pts = formula.form_pts([r["result"] for r in recent])
+        form_pts = formula.effective_form_pts([r["result"] for r in recent])
 
         facilities = await self._dao.get_facilities(home)
         commercial_level = facilities.get(formula.FACILITY_COMMERCIAL, 0)
