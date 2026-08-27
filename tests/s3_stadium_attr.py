@@ -12,12 +12,12 @@ from astrbot_plugin_whleague_revenue_system.services.stadium_service import Stad
 async def test_import_attributes_and_costs():
     env = await TestEnv(cfg_override={"max_open_tier": 4}).setup()
     try:
-        # 首次导入自动建场（默认 1.2 万座 0 级、默认影响力 90 → 死忠 1800）
+        # 首次导入自动建场（默认 1.2 万座 0 级、默认影响力 90 → 阶梯死忠 2340）
         result = await env.stadium_service.import_attributes("利物浦", influence=150.0)
         assert result["stadium"]["capacity"] == 12000
         assert result["stadium"]["tier"] == 0
         # 死忠不随影响力即时跳变（演化在窗口结算进行），初始为默认影响力目标
-        assert abs(result["stadium"]["fans_diehards"] - 1800.0) < 1e-6
+        assert abs(result["stadium"]["fans_diehards"] - 2340.0) < 1e-6
         assert abs(result["stadium"]["influence"] - 150.0) < 1e-6
 
         # 扩容 12000 → 20000：差量 8000 座 × 0.1/100 = 8M

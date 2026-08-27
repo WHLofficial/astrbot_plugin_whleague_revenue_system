@@ -10,10 +10,10 @@ from astrbot_plugin_whleague_revenue_system.config.defaults import DEFAULT_CONFI
 from astrbot_plugin_whleague_revenue_system.services import formula  # noqa: E402
 
 INFLUENCES = {
-    "min": (88.55, 1771),
-    "median": (126.41, 2528),
-    "mean": (134.68, 2694),
-    "max": (214.42, 4288),
+    "min": (88.55, 2302),
+    "median": (126.41, 3261),
+    "mean": (134.68, 3443),
+    "max": (214.42, 4773),
 }
 CAPACITY0 = 12000
 
@@ -23,10 +23,31 @@ def _cfg():
 
 
 async def test_diehard_target():
+    """饱和阶梯：26/22/15/12 三断点 120/160/200，逐带分段线性累计。"""
     cfg = _cfg()
     for name, (infl, fans) in INFLUENCES.items():
         got = formula.diehard_target(cfg, infl)
         assert abs(got - fans) < 1, f"{name}: target {got} != {fans}"
+    # 锚点：断点处取带内斜率满额
+    anchors = {
+        100: 2600, 120: 3120, 126.41: 3261.02, 160: 4000,
+        200: 4600, 214.42: 4773.04, 248: 5176, 277.28: 5527.36, 300: 5800,
+    }
+    for infl, exp in anchors.items():
+        got = formula.diehard_target(cfg, infl)
+        assert abs(got - exp) < 1e-9, f"{infl}: {got} != {exp}"
+    # 跨带连续（断点两侧差 < 1）
+    for bp in (120, 160, 200):
+        left = formula.diehard_target(cfg, bp - 0.01)
+        right = formula.diehard_target(cfg, bp + 0.01)
+        assert abs(left - right) < 1.0, f"断点 {bp} 不连续: {left} vs {right}"
+    # 回退：表非法/缺失 → 线性 死忠系数×影响力
+    cfg2 = dict(cfg)
+    cfg2["fans_target_table"] = "{bad json"
+    assert abs(formula.diehard_target(cfg2, 150) - 3000) < 1e-9
+    cfg3 = dict(cfg)
+    cfg3.pop("fans_target_table")
+    assert abs(formula.diehard_target(cfg3, 100) - 2000) < 1e-9
     assert formula.diehard_target(cfg, 214.42) <= float(cfg["fans_cap"]), "死忠目标应低于上限"
 
 
@@ -39,7 +60,7 @@ async def test_attendance_multiplier_ladder():
 
 
 async def test_opening_attendance_four_brackets():
-    """开局 0 级 1.2 万座：弱队半满、中游 8 成多、头部坐满。"""
+    """开局 0 级 1.2 万座：弱队（阶梯 2302）约八成上座，中游与头部坐满。"""
     cfg = _cfg()
     import random
 
@@ -52,13 +73,9 @@ async def test_opening_attendance_four_brackets():
             home_influence=infl, away_influence=infl,
         )
         if name == "min":
-            assert 6300 <= att <= 8000, f"min: {att}"
-        elif name == "median":
-            assert 9300 <= att <= 11100, f"median: {att}"
-        elif name == "mean":
-            assert 9900 <= att <= 11800, f"mean: {att}"
+            assert 9000 <= att <= 10200, f"min: {att}"
         else:
-            assert att == CAPACITY0, f"max 应坐满: {att}"
+            assert att == CAPACITY0, f"{name} 应坐满: {att}"
 
 
 async def test_weather_ranges():
@@ -144,7 +161,7 @@ async def test_asymmetric_fans_evolution():
     drop55 = formula.fans_drop_coef(cfg, 0.55)
     assert abs(grow55 - 0.41) < 1e-9, grow55
     assert abs(drop55 - 0.68) < 1e-9, drop55
-    # 卖核例子：214 → 150，w1 ≈ 3412（DropCoef 0.68，Pts 中性）
+    # 示例：fans 4288 → target 3000，DropCoef 0.68（Pts 中性）
     fans = formula.evolve_fans(cfg, fans=4288, target=3000, attend_rate=0.55, form_pts_value=4)
     assert 3400 <= fans <= 3430, fans
 
@@ -164,9 +181,9 @@ async def test_activity_income():
 
 async def test_naming_fee():
     cfg = _cfg()
-    fee = formula.naming_fee(cfg, 35000, 2528, 1.0)
+    fee = formula.naming_fee(cfg, 35000, 3261, 1.0)
     # 公式保留 3 位小数
-    assert abs(fee - 1.58) < 1e-6, fee
+    assert abs(fee - 1.589) < 1e-6, fee
 
 
 async def test_parse_round_token():

@@ -1,21 +1,25 @@
-"""战绩系数补差（v2.5.1）：修复「近 3 场不足 3 场未中性化」的历史数据。
+"""主场统一补差（v2.8.0）：战绩系数修正 + 死忠重定基，一条命令完成。
 
-背景：v2.5.1 之前，赛果录入在历史场次为 1~2 场时直接按实际积分查表，
-只有 0 场才兜底中性 4 分；窗口结算的死忠演化的近 3 场取数同样没有兜底。
+战绩成分（延续 v2.5.1）：修复「近 3 场不足 3 场未中性化」的历史数据——
+旧码在历史场次 1~2 场时直接按实际积分查表，只有 0 场才兜底中性 4 分；
 新规则改为「非取消场次不足 3 场一律按中性 4 分」（formula.effective_form_pts）。
-
-补差范围（仅当前赛季）：
-- 上座与票房：对本赛季每个主场回放录入时的球队全史非取消主场数 n：
+- 上座与票房：对本赛季每个主场回放录入时的球队全史非取消主场数 n，
   n∈{1,2} 才受影响（n=0 旧码本就中性，n≥3 新旧一致）；
   旧分按 0 场兜底 4 / 否则实际积分复现，上座按 新系数/旧系数 等比缩放并钳到现容量，
-  票务与商业收入同比例缩放（均对上座线性），转播收入与上座无关不动。
+  票务与商业收入改按实际入库上座等比缩放（v2.7.0 按系数缩放，在容量钳死时
+  会出现上座不变而收入增加的谬账，v2.8.0 顺修）；转播收入与上座无关不动。
   注：容量钳制用现值而非当年值——设施升级只影响 broadcast 及账外的建设券，
   对 ticket/commercial 无影响，此处差异可忽略。
-- 死忠回补：结算时的演化修正为 Pts≥7 +5% / ≤1 −5%；不足 3 场凑不出 ≥7 分，
-  只存在多扣的 −5%。逐个当前赛季已结算窗口重建「结算时点近 3 场」，
-  凑不满 3 场且实际 Pts≤1 的记一次 k，死忠回补为 原值 / 0.95^k（近似还原，
-  与向影响力目标均衡回归叠加后的精确值略有偏差，属可接受误差）。
-  因此补差应在部署后、下一次窗口结算前执行，否则会误算新规则的窗口。
+
+死忠重定基（v2.8.0 新增）：死忠目标从「影响力×20」线性改为饱和阶梯
+（formula.fans_target_table 分段线性），历史死忠由旧线性规则演化而来，
+逐队一次性重定基到 round(新目标)：与现值差 <1 的跳过，≥1 的直接改写
+stadium.fans_diehards（不动流水，不追算中间窗口）。
+
+兼容：v2.7.0 的战绩补差标记（LEGACY_MARKER_KEY）视为战绩成分已完成，
+本次跳过战绩只做死忠重定基；旧标记是补差流水口径的关键——scan 无法凭
+库内数值区分「旧规则录入」与「新规则录入」的 n∈{1,2} 场次，伪阳性的
+排除依赖部署时序（部署后、下一次窗口结算前执行）。
 
 幂等：落库后写入 plugin_config 标记（MARKER_KEY），再次调用拒绝执行。
 """
@@ -27,8 +31,8 @@ import json
 from . import formula
 from .formula import NEUTRAL_FORM_PTS
 
-MARKER_KEY = "backfill_form_neutral_done"
-FANS_FACTOR = 0.95
+MARKER_KEY = "backfill_home_unified_done"
+LEGACY_MARKER_KEY = "backfill_form_neutral_done"
 
 
 class BackfillError(Exception):
@@ -50,59 +54,67 @@ class BackfillService:
         season = int(state["season_number"])
 
         marker = await self._dao.get_config(MARKER_KEY)
+        # 旧版战绩补差已执行 → 战绩成分跳过，只做死忠重定基
+        form_done = await self._dao.get_config(LEGACY_MARKER_KEY) is not None
 
-        capacities = {}
-        fans_now = {}
+        capacities: dict[str, int] = {}
+        fans_now: dict[str, float] = {}
+        influences: dict[str, float] = {}
         for s in await self._dao.list_stadiums():
             capacities[s["team_name"]] = s["capacity"]
             fans_now[s["team_name"]] = s["fans_diehards"]
+            influences[s["team_name"]] = s["influence"]
 
         affected: list[dict] = []
         team_totals: dict[str, dict] = {}
-        for team in sorted(capacities):
-            hist = [
-                m for m in await self._dao.get_home_matches_all(team)
-                if str(m["result"]).strip().upper() != "C"
-            ]
-            priors: list[str] = []
-            for m in hist:
-                n = len(priors)
-                if (
-                    int(m["season_number"]) == season
-                    and 0 < n < 3
-                    and m["attendance"] is not None
-                ):
-                    old_pts = _legacy_form_pts(n, priors)
-                    if old_pts != NEUTRAL_FORM_PTS:
-                        affected.append(
-                            self._scale(m, team, n, old_pts,
-                                        capacities.get(team))
-                        )
-                priors.append(str(m["result"]).strip().upper())
+        if not form_done:
+            for team in sorted(capacities):
+                hist = [
+                    m for m in await self._dao.get_home_matches_all(team)
+                    if str(m["result"]).strip().upper() != "C"
+                ]
+                priors: list[str] = []
+                for m in hist:
+                    n = len(priors)
+                    if (
+                        int(m["season_number"]) == season
+                        and 0 < n < 3
+                        and m["attendance"] is not None
+                    ):
+                        old_pts = _legacy_form_pts(n, priors)
+                        if old_pts != NEUTRAL_FORM_PTS:
+                            affected.append(
+                                self._scale(m, team, n, old_pts,
+                                            capacities.get(team))
+                            )
+                    priors.append(str(m["result"]).strip().upper())
 
-            for a in (x for x in affected if x["home"] == team):
-                t = team_totals.setdefault(
-                    team, {"team": team, "d_attendance": 0,
-                           "d_ticket": 0.0, "d_commercial": 0.0})
-                t["d_attendance"] += a["d_att"]
-                t["d_ticket"] += a["d_ticket"]
-                t["d_commercial"] += a["d_commercial"]
+                for a in (x for x in affected if x["home"] == team):
+                    t = team_totals.setdefault(
+                        team, {"team": team, "d_attendance": 0,
+                               "d_ticket": 0.0, "d_commercial": 0.0})
+                    t["d_attendance"] += a["d_att"]
+                    t["d_ticket"] += a["d_ticket"]
+                    t["d_commercial"] += a["d_commercial"]
 
-        fans_fixes = await self._scan_fans(season, capacities)
+        fans = []
+        for team in sorted(fans_now):
+            after = int(round(formula.diehard_target(
+                self._cfg, influences.get(team, 0.0))))
+            if abs(after - fans_now[team]) >= 1:
+                fans.append({
+                    "team": team, "before": fans_now[team], "after": after,
+                    "delta": after - fans_now[team],
+                })
+
         return {
             "done": marker is not None,
             "marker": json.loads(marker) if marker else None,
             "season": season,
+            "form_done": form_done,
             "affected": affected,
             "teams": list(team_totals.values()),
-            "fans": [
-                {
-                    "team": team, "k": k,
-                    "before": fans_now[team],
-                    "after": int(round(fans_now[team] / FANS_FACTOR ** k)),
-                }
-                for team, k in sorted(fans_fixes.items()) if k > 0
-            ],
+            "fans": fans,
         }
 
     def _scale(self, m: dict, home: str, n: int, old_pts: int,
@@ -114,10 +126,12 @@ class BackfillService:
         att_new = int(round(att_old * ratio))
         if capacity:
             att_new = min(att_new, capacity)
+        # 收入跟随实际入库上座（钳容量时 ratio 折算为 0 增量）
+        rev_ratio = att_new / att_old if att_old > 0 else 0.0
         t_old = float(m["ticket_revenue"] or 0.0)
         c_old = float(m["commercial"] or 0.0)
-        t_new = round(t_old * ratio, 4)
-        c_new = round(c_old * ratio, 4)
+        t_new = round(t_old * rev_ratio, 4)
+        c_new = round(c_old * rev_ratio, 4)
         return {
             "id": m["id"], "season": int(m["season_number"]),
             "window_seq": m["window_seq"], "round_no": m["round_no"],
@@ -133,39 +147,14 @@ class BackfillService:
             "d_commercial": round(c_new - c_old, 4),
         }
 
-    async def _scan_fans(self, season: int, capacities: dict) -> dict[str, int]:
-        """逐个已结算窗口重放「结算时点的近 3 场」，统计每队被多扣 −5% 的次数。"""
-        summaries = await self._dao.list_window_summaries(season)
-        if not summaries:
-            return {}
-        ks: dict[str, int] = {}
-        for team in capacities:
-            hist = [
-                m for m in await self._dao.get_home_matches_all(team)
-                if str(m["result"]).strip().upper() != "C"
-            ]
-            for sm in summaries:
-                w = int(sm["window_seq"])
-                upto = [
-                    m for m in hist
-                    if int(m["season_number"]) < season
-                    or (int(m["season_number"]) == season
-                        and int(m["window_seq"]) <= w)
-                ]
-                if len(upto) >= 3:
-                    continue
-                if formula.form_pts([m["result"] for m in upto[-3:]]) <= 1:
-                    ks[team] = ks.get(team, 0) + 1
-        return ks
-
     # ─── 落库 ────────────────────────────────────────────
 
     async def apply(self) -> dict:
         if await self._dao.get_config(MARKER_KEY):
-            raise BackfillError("战绩系数补差已执行过，不可重复执行（详见预览中的标记信息）")
+            raise BackfillError("主场补差已执行过，不可重复执行（详见预览中的标记信息）")
         data = await self.scan()
         if data["done"]:
-            raise BackfillError("战绩系数补差已执行过，不可重复执行")
+            raise BackfillError("主场补差已执行过，不可重复执行")
 
         async def work(conn):
             for a in data["affected"]:
@@ -215,6 +204,7 @@ class BackfillService:
                     "executed_season": data["season"],
                     "matches": len(data["affected"]),
                     "fans_teams": len(data["fans"]),
+                    "form_skipped": data["form_done"],
                 }, ensure_ascii=False)),
             )
 

@@ -1,10 +1,15 @@
-"""战绩系数补差测试：旧库模拟 → 预览方向/落库账务/幂等，以及 n=0 数据零受影响护栏。
+"""主场统一补差测试（v2.8.0）：旧库模拟 → 预览方向/落库账务/死忠重定基/幂等。
 
-scan 无法凭库内数值区分「旧规则录入」与「新规则录入」（n∈{1,2} 的早期轮次
-两代系数本就不同）——因此全量回归重点在方向与账务正确性；伪阳性的排除
-依赖部署时序（部署后立即预览/确认），由 handler 提示文案保证。
+战绩成分：scan 无法凭库内数值区分「旧规则录入」与「新规则录入」
+（n∈{1,2} 的早期轮次两代系数本就不同）——因此全量回归重点在方向与
+账务正确性；伪阳性的排除依赖部署时序（部署后立即预览/确认），
+由 handler 提示文案保证。收入跟随实际入库上座（容量钳死时零增量）。
+
+死忠成分：不做 0.95^k 近似回补，改为按饱和阶梯目标逐队一次性重定基
+（round(diehard_target(cfg, influence))，与现值差 ≥1 才入清单）。
 """
 
+import json
 import sys
 import os
 
@@ -13,6 +18,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from tests.common import TestEnv  # noqa: E402
 from astrbot_plugin_whleague_revenue_system.services import formula  # noqa: E402
 from astrbot_plugin_whleague_revenue_system.services.backfill_service import (  # noqa: E402
+    LEGACY_MARKER_KEY,
     MARKER_KEY,
     BackfillError,
     BackfillService,
@@ -49,13 +55,15 @@ async def _corrupt_legacy(env, m, att_old: int, letter: str) -> dict:
 
 
 async def _scale_expected(env, home: str, pts_old: int, corr: dict) -> dict:
-    """镜像 services/backfill_service._scale 的算术（含按现容量钳制）。"""
+    """镜像 services/backfill_service._scale 的算术（含按现容量钳制）：
+    上座先按系数比缩放并钳容量，收入再跟随实际入库上座。"""
     cap = (await env.dao.get_stadium(home))["capacity"]
     ratio = formula.form_coef(env.cfg, NEUTRAL) / formula.form_coef(env.cfg, pts_old)
     att_new = min(int(round(corr["att"] * ratio)), cap)
+    rev_ratio = att_new / corr["att"] if corr["att"] > 0 else 0.0
     # 与 services/backfill_service._scale 同构：先舍入总额，再由总额差取差额
-    t_new = round(corr["t"] * ratio, 4)
-    c_new = round(corr["c"] * ratio, 4)
+    t_new = round(corr["t"] * rev_ratio, 4)
+    c_new = round(corr["c"] * rev_ratio, 4)
     return {
         "att_new": att_new,
         "d_att": att_new - corr["att"],
@@ -72,11 +80,11 @@ _RESULT_COLS = ("result", "score", "attendance", "ticket_revenue",
 
 async def test_backfill_scan_and_apply():
     """旧库模拟：系数偏低的场次上调、两连胜 1.10 的场次下调；
-    余额重算差额 = 各场票房/商业补差和；死忠只回补结算时点凑不满
-    3 场且积分≤1 的队伍；完成后幂等拒绝二次执行。
+    余额重算差额 = 各场票房/商业补差和；死忠按阶梯目标一次性重定基
+   （已对齐的队伍不动）；完成后幂等拒绝二次执行。
 
-    窗口语义：第 1 轮在窗口 1 结算（A 仅 1 场负 → 演化曾多扣 −5%），
-    第 2~4 轮在推进后的窗口 2 录入/伪造。"""
+    窗口语义：第 1 轮在窗口 1 结算（A 仅 1 场负），第 2~4 轮在推进后的
+    窗口 2 录入/伪造。"""
     env = await TestEnv().setup()
     try:
         svc = BackfillService(env.db, env.dao, env.cfg)
@@ -124,16 +132,18 @@ async def test_backfill_scan_and_apply():
         expect = {k: await _scale_expected(env, k[0], v, corr[k])
                   for k, v in legacy_pts.items()}
 
-        # 死忠 k（忠实复现旧规则伤害）：窗口 1 结算时，A 仅 1 场负 →
-        # 旧代码近 3 场 pts=0 ≤1 → ×0.95；纽卡斯尔联零主场 → 旧代码
-        # pts 同为 0 → 也被扣；B/C 有胜绩不受影响
+        # 死忠重定基：建场死忠 = 默认影响力 90 的阶梯目标，天然对齐不入清单；
+        # 人为偏离的两队（A/B）应出现在预览里，重定基方向为回落到目标
         fans_before_map = {s["team_name"]: s["fans_diehards"]
                            for s in await env.dao.list_stadiums()}
+        infl_a = (await env.dao.get_stadium("利物浦"))["influence"]
+        target = int(round(formula.diehard_target(env.cfg, infl_a)))
         await env.dao.update_fans("利物浦", 4000.0)
-        await env.dao.add_window_summary(1, 1)
+        await env.dao.update_fans("巴塞罗那", 5000.0)
 
         scan = await svc.scan()
         assert scan["done"] is False and scan["season"] == 1
+        assert scan["form_done"] is False
         by_key = {(a["home"], a["round_no"]): a for a in scan["affected"]}
         assert set(by_key) == set(corr), sorted(by_key)
         for key, exp in expect.items():
@@ -146,14 +156,12 @@ async def test_backfill_scan_and_apply():
             "系数偏低（不足三分查表）的场次应上调"
         assert by_key[("勒沃库森", 3)]["d_att"] < 0, \
             "两连胜 1.10 场次应下调"
-        # 死忠 k：A（1 场负）与纽卡斯尔联（零历史）在窗口 1 结算时均被旧规则多扣 −5%
+        # 死忠重定基清单：仅人为偏离的 A/B
         fans_by_team = {f["team"]: f for f in scan["fans"]}
-        assert {t: f["k"] for t, f in fans_by_team.items()} \
-            == {"利物浦": 1, "纽卡斯尔联": 1}
-        f_a = fans_by_team["利物浦"]
-        assert f_a["before"] == 4000 and f_a["after"] == int(round(4000 / 0.95))
-        nkc_before = fans_before_map["纽卡斯尔联"]
-        assert fans_by_team["纽卡斯尔联"]["after"] == int(round(nkc_before / 0.95))
+        assert set(fans_by_team) == {"利物浦", "巴塞罗那"}, scan["fans"]
+        assert fans_by_team["利物浦"]["before"] == 4000
+        assert fans_by_team["利物浦"]["after"] == target
+        assert fans_by_team["巴塞罗那"]["after"] == target
 
         touched = ["利物浦", "巴塞罗那", "勒沃库森"]
         # 与部署时点等价的均衡态：先按既有流水归一（生产中该口径由
@@ -200,7 +208,7 @@ async def test_backfill_scan_and_apply():
             fixes = [t for t in txs if "战绩系数补差" in t["note"]]
             assert len(fixes) == count, [(t["kind"], t["amount"]) for t in fixes]
 
-        # 死忠回补：受影响两队按 0.95^k 回补，其余队伍原值不动
+        # 死忠重定基：偏离队改为阶梯目标，其余队伍原值不动
         for s in await env.dao.list_stadiums():
             t = s["team_name"]
             if t in fans_by_team:
@@ -218,6 +226,7 @@ async def test_backfill_scan_and_apply():
         scan2 = await svc.scan()
         assert scan2["done"] is True
         assert scan2["marker"]["matches"] == len(corr), scan2["marker"]
+        assert scan2["marker"]["fans_teams"] == 2, scan2["marker"]
     finally:
         await env.teardown()
 
@@ -239,7 +248,7 @@ async def test_backfill_zero_when_all_rows_have_no_history():
         scan = await svc.scan()
         assert scan["done"] is False
         assert scan["affected"] == [], scan["affected"]
-        assert scan["fans"] == [], scan["fans"]
+        assert scan["fans"] == [], scan["fans"]  # 新库建场即在阶梯目标上
 
         applied = await svc.apply()
         assert applied["applied"] is True
@@ -250,6 +259,55 @@ async def test_backfill_zero_when_all_rows_have_no_history():
         except BackfillError:
             pass
         assert (await svc.scan())["done"] is True
+    finally:
+        await env.teardown()
+
+
+async def test_backfill_legacy_marker_skips_form():
+    """兼容：旧版战绩补差标记存在时，战绩成分整体跳过（比赛行/余额不动），
+    死忠重定基照常执行；标记记录 form_skipped。"""
+    env = await TestEnv().setup()
+    try:
+        svc = BackfillService(env.db, env.dao, env.cfg)
+        imp = await env.fixture_service.import_fixtures(
+            "1 利物浦 巴塞罗那\n1 巴塞罗那 纽卡斯尔联\n")
+        assert imp["imported"] == 2, imp
+        rec = await env.fixture_service.record_results(1, "利物浦 负\n")
+        assert rec["count"] == 1
+        await env.fixture_service.advance_window("tester")
+        await env.fixture_service.import_fixtures("2 利物浦 巴塞罗那\n")
+        # n=1 且旧分≠4：若无旧标记，scan 必然命中该场
+        corr = await _corrupt_legacy(env, await _row(env, 2, "利物浦"), 6000, "L")
+        await env.dao.set_config(LEGACY_MARKER_KEY, json.dumps({"executed_season": 1}))
+        await env.dao.update_fans("利物浦", 4000.0)
+
+        scan = await svc.scan()
+        assert scan["form_done"] is True
+        assert scan["affected"] == [], scan["affected"]
+        assert [f["team"] for f in scan["fans"]] == ["利物浦"], scan["fans"]
+
+        await env.dao.recompute_balance("利物浦")
+        balance_before = (await env.dao.get_balance("利物浦"))["balance"]
+
+        applied = await svc.apply()
+        assert applied["applied"] is True
+
+        m = await _row(env, 2, "利物浦")
+        assert m["attendance"] == corr["att"], m["attendance"]  # 比赛行未动
+        assert m["result"] == "L"
+        balance_now = (await env.dao.get_balance("利物浦"))["balance"]
+        assert abs(balance_now - balance_before) < 1e-6, balance_now
+        target = int(round(formula.diehard_target(env.cfg, 90.0)))
+        fans = int((await env.dao.get_stadium("利物浦"))["fans_diehards"])
+        assert fans == target, fans  # 重定基照常
+
+        marker = json.loads(await env.dao.get_config(MARKER_KEY))
+        assert marker["matches"] == 0 and marker["form_skipped"] is True, marker
+        try:
+            await svc.apply()
+            raise AssertionError("重复执行应被拒绝")
+        except BackfillError:
+            pass
     finally:
         await env.teardown()
 

@@ -49,9 +49,15 @@
   },
   "fans_per_influence": {
     "description": "死忠系数",
-    "hint": "死忠目标 = 影响力 × 该系数。",
+    "hint": "阶梯表缺失或非法时的回退斜率（死忠目标 = 影响力 × 该系数）。",
     "type": "float",
     "default": 20.0
+  },
+  "fans_target_table": {
+    "description": "死忠目标阶梯",
+    "hint": "JSON：bands→[{max_influence 带上限, slope 斜率}...]，分段线性逐带累计；max_influence 0 表示末段开放（高影响力趋于饱和）。非法或缺失时回退 死忠系数×影响力。",
+    "type": "string",
+    "default": "{\"bands\":[{\"max_influence\":120,\"slope\":26},{\"max_influence\":160,\"slope\":22},{\"max_influence\":200,\"slope\":15},{\"max_influence\":0,\"slope\":12}]}"
   },
   "fans_cap": {
     "description": "死忠上限",

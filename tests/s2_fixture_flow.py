@@ -53,7 +53,7 @@ async def test_record_results_full():
         await env.stadium_service.import_attributes("巴塞罗那", influence=90.0)
         await env.stadium_service.import_attributes("纽卡斯尔联", influence=120.0)
         await env.stadium_service.import_attributes("勒沃库森", influence=120.0)
-        # 死忠按新影响力补齐（3600），验证上座计算而非演化
+        # 死忠手动补齐 3600（与影响力脱钩），验证上座计算而非演化
         await env.dao.update_fans("利物浦", 3600.0)
 
         result = await env.fixture_service.record_results(
@@ -63,7 +63,7 @@ async def test_record_results_full():
         r = result["results"][0]
         assert r["home"] == "利物浦"
         assert r["result"] == "W"
-        # 顶级队（180 影响力 → 死忠 3600）1.2 万座：应该坐满
+        # 顶级队（死忠 3600）1.2 万座：应该坐满
         assert r["attendance"] == 12000, r
         assert r["ticket"] > 1.0
 

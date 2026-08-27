@@ -295,9 +295,38 @@ def attendance_multiplier(cfg: dict, tier: int) -> float:
     return base * (1.0 + per_tier * tier)
 
 
+def fans_target_table(cfg: dict) -> list[tuple[float, float]]:
+    """死忠目标阶梯：[(带上限, 斜率), ...]，上限 0 表示末段开放（高影响力趋于饱和）。
+
+    解析失败或缺失时回退为单段线性 (0, fans_per_influence)。
+    """
+    bands: list[tuple[float, float]] = []
+    try:
+        data = parse_json_object(cfg.get("fans_target_table"))
+        for band in data.get("bands", []):
+            bands.append(
+                (float(band.get("max_influence", 0) or 0),
+                 float(band.get("slope", 0)))
+            )
+    except (TypeError, ValueError):
+        bands = []
+    if not bands:
+        return [(0.0, float(cfg.get("fans_per_influence", 20.0)))]
+    return bands
+
+
 def diehard_target(cfg: dict, influence: float) -> float:
-    """死忠目标 = 影响力 × 死忠系数。"""
-    return influence * float(cfg.get("fans_per_influence", 20.0))
+    """死忠目标：影响力-死忠阶梯分段线性，逐带累计，斜率递减。"""
+    target = 0.0
+    lower = 0.0
+    for limit, slope in fans_target_table(cfg):
+        upper = influence if limit <= 0 else min(influence, limit)
+        if upper > lower:
+            target += (upper - lower) * slope
+        if limit <= 0 or influence <= limit:
+            break
+        lower = limit
+    return target
 
 
 def attendance(

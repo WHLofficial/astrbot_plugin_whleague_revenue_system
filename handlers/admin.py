@@ -847,7 +847,7 @@ class AdminHandler:
             yield event.plain_result(deny)
             return
         lines = ["⚙️ 当前配置（部分）"]
-        secrets = {"tier_table", "weather_ranges", "form_coef_table", "facility_effects", "activity_config"}
+        secrets = {"tier_table", "weather_ranges", "form_coef_table", "facility_effects", "activity_config", "fans_target_table"}
         for key in sorted(self._plugin.config_cache):
             val = self._plugin.config_cache[key]
             if key in secrets and val:
@@ -857,14 +857,14 @@ class AdminHandler:
         yield event.plain_result("\n".join(lines))
 
     async def form_backfill(self, event) -> AsyncGenerator[MessageEventResult, None]:
-        """战绩系数补差：默认预览只读，「确认」才落库（幂等，标记后拒绝重复执行）。"""
+        """主场补差：战绩系数修正 + 死忠重定基；默认预览只读，「确认」才落库（幂等）。"""
         deny = await self._guard(event)
         if deny:
             yield event.plain_result(deny)
             return
         parts = event.get_message_str().split()
         if len(parts) > 1 and parts[1] != "确认":
-            yield event.plain_result("用法: /主场战绩补差 [确认]")
+            yield event.plain_result("用法: /主场补差 [确认]")
             return
         svc = self._plugin.backfill_service
         result = await self._run(event, svc.apply() if len(parts) > 1 else svc.scan())
@@ -878,16 +878,20 @@ class AdminHandler:
         lines: list[str] = []
         if r.get("done"):
             mk = r.get("marker") or {}
-            return (f"✅ 战绩系数补差已执行过：赛季 S{mk.get('executed_season')}，"
-                    f"{mk.get('matches', 0)} 场票房补差、{mk.get('fans_teams', 0)} 队死忠回补。无需重复执行")
-        head = f"🧮 战绩系数补差预览（赛季 S{r['season']}，尚未生效）" + ("｜✅ 已落库" if r.get("applied") else "")
+            tail = "、战绩成分已由旧版补差完成" if mk.get("form_skipped") else ""
+            return (f"✅ 主场补差已执行过：赛季 S{mk.get('executed_season')}，"
+                    f"{mk.get('matches', 0)} 场票房补差、{mk.get('fans_teams', 0)} 队死忠重定基{tail}。无需重复执行")
+        head = f"🧮 主场补差预览（赛季 S{r['season']}，尚未生效）" + ("｜✅ 已落库" if r.get("applied") else "")
         affected = r["affected"]
         fans = r["fans"]
         if not affected and not fans:
-            return head + "\n✅ 未发现受影响的数据（可能已无 1~2 场历史的场次）。\n仍要写入完成标记请发：/主场战绩补差 确认"
+            return head + "\n✅ 未发现需要补差的数据。\n仍要写入完成标记请发：/主场补差 确认"
         d_money = sum(t["d_ticket"] + t["d_commercial"] for t in r["teams"])
         lines.append(head)
-        lines.append(f"受影响 {len(affected)} 场（转播收入不动），票房净差额 {format_m(d_money)} M")
+        if r.get("form_done"):
+            lines.append("· 战绩成分已由旧版「主场战绩补差」执行过，本次仅重定基死忠")
+        elif affected:
+            lines.append(f"受影响 {len(affected)} 场（转播收入不动），票房净差额 {format_m(d_money)} M")
         for a in affected[:30]:
             updown = "↑" if a["d_ticket"] > 0 or a["d_att"] > 0 else "↓"
             lines.append(
@@ -904,11 +908,11 @@ class AdminHandler:
                 lines.append(f"· {t['team']}：上座 {t['d_attendance']:+d}，票房净 "
                              f"{format_m(t['d_ticket'] + t['d_commercial'])} M（票 {format_m(t['d_ticket'])}／商 {format_m(t['d_commercial'])}）")
         if fans:
-            lines.append("死忠近似回补（0.95^k）：")
+            lines.append("死忠重定基（影响力阶梯目标）：")
             for f in fans:
-                lines.append(f"· {f['team']}：k={f['k']}，死忠 {format_int(f['before'])}→{format_int(f['after'])}")
+                lines.append(f"· {f['team']}：死忠 {format_int(f['before'])}→{format_int(f['after'])}（{f['delta']:+d}）")
         if not r.get("applied"):
-            lines.append("⚠️ 请在部署后、下一次窗口结算前执行；确认落库请发：/主场战绩补差 确认")
+            lines.append("⚠️ 请在部署后、下一次窗口结算前执行；确认落库请发：/主场补差 确认")
         return "\n".join(lines)
 
     async def add_admin(self, event) -> AsyncGenerator[MessageEventResult, None]:

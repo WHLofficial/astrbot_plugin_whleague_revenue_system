@@ -60,7 +60,7 @@ async def test_settle_maintenance_activity_naming():
 async def test_settle_fans_evolution_asymmetric():
     env = await TestEnv().setup()
     try:
-        # 影响力 150 → 死忠 3000 满目标；改为 214 后死忠应追上
+        # 影响力 150 → 阶梯目标 3780；改为 214.42（目标 4773）后死忠应追上
         await _seed_window(env, fans_override={"利物浦": 3000})
         await env.stadium_service.import_attributes("利物浦", influence=214.42)
         # 下一窗口再赛一场，让演化有数据
@@ -70,10 +70,10 @@ async def test_settle_fans_evolution_asymmetric():
         await env.fixture_service.record_results(1, "利物浦 胜\n")
         await env.window_service.settle()
         stadium = await env.dao.get_stadium("利物浦")
-        # 目标 4288，应朝上追（涨粉方向）
+        # 目标 4773，应朝上追（涨粉方向）
         assert stadium["fans_diehards"] > 3000, stadium["fans_diehards"]
 
-        # 掉粉方向：影响力跌回 100（目标 2000）
+        # 掉粉方向：影响力跌回 100（阶梯目标 2600）
         await env.stadium_service.import_attributes("利物浦", influence=100.0)
         await env.fixture_service.advance_window("tester")
         await env.fixture_service.import_fixtures("1 利物浦 巴塞罗那\n")
@@ -83,8 +83,8 @@ async def test_settle_fans_evolution_asymmetric():
         await env.window_service.settle()
         after = (await env.dao.get_stadium("利物浦"))["fans_diehards"]
         assert after < before, f"掉粉方向应下降: {before} -> {after}"
-        # 死忠对齐目标后（影响力不变）不演化
-        await env.dao.update_fans("利物浦", 2000.0)
+        # 死忠对齐目标后（影响力不变）不演化：阶梯目标 2600
+        await env.dao.update_fans("利物浦", 2600.0)
         await env.fixture_service.advance_window("tester")
         await env.fixture_service.import_fixtures("1 利物浦 巴塞罗那\n")
         await env.fixture_service.forecast_round(1)
@@ -101,16 +101,17 @@ async def test_evolve_once_per_settle():
     env = await TestEnv().setup()
     try:
         # 4 队均离目标、无已录赛果（上座率中性 1.0；v2.5.1 起不足 3 场按中性
-        # 4 分，不再触发 ±5% 战绩修正）；单轮演化：
-        # 1800 + 1200×0.5×(0.6+0.4×1.0) = 2400；
-        # 旧实现会按球队数重复演化（4 队 → 约 2668）
+        # 4 分，不再触发 ±5% 战绩修正）；单轮演化（v2.8.0 饱和阶梯）：
+        # 建场死忠 2340（默认影响力 90 → 90×26），influence 150 → 目标 3780，
+        # 2340 + (3780−2340)×0.5×(0.6+0.4×1.0) = 3060；
+        # 旧实现会按球队数重复演化（多轮叠涨）
         for team, infl in (("利物浦", 150.0), ("巴塞罗那", 100.0),
                            ("纽卡斯尔联", 120.0), ("勒沃库森", 120.0)):
             await env.stadium_service.import_attributes(team, influence=infl)
         await env.window_service.settle()
 
         fans = (await env.dao.get_stadium("利物浦"))["fans_diehards"]
-        assert abs(fans - 2400.0) < 0.01, f"应仅演化一轮: {fans}"
+        assert abs(fans - 3060.0) < 0.01, f"应仅演化一轮: {fans}"
     finally:
         await env.teardown()
 
@@ -153,9 +154,9 @@ async def test_brand_terminate_on_fan_drop():
     try:
         await _seed_window(env, fans_override={"利物浦": 4000})
         await env.brand_service.sign("利物浦", "亚马逊", 1, 1)
-        # 死忠暴跌 50%：跌到 2000（目标 3000 以下，掉粉方向）
+        # 死忠暴跌 50%：跌到 2000（阶梯目标 2600 以下，掉粉方向）
         await env.dao.update_fans("利物浦", 4000)
-        await env.stadium_service.import_attributes("利物浦", influence=100.0)  # 目标 2000
+        await env.stadium_service.import_attributes("利物浦", influence=100.0)  # 目标 2600
         # 强制让掉粉发生
         import random
 

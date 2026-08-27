@@ -304,7 +304,7 @@ class StadiumPlugin(Star):
         async for r in self._admin_cmd(event, self.admin_handler.import_fixtures):
             yield r
 
-    @filter.command("主场战绩补差")
+    @filter.command("主场补差")
     async def cmd_form_backfill(self, event: AstrMessageEvent) -> AsyncGenerator[MessageEventResult, None]:
         async for r in self._admin_cmd(event, self.admin_handler.form_backfill):
             yield r

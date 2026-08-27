@@ -54,7 +54,7 @@ async def test_plugin_import_and_commands():
         "主场帮助", "主场", "主场轮次统计", "主场赛季统计",
         "主场档期", "主场冠名", "主场退冠名", "主场财务",
         "主场轮次统计图", "主场赛季走势图", "主场轮次预告图",
-        "主场战绩补差",
+        "主场补差",
     ]
     for cmd in expected_commands:
         assert f'@filter.command("{cmd}"' in src, f"缺少命令注册: {cmd}"
