@@ -858,17 +858,24 @@ class AdminHandler:
         yield event.plain_result("\n".join(lines))
 
     async def form_backfill(self, event) -> AsyncGenerator[MessageEventResult, None]:
-        """主场补差：战绩系数修正 + 满座微降 + 死忠重定基；默认预览只读，「确认」才落库（幂等）。"""
+        """主场补差：战绩系数修正 + 满座微降 + 死忠重定基；默认预览只读，
+        「确认」才落库（成分级幂等），「强制」重抽满座区间场次。"""
         deny = await self._guard(event)
         if deny:
             yield event.plain_result(deny)
             return
-        parts = event.get_message_str().split()
-        if len(parts) > 1 and parts[1] != "确认":
-            yield event.plain_result("用法: /主场补差 [确认]")
+        args = event.get_message_str().split()[1:]
+        if (
+            any(a not in ("确认", "强制") for a in args)
+            or args.count("确认") > 1 or args.count("强制") > 1
+        ):
+            yield event.plain_result("用法: /主场补差 [确认] [强制]")
             return
+        confirm = "确认" in args
+        force = "强制" in args
         svc = self._plugin.backfill_service
-        result = await self._run(event, svc.apply() if len(parts) > 1 else svc.scan())
+        result = await self._run(
+            event, svc.apply(force=force) if confirm else svc.scan(force=force))
         if "error" in result:
             yield event.plain_result(f"❌ {result['error']}")
             return
@@ -877,23 +884,34 @@ class AdminHandler:
     @staticmethod
     def _format_backfill(r: dict) -> str:
         lines: list[str] = []
-        if r.get("done"):
-            mk = r.get("marker") or {}
-            tail = "、战绩成分已由旧版补差完成" if mk.get("form_skipped") else ""
-            return (f"✅ 主场补差已执行过：赛季 S{mk.get('executed_season')}，"
-                    f"{mk.get('matches', 0)} 场票房补差、{mk.get('sellouts', 0)} 场满座微降、"
-                    f"{mk.get('fans_teams', 0)} 队死忠重定基{tail}。无需重复执行")
-        head = f"🧮 主场补差预览（赛季 S{r['season']}，尚未生效）" + ("｜✅ 已落库" if r.get("applied") else "")
         affected = r["affected"]
         fans = r["fans"]
         sellouts = r.get("sellouts") or []
-        if not affected and not fans and not sellouts:
+        force = bool(r.get("force"))
+        pending = bool(affected or fans or sellouts)
+        if r.get("done") and not pending:
+            mk = r.get("marker") or {}
+            tail = "、战绩成分已由旧版补差完成" if mk.get("form_skipped") else ""
+            body = (f"✅ 主场补差已执行过：赛季 S{mk.get('executed_season')}，"
+                    f"{mk.get('matches', 0)} 场票房补差、{mk.get('sellouts', 0)} 场满座微降、"
+                    f"{mk.get('fans_teams', 0)} 队死忠重定基{tail}")
+            if force:
+                return body + "。\n强制扫描未发现可重算项"
+            return body + "。无需重复执行；重抽满座区间请发：/主场补差 强制"
+        head = f"🧮 主场补差预览（赛季 S{r['season']}，尚未生效）" + ("｜✅ 已落库" if r.get("applied") else "")
+        if r.get("done"):
+            head += "｜已执行过，本次仅重算待处理项"
+        if not pending:
             return head + "\n✅ 未发现需要补差的数据。\n仍要写入完成标记请发：/主场补差 确认"
-        d_money = sum(t["d_ticket"] + t["d_commercial"] for t in r["teams"])
         lines.append(head)
+        if force:
+            lo, hi = SELL_OUT_FILL
+            lines.append(f"⚠️ 强制模式：满座微降将重抽所有处于容量 {lo * 100:.1f}%~{hi * 100:.1f}%"
+                         "区间的场次（含已微降过的）；战绩成分不可强制")
         if r.get("form_done"):
-            lines.append("· 战绩成分已由旧版「主场战绩补差」执行过，本次仅重定基死忠")
+            lines.append("· 战绩成分已执行过（幂等标记），本次跳过")
         elif affected:
+            d_money = sum(t["d_ticket"] + t["d_commercial"] for t in r["teams"])
             lines.append(f"受影响 {len(affected)} 场（转播收入不动），票房净差额 {format_m(d_money)} M")
         for a in affected[:30]:
             updown = "↑" if a["d_ticket"] > 0 or a["d_att"] > 0 else "↓"
@@ -912,7 +930,9 @@ class AdminHandler:
                              f"{format_m(t['d_ticket'] + t['d_commercial'])} M（票 {format_m(t['d_ticket'])}／商 {format_m(t['d_commercial'])}）")
         if sellouts:
             lo, hi = SELL_OUT_FILL
-            lines.append(f"满座微降（历史恰好=容量的记录，转播收入不动）{len(sellouts)} 场：")
+            scope = (f"强制：重抽容量 {lo * 100:.1f}%~{hi * 100:.1f}% 区间内全部场次"
+                     if force else "历史恰好=容量的记录")
+            lines.append(f"满座微降（{scope}，转播收入不动）{len(sellouts)} 场：")
             for s in sellouts[:30]:
                 cap = s["capacity"]
                 lines.append(
@@ -927,7 +947,8 @@ class AdminHandler:
             for f in fans:
                 lines.append(f"· {f['team']}：死忠 {format_int(f['before'])}→{format_int(f['after'])}（{f['delta']:+d}）")
         if not r.get("applied"):
-            lines.append("⚠️ 请在部署后、下一次窗口结算前执行；确认落库请发：/主场补差 确认")
+            tip = "/主场补差 确认 强制" if force else "/主场补差 确认"
+            lines.append("⚠️ 请在部署后、下一次窗口结算前执行；确认落库请发：" + tip)
         return "\n".join(lines)
 
     async def add_admin(self, event) -> AsyncGenerator[MessageEventResult, None]:

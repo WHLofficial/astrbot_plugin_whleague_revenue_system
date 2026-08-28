@@ -28,7 +28,13 @@ stadium.fans_diehards（不动流水，不追算中间窗口）。
 库内数值区分「旧规则录入」与「新规则录入」的 n∈{1,2} 场次，伪阳性的
 排除依赖部署时序（部署后、下一次窗口结算前执行）。
 
-幂等：落库后写入 plugin_config 标记（MARKER_KEY），再次调用拒绝执行。
+幂等（v2.9.3 改为成分级）：战绩成分只要任一补差标记存在即跳过，任何模式
+（含强制）都不重复执行——重跑会二次缩放，且部署后新规则录入的赛季初
+n∈{1,2} 场次全是伪阳性；死忠重定基天然幂等，每次执行都重算（差 <1 跳过）；
+满座微降普通模式只捞「上座==现容量」的未处理旧满座，强制模式（force）
+重抽所有处于容量×(0.985~0.999) 区间的场次（含已微降过的）。落库后写入
+统一标记（MARKER_KEY，含 forced 标志）；已执行过且三成分均无待处理项时
+apply 拒绝执行。
 """
 
 from __future__ import annotations
@@ -55,15 +61,17 @@ class BackfillService:
 
     # ─── 预览（只读） ─────────────────────────────────────
 
-    async def scan(self) -> dict:
+    async def scan(self, force: bool = False) -> dict:
         state = await self._dao.get_league_state()
         if state is None:
             raise BackfillError("联赛尚未初始化，没有可补差的数据")
         season = int(state["season_number"])
 
         marker = await self._dao.get_config(MARKER_KEY)
-        # 旧版战绩补差已执行 → 战绩成分跳过，只做死忠重定基
-        form_done = await self._dao.get_config(LEGACY_MARKER_KEY) is not None
+        # 任一标记存在 → 战绩成分已完成，任何模式（含强制）都跳过
+        form_done = marker is not None or (
+            await self._dao.get_config(LEGACY_MARKER_KEY) is not None
+        )
 
         capacities: dict[str, int] = {}
         fans_now: dict[str, float] = {}
@@ -96,20 +104,24 @@ class BackfillService:
                             self._scale(m, team, n, old_pts,
                                         capacities.get(team))
                         )
-                # 满座微降：任意赛季恰好=现容量的已录非取消主场
-                if (
-                    m["attendance"] is not None
-                    and capacities.get(team)
-                    and int(m["attendance"]) == capacities[team]
-                ):
-                    sellouts.append({
-                        "id": m["id"], "season": int(m["season_number"]),
-                        "window_seq": m["window_seq"], "round_no": m["round_no"],
-                        "competition": m["competition"], "home": team,
-                        "away": m["away_team"],
-                        "att_old": int(m["attendance"]),
-                        "capacity": capacities[team],
-                    })
+                # 满座微降：普通模式只捞恰好=现容量的未处理旧满座；
+                # 强制模式重抽满座区间内全部场次（含已微降过的）
+                if m["attendance"] is not None and capacities.get(team):
+                    att = int(m["attendance"])
+                    cap = capacities[team]
+                    if force:
+                        hit = int(cap * SELL_OUT_FILL[0]) <= att <= cap
+                    else:
+                        hit = att == cap
+                    if hit:
+                        sellouts.append({
+                            "id": m["id"], "season": int(m["season_number"]),
+                            "window_seq": m["window_seq"], "round_no": m["round_no"],
+                            "competition": m["competition"], "home": team,
+                            "away": m["away_team"],
+                            "att_old": att,
+                            "capacity": cap,
+                        })
                 priors.append(str(m["result"]).strip().upper())
 
             for a in (x for x in affected if x["home"] == team):
@@ -136,6 +148,7 @@ class BackfillService:
             "marker": json.loads(marker) if marker else None,
             "season": season,
             "form_done": form_done,
+            "force": force,
             "affected": affected,
             "sellouts": sellouts,
             "teams": list(team_totals.values()),
@@ -175,12 +188,16 @@ class BackfillService:
 
     # ─── 落库 ────────────────────────────────────────────
 
-    async def apply(self) -> dict:
-        if await self._dao.get_config(MARKER_KEY):
-            raise BackfillError("主场补差已执行过，不可重复执行（详见预览中的标记信息）")
-        data = await self.scan()
-        if data["done"]:
-            raise BackfillError("主场补差已执行过，不可重复执行")
+    async def apply(self, force: bool = False) -> dict:
+        data = await self.scan(force=force)
+        # 标记存在且三成分均无待处理项 → 拒绝；无标记时零数据仍可落标记
+        if data["done"] and not (
+            data["affected"] or data["fans"] or data["sellouts"]
+        ):
+            raise BackfillError(
+                "主场补差已执行过且当前无待重算项（战绩成分不可重复执行）；"
+                "如需重抽满座区间场次请先发 /主场补差 强制 预览"
+            )
 
         async def work(conn):
             for a in data["affected"]:
@@ -219,7 +236,12 @@ class BackfillService:
                     continue
                 att_now = int(row["attendance"])
                 cap = int(job["capacity"])
-                if att_now != cap or att_now <= 0:
+                if att_now <= 0:
+                    continue
+                if force:
+                    if not (int(cap * SELL_OUT_FILL[0]) <= att_now <= cap):
+                        continue
+                elif att_now != cap:
                     continue
                 new_att = int(cap * random.uniform(*SELL_OUT_FILL))
                 rev_ratio = new_att / att_now
@@ -279,6 +301,7 @@ class BackfillService:
                     "sellouts": sellout_count,
                     "fans_teams": len(data["fans"]),
                     "form_skipped": data["form_done"],
+                    "forced": force,
                 }, ensure_ascii=False)),
             )
 

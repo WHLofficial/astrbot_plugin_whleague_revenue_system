@@ -11,6 +11,10 @@
 满座微降成分（v2.9.2）：恰好=现容量的已录非取消主场（任意赛季）回修为
 容量×random(0.985, 0.999)；战绩修正后恰好钳到容量的场次一并微降，
 修正后低于容量的前满座视为不再满座、不再处理。
+
+成分级幂等（v2.9.3）：战绩成分任一标记存在即跳过（强制也不放行）；
+已执行过但仍有待处理项（新满座/死忠偏离）时 apply 放行只做待处理项；
+强制模式重抽所有处于满座区间的场次（含已微降过的）。
 """
 
 import json
@@ -223,7 +227,7 @@ async def test_backfill_scan_and_apply():
             else:
                 assert s["fans_diehards"] == fans_before_map[t], t
 
-        # 幂等：标记落库后拒绝重复执行，scan 报告 done
+        # 幂等：标记落库后（无待处理项）拒绝重复执行，scan 报告 done
         assert await env.dao.get_config(MARKER_KEY)
         try:
             await svc.apply()
@@ -234,6 +238,7 @@ async def test_backfill_scan_and_apply():
         assert scan2["done"] is True
         assert scan2["marker"]["matches"] == len(corr), scan2["marker"]
         assert scan2["marker"]["fans_teams"] == 2, scan2["marker"]
+        assert scan2["marker"]["forced"] is False, scan2["marker"]
     finally:
         await env.teardown()
 
@@ -429,7 +434,7 @@ async def test_backfill_sellout_recap():
 
         # 幂等：标记记录满座微降场数（巴萨 R3 跳过、利物浦 R2 补入 → 2 场）
         marker = json.loads(await env.dao.get_config(MARKER_KEY))
-        assert marker["sellouts"] == 2, marker
+        assert marker["sellouts"] == 2 and marker["forced"] is False, marker
         try:
             await svc.apply()
             raise AssertionError("重复执行应被拒绝")
@@ -449,5 +454,132 @@ async def test_backfill_requires_league_state():
             raise AssertionError("未初始化联赛应报错")
         except BackfillError as e:
             assert "初始化" in str(e)
+    finally:
+        await env.teardown()
+
+
+async def test_backfill_unified_marker_pending_sellout():
+    """v2.9.1→v2.9.2 迁移：统一标记已存在（payload 无满座成分），普通模式
+    不得整体拦截——战绩成分跳过、满座成分照常执行；做完后无待处理项才拒绝。"""
+    env = await TestEnv().setup()
+    try:
+        svc = BackfillService(env.db, env.dao, env.cfg)
+        imp = await env.fixture_service.import_fixtures(
+            "1 利物浦 巴塞罗那\n1 巴塞罗那 纽卡斯尔联\n")
+        assert imp["imported"] == 2, imp
+        rec = await env.fixture_service.record_results(1, "利物浦 胜\n")
+        assert rec["count"] == 1
+        cap = (await env.dao.get_stadium("利物浦"))["capacity"]
+        # 利物浦 R1 上座=现容量（旧时期满座入账）
+        corr = await _corrupt_legacy(env, await _row(env, 1, "利物浦"), cap, "W")
+        # 手动埋 v2.9.1 式统一标记（payload 无 sellouts 键）
+        await env.dao.set_config(MARKER_KEY, json.dumps({
+            "executed_season": 1, "matches": 3, "fans_teams": 2,
+            "form_skipped": False}))
+
+        scan = await svc.scan()
+        assert scan["done"] is True and scan["form_done"] is True
+        assert scan["affected"] == [], scan["affected"]
+        assert [(s["home"], s["round_no"]) for s in scan["sellouts"]] == \
+            [("利物浦", 1)], scan["sellouts"]
+        assert scan["fans"] == [], scan["fans"]  # 默认影响力建场即在阶梯目标
+
+        await env.dao.recompute_balance("利物浦")
+        balance_before = (await env.dao.get_balance("利物浦"))["balance"]
+
+        applied = await svc.apply()
+        assert applied["applied"] is True
+
+        m = await _row(env, 1, "利物浦")
+        lo, hi = formula.SELL_OUT_FILL
+        assert int(cap * lo) <= m["attendance"] < cap, m["attendance"]
+        ratio = m["attendance"] / cap
+        assert abs(m["ticket_revenue"] - round(corr["t"] * ratio, 4)) < 1e-9, m
+        assert m["broadcast"] == 0.9, m["broadcast"]  # 转播不动
+        d = ((round(corr["t"] * ratio, 4) - corr["t"])
+             + (round(corr["c"] * ratio, 4) - corr["c"]))
+        now = (await env.dao.get_balance("利物浦"))["balance"]
+        assert abs(now - (balance_before + d)) < 1e-6, now
+        marker = json.loads(await env.dao.get_config(MARKER_KEY))
+        assert marker["sellouts"] == 1 and marker["form_skipped"] is True, marker
+
+        # 做完后无待处理项：普通 apply 拒绝
+        try:
+            await svc.apply()
+            raise AssertionError("无待处理项的重复执行应被拒绝")
+        except BackfillError:
+            pass
+    finally:
+        await env.teardown()
+
+
+async def test_backfill_force_rerun():
+    """强制重算（v2.9.3）：首次补差后普通模式无待处理项被拒；强制模式重抽
+    所有处于满座区间的场次（含已微降过的），票/商按当前值等比缩放；战绩
+    成分永不参与——新规则 n∈{1,2} 的伪阳性场次不被触碰；标记记录 forced。"""
+    env = await TestEnv().setup()
+    try:
+        svc = BackfillService(env.db, env.dao, env.cfg)
+        imp = await env.fixture_service.import_fixtures(
+            "1 利物浦 巴塞罗那\n1 巴塞罗那 纽卡斯尔联\n")
+        assert imp["imported"] == 2, imp
+        rec = await env.fixture_service.record_results(1, "利物浦 胜\n")
+        assert rec["count"] == 1
+        cap = (await env.dao.get_stadium("利物浦"))["capacity"]
+        await _corrupt_legacy(env, await _row(env, 1, "利物浦"), cap, "W")
+
+        applied = await svc.apply()
+        assert applied["applied"] is True
+        m1 = await _row(env, 1, "利物浦")
+        lo, hi = formula.SELL_OUT_FILL
+        assert int(cap * lo) <= m1["attendance"] < cap, m1["attendance"]
+
+        # 伪阳性护栏：首次补差后按新规则录入一场 n∈{1,2} 场次（低上座）
+        await env.fixture_service.advance_window("tester")
+        await env.fixture_service.import_fixtures("2 利物浦 巴塞罗那\n")
+        rec2 = await env.fixture_service.record_results(2, "利物浦 负 3000\n")
+        assert rec2["count"] == 1
+        m2_before = dict(await _row(env, 2, "利物浦"))
+
+        # 普通模式：满座已处理（落区间）、战绩被标记跳过 → 无待处理项，拒绝
+        scan = await svc.scan()
+        assert scan["done"] is True and scan["affected"] == []
+        assert scan["sellouts"] == [], scan["sellouts"]
+        try:
+            await svc.apply()
+            raise AssertionError("无待处理项应被拒绝")
+        except BackfillError:
+            pass
+
+        # 强制模式：命中已微降场次，战绩清单仍为空
+        fscan = await svc.scan(force=True)
+        assert fscan["force"] is True
+        assert fscan["affected"] == [], fscan["affected"]
+        assert [(s["home"], s["round_no"]) for s in fscan["sellouts"]] == \
+            [("利物浦", 1)], fscan["sellouts"]
+
+        await env.dao.recompute_balance("利物浦")
+        balance_before = (await env.dao.get_balance("利物浦"))["balance"]
+
+        applied2 = await svc.apply(force=True)
+        assert applied2["applied"] is True
+
+        m1b = await _row(env, 1, "利物浦")
+        assert int(cap * lo) <= m1b["attendance"] < cap, m1b["attendance"]
+        ratio = m1b["attendance"] / m1["attendance"]
+        t1, c1 = float(m1["ticket_revenue"]), float(m1["commercial"])
+        assert abs(m1b["ticket_revenue"] - round(t1 * ratio, 4)) < 1e-9, m1b
+        assert abs(m1b["commercial"] - round(c1 * ratio, 4)) < 1e-9, m1b
+        assert m1b["broadcast"] == 0.9, m1b["broadcast"]
+        # 伪阳性场次完全不动
+        m2_after = await _row(env, 2, "利物浦")
+        for col in _RESULT_COLS:
+            assert m2_after[col] == m2_before[col], col
+        # 余额自洽：重算后 = 落库前 + 本次满座差额
+        d = (round(t1 * ratio, 4) - t1) + (round(c1 * ratio, 4) - c1)
+        now = (await env.dao.get_balance("利物浦"))["balance"]
+        assert abs(now - (balance_before + d)) < 1e-6, now
+        marker = json.loads(await env.dao.get_config(MARKER_KEY))
+        assert marker["forced"] is True and marker["sellouts"] == 1, marker
     finally:
         await env.teardown()
