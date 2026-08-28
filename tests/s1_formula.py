@@ -60,11 +60,14 @@ async def test_attendance_multiplier_ladder():
 
 
 async def test_opening_attendance_four_brackets():
-    """开局 0 级 1.2 万座：弱队（阶梯 2302）约八成上座，中游与头部坐满。"""
+    """开局 0 级 1.2 万座：弱队（阶梯 2302）约八成上座，中游与头部接近坐满
+    （满座微降：容量×random(0.985, 0.999)，不恰好等于容量）。"""
     cfg = _cfg()
     import random
 
     random.seed(2026)
+    lo = int(CAPACITY0 * formula.SELL_OUT_FILL[0])
+    hi = int(CAPACITY0 * formula.SELL_OUT_FILL[1])
     for name, (infl, fans) in INFLUENCES.items():
         infl_fans = formula.diehard_target(cfg, infl)
         att = formula.attendance(
@@ -75,7 +78,7 @@ async def test_opening_attendance_four_brackets():
         if name == "min":
             assert 9000 <= att <= 10200, f"min: {att}"
         else:
-            assert att == CAPACITY0, f"{name} 应坐满: {att}"
+            assert lo <= att < CAPACITY0, f"{name} 应接近坐满（{lo}~{hi}）: {att}"
 
 
 async def test_weather_ranges():

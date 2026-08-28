@@ -13,6 +13,7 @@ from ..services.event_engine import EventError
 from ..services.file_import_service import FileImportError
 from ..services.fixture_service import FixtureError
 from ..services.stadium_service import StadiumError
+from ..services.formula import SELL_OUT_FILL
 from ..services.window_service import SettleError
 from ..utils.security import format_int, format_m, parse_int, parse_qq, parse_qq_arg
 
@@ -857,7 +858,7 @@ class AdminHandler:
         yield event.plain_result("\n".join(lines))
 
     async def form_backfill(self, event) -> AsyncGenerator[MessageEventResult, None]:
-        """主场补差：战绩系数修正 + 死忠重定基；默认预览只读，「确认」才落库（幂等）。"""
+        """主场补差：战绩系数修正 + 满座微降 + 死忠重定基；默认预览只读，「确认」才落库（幂等）。"""
         deny = await self._guard(event)
         if deny:
             yield event.plain_result(deny)
@@ -880,11 +881,13 @@ class AdminHandler:
             mk = r.get("marker") or {}
             tail = "、战绩成分已由旧版补差完成" if mk.get("form_skipped") else ""
             return (f"✅ 主场补差已执行过：赛季 S{mk.get('executed_season')}，"
-                    f"{mk.get('matches', 0)} 场票房补差、{mk.get('fans_teams', 0)} 队死忠重定基{tail}。无需重复执行")
+                    f"{mk.get('matches', 0)} 场票房补差、{mk.get('sellouts', 0)} 场满座微降、"
+                    f"{mk.get('fans_teams', 0)} 队死忠重定基{tail}。无需重复执行")
         head = f"🧮 主场补差预览（赛季 S{r['season']}，尚未生效）" + ("｜✅ 已落库" if r.get("applied") else "")
         affected = r["affected"]
         fans = r["fans"]
-        if not affected and not fans:
+        sellouts = r.get("sellouts") or []
+        if not affected and not fans and not sellouts:
             return head + "\n✅ 未发现需要补差的数据。\n仍要写入完成标记请发：/主场补差 确认"
         d_money = sum(t["d_ticket"] + t["d_commercial"] for t in r["teams"])
         lines.append(head)
@@ -907,6 +910,18 @@ class AdminHandler:
             for t in r["teams"]:
                 lines.append(f"· {t['team']}：上座 {t['d_attendance']:+d}，票房净 "
                              f"{format_m(t['d_ticket'] + t['d_commercial'])} M（票 {format_m(t['d_ticket'])}／商 {format_m(t['d_commercial'])}）")
+        if sellouts:
+            lo, hi = SELL_OUT_FILL
+            lines.append(f"满座微降（历史恰好=容量的记录，转播收入不动）{len(sellouts)} 场：")
+            for s in sellouts[:30]:
+                cap = s["capacity"]
+                lines.append(
+                    f"· 第{s['round_no']}轮({s['competition']}) {s['home']} vs {s['away']}："
+                    f"上座 {format_int(s['att_old'])} → 容量的 {lo * 100:.1f}%~{hi * 100:.1f}%"
+                    f"（约 {format_int(int(cap * lo))}~{format_int(int(cap * hi))}）"
+                )
+            if len(sellouts) > 30:
+                lines.append(f"· …其余 {len(sellouts) - 30} 场从略")
         if fans:
             lines.append("死忠重定基（影响力阶梯目标）：")
             for f in fans:

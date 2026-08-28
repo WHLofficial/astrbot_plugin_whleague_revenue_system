@@ -11,6 +11,13 @@
   注：容量钳制用现值而非当年值——设施升级只影响 broadcast 及账外的建设券，
   对 ticket/commercial 无影响，此处差异可忽略。
 
+满座微降（v2.9.2 新增）：满座封顶从「恰好=容量」改为容量×random(0.985, 0.999)
+（formula.SELL_OUT_FILL，每场独立随机），历史恰好=现容量的已录非取消场次
+（任意赛季）统一回修：上座降至容量×random(0.985, 0.999)，票务与商业收入
+按新上座等比缩放，转播不动。口径限制：只识别「上座==现容量」的满座，
+扩容前的旧满座不在列（与战绩补差用现容量钳制同口径）；战绩修正后恰好
+钳到容量的场次一并微降，修正后低于容量的场次视为不再满座、不重复处理。
+
 死忠重定基（v2.8.0 新增）：死忠目标从「影响力×20」线性改为饱和阶梯
 （formula.fans_target_table 分段线性），历史死忠由旧线性规则演化而来，
 逐队一次性重定基到 round(新目标)：与现值差 <1 的跳过，≥1 的直接改写
@@ -27,9 +34,10 @@ stadium.fans_diehards（不动流水，不追算中间窗口）。
 from __future__ import annotations
 
 import json
+import random
 
 from . import formula
-from .formula import NEUTRAL_FORM_PTS
+from .formula import NEUTRAL_FORM_PTS, SELL_OUT_FILL
 
 MARKER_KEY = "backfill_home_unified_done"
 LEGACY_MARKER_KEY = "backfill_form_neutral_done"
@@ -66,36 +74,51 @@ class BackfillService:
             influences[s["team_name"]] = s["influence"]
 
         affected: list[dict] = []
+        sellouts: list[dict] = []
         team_totals: dict[str, dict] = {}
-        if not form_done:
-            for team in sorted(capacities):
-                hist = [
-                    m for m in await self._dao.get_home_matches_all(team)
-                    if str(m["result"]).strip().upper() != "C"
-                ]
-                priors: list[str] = []
-                for m in hist:
-                    n = len(priors)
-                    if (
-                        int(m["season_number"]) == season
-                        and 0 < n < 3
-                        and m["attendance"] is not None
-                    ):
-                        old_pts = _legacy_form_pts(n, priors)
-                        if old_pts != NEUTRAL_FORM_PTS:
-                            affected.append(
-                                self._scale(m, team, n, old_pts,
-                                            capacities.get(team))
-                            )
-                    priors.append(str(m["result"]).strip().upper())
+        for team in sorted(capacities):
+            hist = [
+                m for m in await self._dao.get_home_matches_all(team)
+                if str(m["result"]).strip().upper() != "C"
+            ]
+            priors: list[str] = []
+            for m in hist:
+                n = len(priors)
+                if (
+                    not form_done
+                    and int(m["season_number"]) == season
+                    and 0 < n < 3
+                    and m["attendance"] is not None
+                ):
+                    old_pts = _legacy_form_pts(n, priors)
+                    if old_pts != NEUTRAL_FORM_PTS:
+                        affected.append(
+                            self._scale(m, team, n, old_pts,
+                                        capacities.get(team))
+                        )
+                # 满座微降：任意赛季恰好=现容量的已录非取消主场
+                if (
+                    m["attendance"] is not None
+                    and capacities.get(team)
+                    and int(m["attendance"]) == capacities[team]
+                ):
+                    sellouts.append({
+                        "id": m["id"], "season": int(m["season_number"]),
+                        "window_seq": m["window_seq"], "round_no": m["round_no"],
+                        "competition": m["competition"], "home": team,
+                        "away": m["away_team"],
+                        "att_old": int(m["attendance"]),
+                        "capacity": capacities[team],
+                    })
+                priors.append(str(m["result"]).strip().upper())
 
-                for a in (x for x in affected if x["home"] == team):
-                    t = team_totals.setdefault(
-                        team, {"team": team, "d_attendance": 0,
-                               "d_ticket": 0.0, "d_commercial": 0.0})
-                    t["d_attendance"] += a["d_att"]
-                    t["d_ticket"] += a["d_ticket"]
-                    t["d_commercial"] += a["d_commercial"]
+            for a in (x for x in affected if x["home"] == team):
+                t = team_totals.setdefault(
+                    team, {"team": team, "d_attendance": 0,
+                           "d_ticket": 0.0, "d_commercial": 0.0})
+                t["d_attendance"] += a["d_att"]
+                t["d_ticket"] += a["d_ticket"]
+                t["d_commercial"] += a["d_commercial"]
 
         fans = []
         for team in sorted(fans_now):
@@ -114,6 +137,7 @@ class BackfillService:
             "season": season,
             "form_done": form_done,
             "affected": affected,
+            "sellouts": sellouts,
             "teams": list(team_totals.values()),
             "fans": fans,
         }
@@ -141,6 +165,7 @@ class BackfillService:
             "n": n, "old_pts": old_pts, "coef_old": coef_old,
             "coef_new": coef_new,
             "att_old": att_old, "att_new": att_new,
+            "capacity": capacity,
             "d_att": att_new - att_old,
             "t_old": t_old, "t_new": t_new,
             "c_old": c_old, "c_new": c_new,
@@ -176,7 +201,54 @@ class BackfillService:
                         (a["home"], a["season"], a["window_seq"],
                          a["round_no"], kind, amount, note_suffix),
                     )
-            touched = {a["home"] for a in data["affected"]}
+            # 满座微降：历史恰好=容量的记录 ∪ 战绩修正后恰好钳到容量的场次
+            sellout_jobs = {s["id"]: s for s in data["sellouts"]}
+            for a in data["affected"]:
+                if a.get("capacity") and a["att_new"] == a["capacity"]:
+                    sellout_jobs[a["id"]] = a
+            sellout_count = 0
+            for jid in sorted(sellout_jobs):
+                job = sellout_jobs[jid]
+                cur = await conn.execute(
+                    "SELECT season_number, window_seq, round_no, attendance, "
+                    "ticket_revenue, commercial FROM matches WHERE id=?",
+                    (jid,),
+                )
+                row = await cur.fetchone()
+                if row is None or row["attendance"] is None:
+                    continue
+                att_now = int(row["attendance"])
+                cap = int(job["capacity"])
+                if att_now != cap or att_now <= 0:
+                    continue
+                new_att = int(cap * random.uniform(*SELL_OUT_FILL))
+                rev_ratio = new_att / att_now
+                t_now = float(row["ticket_revenue"] or 0.0)
+                c_now = float(row["commercial"] or 0.0)
+                t_new = round(t_now * rev_ratio, 4)
+                c_new = round(c_now * rev_ratio, 4)
+                await conn.execute(
+                    "UPDATE matches SET attendance=?, ticket_revenue=?, commercial=? WHERE id=?",
+                    (new_att, t_new, c_new, jid),
+                )
+                note = f"第{job['round_no']}轮 主{job['home']} vs 客{job['away']}｜满座微降"
+                for kind, amount in (
+                    ("ticket", round(t_new - t_now, 4)),
+                    ("commercial", round(c_new - c_now, 4)),
+                ):
+                    if amount == 0:
+                        continue
+                    await conn.execute(
+                        "INSERT INTO revenue_transactions "
+                        "(team_name, season_number, window_seq, round_no, kind, amount, note) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                        (job["home"], int(row["season_number"]), row["window_seq"],
+                         row["round_no"], kind, amount, note),
+                    )
+                sellout_count += 1
+            touched = {a["home"] for a in data["affected"]} | {
+                s["home"] for s in data["sellouts"]
+            }
             for team in sorted(touched):
                 await conn.execute(
                     "INSERT OR IGNORE INTO club_balance (team_name, balance, build_credit) VALUES (?, 0, 0)",
@@ -204,6 +276,7 @@ class BackfillService:
                 (MARKER_KEY, json.dumps({
                     "executed_season": data["season"],
                     "matches": len(data["affected"]),
+                    "sellouts": sellout_count,
                     "fans_teams": len(data["fans"]),
                     "form_skipped": data["form_done"],
                 }, ensure_ascii=False)),

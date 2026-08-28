@@ -329,6 +329,9 @@ def diehard_target(cfg: dict, influence: float) -> float:
     return target
 
 
+SELL_OUT_FILL = (0.985, 0.999)
+
+
 def attendance(
     cfg: dict,
     fans: float,
@@ -351,7 +354,10 @@ def attendance(
     opp = opponent_coef(home_influence, away_influence)
     perturbation = random.uniform(0.97, 1.03)
     demand = fans * multiplier * tier_coef * form * wx * opp * perturbation * next_attendance_mod
-    return int(min(capacity, max(0, demand)))
+    if demand >= capacity:
+        # 满座不恰好等于容量：留 0.1%~1.5% 空置余量，每场独立随机
+        return int(capacity * random.uniform(*SELL_OUT_FILL))
+    return int(max(0, demand))
 
 
 def match_revenues(

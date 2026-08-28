@@ -6,6 +6,7 @@ import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from tests.common import TestEnv  # noqa: E402
+from astrbot_plugin_whleague_revenue_system.services import formula  # noqa: E402
 from astrbot_plugin_whleague_revenue_system.services.fixture_service import FixtureError  # noqa: E402
 
 
@@ -63,8 +64,10 @@ async def test_record_results_full():
         r = result["results"][0]
         assert r["home"] == "利物浦"
         assert r["result"] == "W"
-        # 顶级队（死忠 3600）1.2 万座：应该坐满
-        assert r["attendance"] == 12000, r
+        # 顶级队（死忠 3600）1.2 万座：接近坐满（满座微降，不恰好等于容量）
+        lo = int(12000 * formula.SELL_OUT_FILL[0])
+        hi = int(12000 * formula.SELL_OUT_FILL[1])
+        assert lo <= r["attendance"] < 12000, r
         assert r["ticket"] > 1.0
 
         # 重复录入应报错
