@@ -159,6 +159,9 @@ async def test_backfill_scan_and_apply():
         # 死忠重定基清单：仅人为偏离的 A/B
         fans_by_team = {f["team"]: f for f in scan["fans"]}
         assert set(fans_by_team) == {"利物浦", "巴塞罗那"}, scan["fans"]
+        # 死忠清单三个数值字段必须为 int（formatter 用 :+d 格式码，float 会崩）
+        for f in fans_by_team.values():
+            assert all(isinstance(f[k], int) for k in ("before", "after", "delta")), f
         assert fans_by_team["利物浦"]["before"] == 4000
         assert fans_by_team["利物浦"]["after"] == target
         assert fans_by_team["巴塞罗那"]["after"] == target

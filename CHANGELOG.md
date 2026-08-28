@@ -3,6 +3,14 @@
 本文件记录本项目的显著变更，格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [2.9.1] - 2026-08-28
+
+### Fixed
+
+- **`/主场补差` 预览崩溃**：死忠重定基清单的 `before`/`delta` 取自库内浮点，formatter 用
+  `:+d` 格式化抛 ValueError（服务器实机发现）。预览/确认输出统一为整数；差 ≥1 的判定
+  与落库逻辑不变，数据无影响。
+
 ## [2.9.0] - 2026-08-27
 
 ### Removed

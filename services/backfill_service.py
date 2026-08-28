@@ -99,12 +99,13 @@ class BackfillService:
 
         fans = []
         for team in sorted(fans_now):
+            before = int(round(fans_now[team]))
             after = int(round(formula.diehard_target(
                 self._cfg, influences.get(team, 0.0))))
             if abs(after - fans_now[team]) >= 1:
                 fans.append({
-                    "team": team, "before": fans_now[team], "after": after,
-                    "delta": after - fans_now[team],
+                    "team": team, "before": before, "after": after,
+                    "delta": after - before,
                 })
 
         return {
