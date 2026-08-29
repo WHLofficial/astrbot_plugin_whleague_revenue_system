@@ -3,6 +3,22 @@
 本文件记录本项目的显著变更，格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [2.9.4] - 2026-08-29
+
+### Fixed
+
+- **NaN/inf 绕过数值校验**（🔴）：`parse_float`/`validate_and_cast` 的区间比较对 NaN 恒假，
+  `/主场设置 start_funds nan` 等可写入 NaN 并以 NULL 形式毒化余额；解析层统一 `math.isfinite`
+  拒绝，影响力导入（命令与文件属性行）同步修复。
+- **赛果重复行/并发录入双重付款**（🔴）：同批文本重复主队直接 fail-fast；单场改用
+  `claim_match_result`（`WHERE result IS NULL` 原子认领），并发录入第二方不再重复记账。
+- **窗口结算非原子**（🔴）：结算权改为开头 `claim_window_summary` 原子认领（并发/重复结算
+  即拦），结算流水 `tx_ids` 逐笔增量落盘——中途崩溃后「强制」可精确撤销已落盘流水，
+  不再整窗重复扣费；品牌流失解约流水并入可撤销标记。
+- **自定义即发事件效果原样入库**（🔴）：`/主场事件写` 即发 effects 现与 LLM 草稿同强度钳制
+  （money ±8M、fans ±5%、维护 0~5、上座系数 0.5~2.0），非数值直接拒绝，杜绝 ±∞ 资金与
+  触发时中断整个分配。
+
 ## [2.9.3] - 2026-08-28
 
 ### Changed
