@@ -19,6 +19,7 @@ MODULES = [
     "tests.s8_charts",
     "tests.s9_listeners",
     "tests.s10_backfill",
+    "tests.s11_validation",
 ]
 
 

@@ -1,4 +1,5 @@
 import json
+import math
 import os
 
 PLUGIN_VERSION = "2.6.0"
@@ -217,6 +218,9 @@ def validate_and_cast(key: str, raw: str):
             parsed = float(raw.strip())
         except ValueError:
             raise ValueError(f"配置 {key} 需为数字")
+        if not math.isfinite(parsed):
+            # NaN 与任何区间比较恒 False，会绕过下面的范围检查
+            raise ValueError(f"配置 {key} 需为有限数字")
         lo, hi = _FLOAT_RANGES.get(key, (None, None))
         if lo is not None and parsed < lo:
             raise ValueError(f"配置 {key} 不能小于 {lo}")

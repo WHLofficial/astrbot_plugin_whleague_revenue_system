@@ -1,3 +1,4 @@
+import math
 import re
 
 _MAX_TEXT_LENGTH = 50
@@ -27,6 +28,9 @@ def parse_float(raw: str, min_val: float | None = None, max_val: float | None = 
     try:
         val = float(str(raw).strip())
     except (ValueError, TypeError):
+        raise ValueError(f"Invalid number: {raw}")
+    if not math.isfinite(val):
+        # NaN 与任何区间比较恒 False，会绕过下面的范围检查
         raise ValueError(f"Invalid number: {raw}")
     if min_val is not None and val < min_val:
         raise ValueError(f"Value {val} is below minimum {min_val}")

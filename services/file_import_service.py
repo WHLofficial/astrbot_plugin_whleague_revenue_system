@@ -9,6 +9,7 @@
 
 import asyncio
 import csv
+import math
 import re
 from pathlib import Path
 
@@ -377,11 +378,13 @@ def build_attribute_rows(rows: list[list[str]]) -> tuple[list, list[str]]:
         try:
             if influence_raw and influence_raw != "-":
                 influence = float(influence_raw)
+                if not math.isfinite(influence):
+                    raise ValueError("influence")
             if capacity_raw and capacity_raw != "-":
                 capacity = int(float(capacity_raw))
             if tier_raw and tier_raw != "-":
                 tier = int(float(tier_raw))
-        except ValueError:
+        except (ValueError, OverflowError):
             errors.append(f"第{rownum}行: 属性格式错误（影响力/容量/等级）")
             continue
         records.append((team, influence, capacity, tier))

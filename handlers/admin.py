@@ -15,7 +15,7 @@ from ..services.fixture_service import FixtureError
 from ..services.stadium_service import StadiumError
 from ..services.formula import SELL_OUT_FILL
 from ..services.window_service import SettleError
-from ..utils.security import format_int, format_m, parse_int, parse_qq, parse_qq_arg
+from ..utils.security import format_int, format_m, parse_float, parse_int, parse_qq, parse_qq_arg
 
 _FACILITY_ALIASES = {
     "商业区": "commercial", "商业": "commercial", "commercial": "commercial",
@@ -290,7 +290,7 @@ class AdminHandler:
             if len(fields) < 2:
                 continue
             try:
-                influence = float(fields[1]) if len(fields) >= 2 and fields[1] != "-" else None
+                influence = parse_float(fields[1]) if len(fields) >= 2 and fields[1] != "-" else None
                 capacity = parse_int(fields[2], min_val=1) if len(fields) >= 3 and fields[2] != "-" else None
                 tier = parse_int(fields[3], min_val=0) if len(fields) >= 4 and fields[3] != "-" else None
                 result = await self._run(
