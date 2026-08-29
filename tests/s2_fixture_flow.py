@@ -423,3 +423,56 @@ async def test_cancelled_excluded_from_form_points():
         assert r5["results"][0]["form_pts"] == 9, r5
     finally:
         await env.teardown()
+
+
+async def test_duplicate_home_lines_rejected_before_any_pay():
+    """同批录入同一主队多行：fail-fast 拒绝，且不产生任何结果/流水（审查 🔴 重复行双付款回归）。"""
+    env = await TestEnv().setup()
+    try:
+        await env.fixture_service.import_fixtures("1 利物浦 巴塞罗那\n1 纽卡斯尔联 勒沃库森\n")
+        await env.fixture_service.forecast_round(1)
+        try:
+            await env.fixture_service.record_results(1, "利物浦 胜 2-0\n利物浦 负 0-1\n")
+        except FixtureError as e:
+            assert "多行" in str(e), e
+        else:
+            raise AssertionError("同批重复主队应被拒绝")
+        matches = await env.dao.get_round_matches(1, 1, 1)
+        liverpool = [m for m in matches if m["home_team"] == "利物浦"][0]
+        assert liverpool["result"] is None, liverpool
+        # 余额只含启动资金，不含任何比赛收入流水
+        assert await env.dao.list_transactions("利物浦", 1, 1) == []
+    finally:
+        await env.teardown()
+
+
+async def test_concurrent_record_claim_rejects_second_pay():
+    """result 原子认领：已被并发录入的比赛再次录入不得重复记账（审查 🔴 并发双付款回归）。"""
+    env = await TestEnv().setup()
+    try:
+        await env.fixture_service.import_fixtures("1 利物浦 巴塞罗那\n")
+        await env.fixture_service.forecast_round(1)
+        match = await env.dao.get_round_matches(1, 1, 1)
+        mid = match[0]["id"]
+
+        # 模拟并发请求抢先原子认领成功
+        claimed = await env.dao.claim_match_result(mid, "胜", 1000, 1.0, 0.5, 0.2, "1-0")
+        assert claimed == 1, claimed
+
+        # 用认领前的陈旧 match 快照直调 _record_one，模拟真并发交错：
+        # 认领门必须在记账前拦下第二个请求
+        try:
+            await env.fixture_service._record_one(match[0], "胜", 1, 1, "2-0")
+        except FixtureError as e:
+            assert "并发" in str(e), e
+        else:
+            raise AssertionError("已被并发认领的场次应录入失败")
+
+        # 同一比赛二次认领必须返回 0（认领只允许发生一次）
+        again = await env.dao.claim_match_result(mid, "负", 900, 0.8, 0.4, 0.1, "0-1")
+        assert again == 0, again
+        # 抢先者之外不得新增任何流水（记录方在认领失败后立即中止）
+        txs = await env.dao.list_transactions("利物浦", 1, 1)
+        assert txs == [], txs
+    finally:
+        await env.teardown()

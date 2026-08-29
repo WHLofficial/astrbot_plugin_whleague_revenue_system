@@ -339,6 +339,11 @@ class FixtureService:
         rows = parse_result_lines(text)
         if not rows:
             raise FixtureError("没有可录入的赛果")
+        seen_homes = set()
+        for home, _r, _s in rows:
+            if home in seen_homes:
+                raise FixtureError(f"同批录入中「{home}」出现多行，请检查后重试")
+            seen_homes.add(home)
         state = await self.get_state()
         season, window_seq = state["season_number"], state["window_seq"]
         matches = await self._dao.get_round_matches(season, window_seq, round_no, competition)
@@ -412,7 +417,12 @@ class FixtureService:
         ticket, commercial, broadcast = formula.match_revenues(
             self._cfg, att, commercial_level, broadcast_level
         )
-        await self._dao.set_match_result(match["id"], result, att, ticket, commercial, broadcast, score)
+        claimed = await self._dao.claim_match_result(
+            match["id"], result, att, ticket, commercial, broadcast, score
+        )
+        if claimed == 0:
+            # 原子认领失败：另一请求已录入该场，本次不得重复记账
+            raise FixtureError(f"「{home}」赛果已被并发录入，本次未重复记账")
         if stadium["next_attendance_mod"] != 1.0:
             await self._dao.reset_attendance_mod(home)
 

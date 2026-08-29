@@ -355,6 +355,25 @@ class StadiumDAO:
             (result, score, attendance, ticket_revenue, commercial, broadcast, match_id),
         )
 
+    async def claim_match_result(
+        self, match_id: int, result: str, attendance: int,
+        ticket_revenue: float, commercial: float, broadcast: float, score: str | None = None,
+    ) -> int:
+        """原子认领赛果录入：仅当 result 仍为 NULL 时写入，返回受影响行数（0=已被并发录入）。
+
+        记账（apply_balance/add_transaction）必须在本方法返回 1 之后进行，
+        防止并发录入对同一场比赛重复付款。
+        """
+        cur = await self._db.execute(
+            "UPDATE matches SET result=?, score=?, attendance=?, ticket_revenue=?, commercial=?, broadcast=? "
+            "WHERE id=? AND result IS NULL",
+            (result, score, attendance, ticket_revenue, commercial, broadcast, match_id),
+        )
+        try:
+            return cur.rowcount or 0
+        finally:
+            await cur.close()
+
     # ─── 影响力历史 ───────────────────────────────────────
 
     async def add_influence_history(
