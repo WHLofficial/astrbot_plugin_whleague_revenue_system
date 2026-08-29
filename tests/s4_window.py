@@ -207,3 +207,97 @@ async def test_redo_skips_choice_state_effects():
         assert any("重算跳过" in (l["text"] or "") for l in logs), [l["text"] for l in logs]
     finally:
         await env.teardown()
+
+async def test_settle_marker_reconciles_created_txs():
+    env = await TestEnv().setup()
+    try:
+        await _seed_window(env)
+        await env.dao.add_booking("利物浦", 1, 1, 1, "esports", "")
+        await env.brand_service.sign("利物浦", "亚马逊", 1, 1)
+        await env.window_service.settle()
+
+        marker = await env.dao.get_window_summary(1, 1)
+        assert marker is not None
+        marked = set(json.loads(marker["tx_ids"] or "[]"))
+        assert marked, "标记应记录结算创建的流水 ID"
+        revenue_kinds = {"ticket", "commercial", "broadcast"}
+        for s in await env.dao.list_stadiums():
+            txs = await env.dao.list_transactions(s["team_name"])
+            for t in txs:
+                if t["season_number"] == 0:
+                    continue  # init 开场资金流水
+                if t["kind"] in revenue_kinds:
+                    assert t["id"] not in marked, t
+                else:
+                    assert t["id"] in marked, \
+                        f"{s['team_name']} 流水 {t['kind']}#{t['id']} 未入标记"
+    finally:
+        await env.teardown()
+
+
+async def test_settle_crash_then_force_rerun_no_double_charge():
+    env = await TestEnv().setup()
+    try:
+        await _seed_window(env)
+        await env.dao.add_booking("利物浦", 1, 1, 1, "esports", "")
+        await env.brand_service.sign("利物浦", "亚马逊", 1, 1)
+
+        real_add = env.dao.add_transaction
+        calls = {"n": 0}
+
+        async def flaky_add(*args, **kwargs):
+            calls["n"] += 1
+            if calls["n"] == 3:
+                raise RuntimeError("模拟结算中途崩溃")
+            return await real_add(*args, **kwargs)
+
+        env.dao.add_transaction = flaky_add
+        crashed = False
+        try:
+            await env.window_service.settle()
+        except RuntimeError:
+            crashed = True
+        assert crashed, "应在第 3 笔流水处模拟崩溃"
+        env.dao.add_transaction = real_add
+
+        marker = await env.dao.get_window_summary(1, 1)
+        assert marker is not None, "崩溃后标记应已存在（结算权先认领）"
+        assert json.loads(marker["tx_ids"] or "[]"), "崩溃前创建的流水应已增量落盘"
+
+        # 强制重算：撤销已落盘流水后补齐，不得重复扣费
+        await env.window_service.settle(force=True)
+        for s in await env.dao.list_stadiums():
+            team = s["team_name"]
+            txs = await env.dao.list_transactions(team)
+            total = sum(t["amount"] for t in txs if t["kind"] != "credit")
+            bal = (await env.dao.get_balance(team))["balance"]
+            assert abs(bal - total) < 1e-6, f"{team} 余额应等于流水和: {bal} vs {total}"
+            for kind in ("maintenance", "activity", "naming"):
+                n = sum(1 for t in txs
+                        if t["kind"] == kind and t["season_number"] == 1
+                        and t["window_seq"] == 1)
+                assert n <= 1, f"{team} {kind} 流水重复 {n} 条"
+        naming = await env.dao.get_active_naming("利物浦")
+        assert naming["windows_remaining"] == 4, naming["windows_remaining"]
+    finally:
+        await env.teardown()
+
+
+async def test_brand_terminate_returns_tx_id():
+    from unittest.mock import patch
+    env = await TestEnv().setup()
+    try:
+        await _seed_window(env, fans_override={"利物浦": 4000})
+        await env.brand_service.sign("利物浦", "亚马逊", 1, 1)
+        with patch("random.random", return_value=0.0):
+            result = await env.brand_service.maybe_brand_terminate("利物浦", 1, 1, 4000.0, 2000.0)
+        assert result is not None, "跌幅 50% 且概率命中应解约"
+        assert result["tx_id"], result
+        naming = await env.dao.get_active_naming("利物浦")
+        assert naming is None, "解约后不应再有生效冠名"
+        txs = await env.dao.list_transactions("利物浦", season=1, window_seq=1)
+        match = [t for t in txs if t["id"] == result["tx_id"]]
+        assert match and match[0]["kind"] == "naming" and match[0]["amount"] == 0.0, match
+        assert "解约" in match[0]["note"], match[0]["note"]
+    finally:
+        await env.teardown()

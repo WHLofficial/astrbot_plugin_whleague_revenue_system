@@ -511,15 +511,19 @@ class EventEngine:
     # ─── 结算 ─────────────────────────────────────────────
 
     async def settle_choices(self, season: int, window_seq: int,
-                             apply_state: bool = True) -> dict:
+                             apply_state: bool = True, tx_sink: list | None = None,
+                             on_batch=None) -> dict:
         """结算当前窗口全部待定选择：已定按概率掷骰、未定按最差兜底。
 
         返回的 tx_ids 并入窗口结算的可撤销集合；每个已结事件写一行结算短文案
         （LLM，超限/失败回退确定性摘要）到 events_log.text。
         apply_state=False（强制重算）只重记账目，跳过死忠/上座状态应用。
+        tx_sink：外部共享列表，流水 ID 实时并入（供结算增量持久化）；on_batch：
+        每结完一条选择后的回调（把已累计的 ID 落盘，中途崩溃可精确撤销）。
         """
         rows = await self._dao.get_unresolved_choices(season, window_seq)
-        return await self._settle_rows(rows, apply_state=apply_state)
+        return await self._settle_rows(rows, apply_state=apply_state,
+                                       tx_sink=tx_sink, on_batch=on_batch)
 
     async def settle_now(self, season: int, window_seq: int,
                          include_undecided: bool = False) -> dict:
@@ -533,9 +537,10 @@ class EventEngine:
             rows = [c for c in rows if c["choice_no"] is not None]
         return await self._settle_rows(rows, apply_state=True)
 
-    async def _settle_rows(self, rows, apply_state: bool) -> dict:
+    async def _settle_rows(self, rows, apply_state: bool, tx_sink: list | None = None,
+                           on_batch=None) -> dict:
         resolved = []
-        tx_ids: list[int] = []
+        tx_ids: list[int] = tx_sink if tx_sink is not None else []
         llm_max = int(self._cfg.get("llm_max_calls", 8))
         used = 0
         for c in rows:
@@ -543,6 +548,8 @@ class EventEngine:
             used += 1
             resolved.append(await self._resolve_choice(c, tx_ids, apply_state=apply_state,
                                                        use_llm=use_llm))
+            if on_batch is not None:
+                await on_batch()
         return {"resolved": resolved, "tx_ids": tx_ids}
 
     async def _resolve_choice(self, c, tx_ids: list[int], apply_state: bool, use_llm: bool) -> dict:

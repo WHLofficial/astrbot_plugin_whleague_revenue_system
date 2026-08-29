@@ -93,11 +93,11 @@ class BrandService:
         if random.random() >= float(self._cfg.get("naming_terminate_probability", 0.3)):
             return None
         await self._dao.terminate_naming(team_name)
-        await self._dao.add_transaction(
+        tx_id = await self._dao.add_transaction(
             team_name, season, window_seq, "naming", 0.0,
             note=f"{row['brand']} 因球迷流失提前解约",
         )
-        return {"team": team_name, "brand": row["brand"]}
+        return {"team": team_name, "brand": row["brand"], "tx_id": tx_id}
 
     # ─── 品牌池 ───────────────────────────────────────────
 

@@ -641,6 +641,21 @@ class StadiumDAO:
             (season, window_seq),
         )
 
+    async def claim_window_summary(self, season: int, window_seq: int) -> int:
+        """原子认领窗口结算权：借 UNIQUE(season_number, window_seq)，仅一个请求能插入成功。
+
+        返回受影响行数：1=获得结算权；0=该窗口已有标记（已结算/并发已认领）。
+        标记先于任何扣费创建，配合 tx_ids 增量持久化，中途崩溃后强制重算可精确撤销。
+        """
+        cur = await self._db.execute(
+            "INSERT OR IGNORE INTO window_summaries (season_number, window_seq, tx_ids) VALUES (?, ?, '[]')",
+            (season, window_seq),
+        )
+        try:
+            return cur.rowcount or 0
+        finally:
+            await cur.close()
+
     async def get_window_summary(self, season: int, window_seq: int):
         return await self._db.fetchone(
             "SELECT * FROM window_summaries WHERE season_number=? AND window_seq=?",

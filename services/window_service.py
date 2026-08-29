@@ -5,6 +5,8 @@
 统一兑现（已定按概率掷骰、未定按最差结果兜底）。
 「强制」重算 = 撤销上次结算创建的流水（按 window_summaries 记录的 ID）并重算余额，
 重置选择事件后随本次结算重新兑现；死忠演化是状态变更（无历史快照），重算不重复执行。
+结算权经 claim_window_summary 原子认领（标记先于扣费创建），流水 ID 逐批增量持久化：
+中途崩溃后强制重算可按已记录 ID 精确撤销，不会重复扣费。
 """
 
 import json
@@ -56,12 +58,31 @@ class WindowService:
             logger.info(f"Force re-settle window {season}-{window_seq}: removed {removed} transactions.")
             # 重置该窗口已结算的选择事件，随本次结算重新兑现
             await self._dao.reset_choices_for_redo(season, window_seq)
+            # 撤销后清空标记内 ID，随本次结算重新增量记录
+            await self._dao.save_window_summary_tx_ids(season, window_seq, "[]")
+        else:
+            # 原子认领结算权：并发/重复结算在此拦下（标记先于任何扣费创建）
+            claimed = await self._dao.claim_window_summary(season, window_seq)
+            if claimed == 0:
+                season_label = await self._dao.season_label(season)
+                raise SettleError(f"{season_label} 窗口 {window_seq} 已结算（可加「强制」撤销重算）")
+
+        async def _persist_tx_ids() -> None:
+            # 增量持久化：每笔流水创建后立即落盘，中途崩溃后强制重算按已记录 ID 精确撤销
+            await self._dao.save_window_summary_tx_ids(season, window_seq, json.dumps(created_ids))
+
+        async def _record_tx(team: str, kind: str, amount: float, note: str) -> int:
+            tx_id = await self._dao.add_transaction(team, season, window_seq, kind, amount, note=note)
+            created_ids.append(tx_id)
+            await _persist_tx_ids()
+            return tx_id
 
         # 事件选择结算：已定按选项概率掷骰、未定按最差结果兜底；流水并入可撤销集合。
         # 强制重算（redo）只重记账目类效果，跳过死忠/上座等持久状态应用（避免复利叠加）。
-        choice_res = await self._event_engine.settle_choices(season, window_seq,
-                                                             apply_state=not redo)
-        created_ids: list[int] = list(choice_res["tx_ids"])
+        created_ids: list[int] = []
+        await self._event_engine.settle_choices(season, window_seq,
+                                                apply_state=not redo,
+                                                tx_sink=created_ids, on_batch=_persist_tx_ids)
         lines = []
 
         # 死忠演化每窗口仅执行一轮（一次调用作用于全部球队），重算时跳过
@@ -77,9 +98,8 @@ class WindowService:
             maintenance = formula.tier_maintenance(self._cfg, s["tier"], s["capacity"], len(home_matches))
             if maintenance > 0:
                 await self._dao.apply_balance(team, -maintenance)
-                created_ids.append(await self._dao.add_transaction(
-                    team, season, window_seq, "maintenance", -maintenance,
-                    note=f"半赛季维护（{len(home_matches)} 场）"))
+                await _record_tx(team, "maintenance", -maintenance,
+                                 note=f"半赛季维护（{len(home_matches)} 场）")
                 parts.append(f"维护 −{maintenance:.2f}M")
 
             # 2) 档期活动兑现
@@ -92,15 +112,13 @@ class WindowService:
                 )
                 if act["income"] > 0:
                     await self._dao.apply_balance(team, act["income"])
-                    created_ids.append(await self._dao.add_transaction(
-                        team, season, window_seq, "activity", act["income"],
-                        note=f"{booking['activity_type']}（档位{booking['slot_no']}）"))
+                    await _record_tx(team, "activity", act["income"],
+                                     note=f"{booking['activity_type']}（档位{booking['slot_no']}）")
                     parts.append(f"活动 +{act['income']:.2f}M")
                 if act["extra_maintenance"] > 0:
                     await self._dao.apply_balance(team, -act["extra_maintenance"])
-                    created_ids.append(await self._dao.add_transaction(
-                        team, season, window_seq, "maintenance",
-                        -act["extra_maintenance"], note="演唱会草皮损坏"))
+                    await _record_tx(team, "maintenance", -act["extra_maintenance"],
+                                     note="演唱会草皮损坏")
                     parts.append(f"草皮维修 −{act['extra_maintenance']:.2f}M")
 
             # 3) 冠名费 + 到期（重算时不重复扣窗口数）
@@ -108,9 +126,7 @@ class WindowService:
             if naming:
                 fee = naming["fee_per_window"]
                 await self._dao.apply_balance(team, fee)
-                created_ids.append(await self._dao.add_transaction(
-                    team, season, window_seq, "naming", fee,
-                    note=f"{naming['brand']} 冠名费"))
+                await _record_tx(team, "naming", fee, note=f"{naming['brand']} 冠名费")
                 parts.append(f"冠名 +{fee:.2f}M")
                 if not redo:
                     await self._dao.tick_naming(team)
@@ -124,9 +140,13 @@ class WindowService:
                     parts.append(f"死忠 {fans_before:,.0f}→{fans_after:,.0f} ({delta:+d})")
             else:
                 fans_before = fans_after = s["fans_diehards"]
-            await self._brand_service.maybe_brand_terminate(team, season, window_seq, fans_before, fans_after)
+            terminated = await self._brand_service.maybe_brand_terminate(
+                team, season, window_seq, fans_before, fans_after)
+            if terminated and terminated.get("tx_id"):
+                created_ids.append(terminated["tx_id"])
+                await _persist_tx_ids()
 
-            # 5) 事件回顾
+            # 事件回顾
             events = await self._dao.get_window_events(team, season, window_seq)
             for ev in events:
                 parts.append(f"事件·{ev['text'] or ev['event_id']}")
@@ -136,6 +156,5 @@ class WindowService:
             lines.append(f"· {team}：{'，'.join(parts) if parts else '无变动'}")
 
         await self._dao.expire_namings()
-        await self._dao.add_window_summary(season, window_seq)
-        await self._dao.save_window_summary_tx_ids(season, window_seq, json.dumps(created_ids))
+        await _persist_tx_ids()
         return {"season": season, "window_seq": window_seq, "lines": lines}
