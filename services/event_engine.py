@@ -980,7 +980,7 @@ class EventEngine:
         即发型：effects_text 为 JSON 文本（money/fans_pct/maintenance/attendance_mod）；
         选择型：options_text 为选项 JSON 数组文本（结构同 LLM 草稿，效果自动钳制）。
         """
-        from .llm_writer import _clamp_event
+        from .llm_writer import _clamp_effects, _clamp_event
 
         name = str(name or "").strip()
         # 重名防护：与已采纳事件同名即拒绝（流水 note 与选择录入都按名匹配，
@@ -1018,6 +1018,12 @@ class EventEngine:
             raise EventError("effects 需为 JSON 文本，如 {\"money\": 3}（money/fans_pct/maintenance/attendance_mod）")
         if not isinstance(effects, dict):
             raise EventError("effects 需为 JSON 对象")
+        # 即发效果与 LLM 草稿同强度钳制：越界取边界、非数值直接拒绝，
+        # 防止触发时 float() 中断整个分配且无流水可撤销
+        try:
+            effects = _clamp_effects(effects, money_clamp, fans_clamp, maintenance_clamp)
+        except (ValueError, TypeError) as e:
+            raise EventError(f"effects 含非法数值（money/fans_pct/maintenance/attendance_mod 需为数字）: {e}")
         await self._dao.upsert_event(
             event_id, name.strip(), category.strip() or "自定义", weight,
             "{}", _json.dumps(effects, ensure_ascii=False), name.strip(),

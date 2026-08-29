@@ -1041,3 +1041,37 @@ async def test_ask_plain_str_result():
         assert len(drafts) == 1 and drafts[0]["name"] == "纯字符串事件"
     finally:
         await env.teardown()
+
+async def test_add_custom_instant_effects_clamped():
+    """自定义即发事件效果入库前钳制：越界取边界、非数值拒绝、触发按钳后值入账。"""
+    from astrbot_plugin_whleague_revenue_system.services.event_engine import EventError
+
+    env = await TestEnv().setup()
+    try:
+        await env.stadium_service.import_attributes("利物浦", influence=150.0)
+        # 正向越界金额钳到 +8.0（event_money_clamp 默认）
+        await env.event_engine.add_custom("天价赞助", "商业", 5, '{"money": 999999}')
+        rows = {r["name"]: r for r in await env.dao.list_events("adopted")}
+        effects = json.loads(rows["天价赞助"]["effects_json"])
+        assert effects["money"] == 8.0, effects
+        # 负向越界与 attendance_mod 越界同理
+        await env.event_engine.add_custom("巨额罚款", "事故", 5, '{"money": -1e9, "attendance_mod": 99}')
+        rows = {r["name"]: r for r in await env.dao.list_events("adopted")}
+        clamped = json.loads(rows["巨额罚款"]["effects_json"])
+        assert clamped["money"] == -8.0 and clamped["attendance_mod"] == 2.0, clamped
+        # 非数值直接拒绝且不入库
+        try:
+            await env.event_engine.add_custom("坏效果", "事故", 5, '{"money": "abc"}')
+            assert False, "非数值 effects 应被拒绝"
+        except EventError as e:
+            assert "非法数值" in str(e)
+        assert not any(r["name"] == "坏效果" for r in await env.dao.list_events("adopted"))
+        # 触发按钳后值入账
+        bal0 = (await env.dao.get_balance("利物浦"))["balance"]
+        await env.event_engine.trigger_team("利物浦", 1, 1, event_id=rows["天价赞助"]["event_id"])
+        txs = [t for t in await env.dao.list_transactions("利物浦", season=1, window_seq=1)
+               if t["kind"] == "event"]
+        assert any(abs(t["amount"] - 8.0) < 1e-9 for t in txs), txs
+        assert abs((await env.dao.get_balance("利物浦"))["balance"] - (bal0 + 8.0)) < 1e-6
+    finally:
+        await env.teardown()
