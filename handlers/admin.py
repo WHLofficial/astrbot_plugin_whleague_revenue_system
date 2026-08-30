@@ -239,7 +239,8 @@ class AdminHandler:
                     if champ.get("brand"):
                         yield event.plain_result(
                             f"🏆 上季冠军 {champ['team']}（{champ['pts']} 分）——"
-                            f"品牌「{champ['brand']}」热度 +0.10，满意度 +0.10")
+                            f"品牌「{champ['brand']}」热度 +{champ.get('heat_delta', 0.10):g}，"
+                            f"满意度 +0.10")
                     else:
                         yield event.plain_result(
                             f"🏆 上季冠军 {champ['team']}（{champ['pts']} 分）")
@@ -845,8 +846,12 @@ class AdminHandler:
             yield event.plain_result("用法: /主场品牌定档 <品牌id> <头部/新兴/口碑> [行业]")
             return
         industry = parts[3] if len(parts) >= 4 else None
+        market = getattr(self._plugin, "market_service", None)
+        if market is None:
+            yield event.plain_result("市场服务未启用")
+            return
         result = await self._run(
-            event, self._plugin.market_service.set_tier(brand_id, parts[2], industry)
+            event, market.set_tier(brand_id, parts[2], industry)
         )
         if "error" in result:
             yield event.plain_result(result["error"])

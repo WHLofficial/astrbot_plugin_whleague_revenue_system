@@ -11,6 +11,9 @@ class StadiumDAO:
     def _now_str() -> str:
         return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
+    # 服务层公开入口（不再跨层调私有 _now_str）
+    now_str = _now_str
+
     async def set_config(self, key: str, value: str) -> None:
         await self._db.execute(
             "INSERT INTO plugin_config (key, value, updated_at) VALUES (?, ?, datetime('now','localtime')) "
@@ -578,6 +581,11 @@ class StadiumDAO:
     async def get_brand_by_name(self, brand: str):
         return await self._db.fetchone(
             "SELECT * FROM brand_pool WHERE brand=?", (brand,)
+        )
+
+    async def get_brand(self, brand_id: int):
+        return await self._db.fetchone(
+            "SELECT * FROM brand_pool WHERE id=?", (brand_id,)
         )
 
     async def list_brands(self, status: str | None = None) -> list:

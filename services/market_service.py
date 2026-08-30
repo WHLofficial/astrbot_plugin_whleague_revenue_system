@@ -62,12 +62,14 @@ class MarketService:
         return changed
 
     async def set_tier(self, brand_id: int, tier: str, industry: str | None = None) -> None:
-        """管理定档：写入档位并锁档（退出自动排名），可选改行业。"""
+        """管理定档：写入档位并锁档（退出自动排名），可选改行业（行业名钳 8 字，与 LLM 生成一致）。"""
         if tier not in ("头部", "新兴", "口碑"):
             raise MarketError("档位需为 头部/新兴/口碑")
         brands = {int(b["id"]): b for b in await self._dao.list_brands()}
         if brand_id not in brands:
             raise MarketError("品牌不存在（/主场品牌列表 查看 ID）")
+        if industry:
+            industry = industry.strip()[:8] or None
         await self._dao.update_brand_tier(brand_id, tier, industry=industry, lock=True)
 
     # ─── 热度反馈 ─────────────────────────────────────────
@@ -79,7 +81,7 @@ class MarketService:
         rules = self._heat_rules()
         low = float(rules.get("clamp_low", 0.5))
         high = float(rules.get("clamp_high", 1.5))
-        row = next((b for b in await self._dao.list_brands() if int(b["id"]) == brand_id), None)
+        row = await self._dao.get_brand(brand_id)
         if not row:
             return
         heat = min(high, max(low, float(row["heat"]) + delta))
@@ -203,8 +205,10 @@ class MarketService:
                            expire_at: str | None) -> list[str]:
         """先到先得：按平均队况估值挂公开一口价（稳健套餐），任意队先签先得。"""
         teams = await self._dao.list_stadiums()
-        avg_cap = sum(float(s["capacity"]) for s in teams) / len(teams) if teams else 0.0
-        avg_fans = sum(float(s["fans_diehards"]) for s in teams) / len(teams) if teams else 0.0
+        if not teams:
+            return []
+        avg_cap = sum(float(s["capacity"]) for s in teams) / len(teams)
+        avg_fans = sum(float(s["fans_diehards"]) for s in teams) / len(teams)
         lines = []
         for brand in sellers:
             fee = formula.naming_fee(self._cfg, avg_cap, avg_fans, float(brand["heat"]))
@@ -239,7 +243,7 @@ class MarketService:
             raise MarketError("该报价已被接受")
         if offer["status"] != "pending":
             raise MarketError("该报价已失效")
-        if offer["expire_at"] and offer["expire_at"] <= self._dao._now_str():
+        if offer["expire_at"] and offer["expire_at"] <= self._dao.now_str():
             raise MarketError("该报价已超过时效，无法签约")
         if offer["team_name"] and offer["team_name"] != team_name:
             raise MarketError("该报价是发给其他球队的定向报价")
@@ -269,7 +273,7 @@ class MarketService:
         if mode == "常态":
             return ["当前为常态模式：/主场冠名 <品牌> 直接签约"]
         await self._dao.expire_stale_offers()
-        now = self._dao._now_str()
+        now = self._dao.now_str()
         lines = []
         mine = await self._dao.list_pending_offers_for_team(team_name)
         if mine:

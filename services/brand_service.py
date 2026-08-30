@@ -342,8 +342,9 @@ class BrandService:
         if naming:
             brand = await self._dao.get_brand_by_name(naming["brand"])
             if brand:
-                await self._adjust_heat(int(brand["id"]), float(brand["heat"]),
-                                        float(self._heat_rules().get("champion", 0.10)))
+                heat_delta = float(self._heat_rules().get("champion", 0.10))
+                await self._adjust_heat(int(brand["id"]), float(brand["heat"]), heat_delta)
+                info["heat_delta"] = heat_delta
             sat = min(2.0, round(float(naming["satisfaction"]) + 0.10, 3))
             await self._dao.update_naming_satisfaction(champ["team"], sat)
             info["satisfaction"] = sat
