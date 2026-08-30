@@ -355,6 +355,11 @@ WEATHER_COLORS = {
 }
 
 
+def _fs_safe(text: str) -> str:
+    """competition 等外部文本入文件名：只保留词字符与连字符（\\w 含 CJK）。"""
+    return re.sub(r"[^\w-]+", "_", str(text)).strip("_")[:24] or "x"
+
+
 def _fmt_k(v: int) -> str:
     if v >= 1000:
         return f"{v / 1000:g}k"
@@ -386,7 +391,10 @@ def _draw_trend(title: str, subtitle: str, series, out_path: str,
     legend_cols = 2 if len(series) > 14 else 1
     per_col = math.ceil(len(series) / legend_cols)
     legend_row_h = 28 * S
-    margin_r = min(340 * S, 70 * S + max(len(n) for n in names) * 24 * S + 20 * S)
+    name_w = (max(len(n) for n in names) if names else 4) * 24 * S
+    legend_pitch = name_w + 60 * S
+    # 图例按实际列数预留宽度：双列时若仍按单列上限预留，第二列会画出画布
+    margin_r = min(legend_cols * legend_pitch + 36 * S, 870 * S)
     margin_l = 110 * S
     plot_w = W - margin_l - margin_r
     plot_h = H - margin_t - margin_b
@@ -439,7 +447,7 @@ def _draw_trend(title: str, subtitle: str, series, out_path: str,
         col = i // per_col
         row = i % per_col
         ly = margin_t - 20 * S + row * legend_row_h
-        px = lx + col * (max(len(n) for n in names) * 24 * S + 60 * S)
+        px = lx + col * legend_pitch
         color = PALETTE[i % len(PALETTE)]
         dr.rectangle([px, ly + 4 * S, px + 16 * S, ly + 20 * S], fill=color)
         dr.text((px + 24 * S, ly), name, font=f_axis, fill=TEXT_DARK)
@@ -470,10 +478,15 @@ class ChartService:
         return d
 
     def _cleanup_oldest(self, keep: int = 50) -> int:
-        files = sorted(
-            (p for p in self.charts_dir.glob("*.png") if p.is_file()),
-            key=lambda p: p.stat().st_mtime,
-        )
+        entries = []
+        for p in self.charts_dir.glob("*.png"):
+            try:
+                if p.is_file():
+                    entries.append((p.stat().st_mtime, p))
+            except OSError:
+                continue  # 并发下文件可能在列出与 stat 之间消失
+        entries.sort(key=lambda t: t[0])
+        files = [p for _, p in entries]
         removed = 0
         while len(files) > keep:
             old = files.pop(0)
@@ -532,7 +545,7 @@ class ChartService:
             ("观众人数", 140, "r"), ("上座率", 110, "r"),
         ]
         totals_strip = build_totals_strip(total, avg)
-        out = self.charts_dir / f"round_s{season}_w{window_seq}_{competition}_r{round_no}.png"
+        out = self.charts_dir / f"round_s{season}_w{window_seq}_{_fs_safe(competition)}_r{round_no}.png"
         try:
             _draw_table(title, subtitle, headers, rows, totals_strip, str(out),
                         header_fill=header_fill, header_text=header_text)
@@ -606,7 +619,7 @@ class ChartService:
                           wx_rows, None, header_fill, header_text, row_colors=wx_colors, scale=S)
         img = img.resize((width, height), Image.LANCZOS)
 
-        out = self.charts_dir / f"preview_s{season}_w{window_seq}_{competition}_r{round_no}.png"
+        out = self.charts_dir / f"preview_s{season}_w{window_seq}_{_fs_safe(competition)}_r{round_no}.png"
         try:
             img.save(out)
         except ChartError:
@@ -626,7 +639,8 @@ class ChartService:
         series = []
         for s in stadiums:
             matches = await self._dao.get_home_matches_season(s["team_name"], season)
-            played = [m for m in matches if m["result"]]
+            # 取消场（result="C"）无观众，计入会画出 0 点并拉低场均
+            played = [m for m in matches if m["result"] and m["result"] != "C"]
             if played:
                 pts = [(i + 1, int(m["attendance"]) if m["attendance"] is not None else 0)
                        for i, m in enumerate(played)]

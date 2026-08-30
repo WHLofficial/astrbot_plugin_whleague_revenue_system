@@ -17,6 +17,12 @@ from astrbot.api import logger
 
 _ALLOWED_EXTS = (".csv", ".xlsx")
 
+# Windows 文件名非法字符（含控制符）与保留设备名
+_WIN_ILLEGAL_RE = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
+_WIN_RESERVED = {"con", "prn", "aux", "nul"} | {
+    f"{p}{i}" for p in ("com", "lpt") for i in range(1, 10)
+}
+
 # 文件名前缀 → 导入类型（对标兄弟插件 growth_system 的前缀判型）。
 # 赛果类额外把「前缀后剩余部分」当作轮次文本（赛果_顶级1.csv → 轮次「顶级1」）。
 _IMPORT_PREFIXES = (
@@ -199,9 +205,15 @@ def parse_import_name(name: str) -> tuple[str, str | None] | None:
 def save_uploaded(db_path: str, file_path: str, file_name: str,
                   max_size_mb: float = 20.0) -> Path:
     """把收到的群文件复制进 imports 目录（净化文件名 + 扩展名/大小校验）。"""
-    safe = Path(str(file_name or "")).name  # 只取文件名，去路径段
+    safe = _WIN_ILLEGAL_RE.sub("_", Path(str(file_name or "")).name)  # 去路径段 + 非法字符
+    safe = safe.strip(" .")
     if not safe or safe in (".", ".."):
         raise FileImportError("文件名不合法")
+    if Path(safe).stem.lower() in _WIN_RESERVED:
+        raise FileImportError(f"文件名是 Windows 保留设备名：{safe}")
+    if len(safe) > 120:  # 保扩展名截断，防超长文件名写入失败
+        suffix = Path(safe).suffix
+        safe = safe[: 120 - len(suffix)] + suffix
     if Path(safe).suffix.lower() not in _ALLOWED_EXTS:
         raise FileImportError(f"仅支持 .csv/.xlsx 文件：{safe}")
     src = Path(file_path)

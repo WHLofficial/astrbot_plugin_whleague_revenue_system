@@ -172,9 +172,11 @@ class LlmWriter:
             raise RuntimeError("LLM 返回格式不是 JSON 数组")
         drafts = []
         for d in raw[:count]:
+            if not isinstance(d, dict):
+                continue
             try:
                 drafts.append(_clamp_event(d, money_clamp, fans_clamp, maintenance_clamp))
-            except (ValueError, TypeError):
+            except (ValueError, TypeError, AttributeError):
                 continue
         if not drafts:
             raise RuntimeError("LLM 事件均未通过结构校验")
@@ -203,7 +205,15 @@ class LlmWriter:
         raw = _extract_json(text)
         if not isinstance(raw, list):
             raise RuntimeError("LLM 返回格式不是 JSON 数组")
-        return [_clamp_brand(d) for d in raw[:count]]
+        drafts = []
+        for d in raw[:count]:
+            if not isinstance(d, dict):
+                continue
+            try:
+                drafts.append(_clamp_brand(d))
+            except (ValueError, TypeError, AttributeError):
+                continue
+        return drafts
 
 
 def _fill_template(template: str, team: str, stadium: str) -> str:

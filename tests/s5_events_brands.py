@@ -735,6 +735,24 @@ async def test_llm_design_drafts():
         await env.teardown()
 
 
+async def test_llm_design_skips_nondict_items():
+    """LLM 返回数组中的非 dict 项逐条跳过，不再让整个批次失败（事件+品牌）。"""
+    env = await TestEnv().setup()
+    try:
+        env.provider.set_response(
+            '["垃圾字符串", 42, {"name":"正常事件","category":"天气衍生","weight":5,'
+            '"effects":{"money":1},"template":"t"}]'
+        )
+        drafts = await env.event_engine.generate_drafts(3)
+        assert len(drafts) == 1, drafts
+        assert drafts[0]["name"] == "正常事件"
+        env.provider.set_response('["x", {"brand":"测试品牌","heat":5}]')
+        bd = await env.brand_service.generate_drafts(2)
+        assert len(bd) == 1 and bd[0]["brand"] == "测试品牌", bd
+    finally:
+        await env.teardown()
+
+
 async def test_brand_pool_and_sign():
     env = await TestEnv().setup()
     try:

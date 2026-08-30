@@ -431,7 +431,7 @@ async def test_preview_chart_weather_block_present():
 
 
 async def test_chart_cancelled_match():
-    """取消场次：轮次图能出（观众 -、不算场均）、全取消场均=0；走势图含 0 点。"""
+    """取消场次：轮次图能出（观众 -、不算场均）、全取消场均=0；走势图不含取消队。"""
     env = await TestEnv().setup()
     try:
         for team, inf in [("利物浦", 150.0), ("巴塞罗那", 120.0), ("纽卡斯尔联", 130.0)]:
@@ -452,9 +452,11 @@ async def test_chart_cancelled_match():
         st2 = await env.fixture_service.round_stats(2)
         assert any("取消" in ln for ln in st2["lines"]), st2
         assert st2["totals"]["attendance"] == 0, st2["totals"]
-        # 走势图含取消（0 标记）
+        # 走势图不含取消队（利物浦仅剩取消场，图里只有纽卡斯尔联一条线）
         pt = await svc.render_season_chart()
         assert _png_ok(pt), pt
+        from astrbot_plugin_whleague_revenue_system.services.chart_service import PALETTE
+        assert _color_count(pt, PALETTE[1]) == 0, "取消队不应出现在走势图中"
     finally:
         await env.teardown()
 
@@ -484,3 +486,68 @@ async def test_match_sort_key_and_totals_strip():
     ]
     zero = build_totals_strip(0, 0)
     assert zero[1][0] == "0" and zero[3][0] == "0"
+
+
+async def test_trend_two_column_legend_fits():
+    """>14 队双列图例按实际列数预留宽度：旧单列预算会把第二列画出画布右缘。"""
+    import tempfile
+
+    from PIL import Image
+
+    from astrbot_plugin_whleague_revenue_system.services.chart_service import (
+        BG,
+        _draw_trend,
+    )
+    out = Path(tempfile.gettempdir()) / "whl_trend_legend_fit.png"
+    series = [(f"超长球队名称{i}", [(1, 1000 + i * 50), (2, 900 + i * 30)])
+              for i in range(18)]
+    _draw_trend("双列图例预算", "副标题", series, str(out))
+    im = Image.open(out).convert("RGB")
+    try:
+        w, h = im.size
+        px = im.load()
+        for x in (w - 1, w - 2):
+            for y in range(0, h, 7):
+                assert px[x, y] == BG, (x, y, px[x, y])
+    finally:
+        im.close()
+        out.unlink(missing_ok=True)
+
+
+async def test_fs_safe_competition_filename():
+    """competition 入文件名前净化：词字符/CJK 保留，路径与 Windows 非法字符替换。"""
+    from astrbot_plugin_whleague_revenue_system.services.chart_service import _fs_safe
+
+    assert _fs_safe("顶级联赛") == "顶级联赛"
+    assert _fs_safe("顶级/联赛:*?") == "顶级_联赛"
+    assert _fs_safe("../evil") == "evil"
+    assert _fs_safe("***") == "x"
+    assert len(_fs_safe("字" * 100)) <= 24
+
+
+async def test_cleanup_tolerates_vanished_file():
+    """清理时文件在列出与 stat 之间消失（并发删除/他端清理）不拖垮图表命令。"""
+    from unittest.mock import patch
+
+    env = await TestEnv().setup()
+    try:
+        svc = ChartService(env.db, env.dao, env.cfg)
+        d = svc.charts_dir
+        for i in range(3):
+            (d / f"old_{i}.png").write_bytes(_PNG_MAGIC + b"0" * 4096)
+        real_stat = Path.stat
+        seen = {}
+
+        def flaky(self, *a, **k):
+            seen[self.name] = seen.get(self.name, 0) + 1
+            if self.name == "old_1.png" and seen[self.name] >= 2:
+                raise FileNotFoundError(2, "vanished")
+            return real_stat(self, *a, **k)
+
+        with patch.object(Path, "stat", flaky):
+            removed = svc._cleanup_oldest(keep=2)
+        assert isinstance(removed, int)
+        # old_1 在 is_file 之后再 stat 应已消失（第 2 次触发）
+        assert seen.get("old_1.png", 0) >= 2
+    finally:
+        await env.teardown()

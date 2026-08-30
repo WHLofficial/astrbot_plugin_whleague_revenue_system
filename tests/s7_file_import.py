@@ -740,3 +740,28 @@ async def test_handler_text_paste_still_works():
         assert len(matches) == 1
     finally:
         await env.teardown()
+
+
+async def test_save_uploaded_windows_bad_names():
+    """Windows 非法字符净化/保留设备名拒绝/尾点空格剥离/超长截断。"""
+    env = await TestEnv().setup()
+    try:
+        src = Path(os.path.join(os.path.dirname(os.path.abspath(__file__)), "tmp_src2.csv"))
+        src.write_text("轮次,主队,客队\n1,利物浦,巴塞罗那\n", encoding="utf-8")
+        try:
+            t = fis.save_uploaded(env.db.db_path, str(src), "赛果:第1轮?.csv")
+            assert t.exists() and t.name == "赛果_第1轮_.csv", t.name
+            for bad in ("aux.csv", "COM1.csv"):
+                try:
+                    fis.save_uploaded(env.db.db_path, str(src), bad)
+                    assert False, f"{bad} 应拒绝"
+                except FileImportError as e:
+                    assert "保留" in str(e), e
+            t2 = fis.save_uploaded(env.db.db_path, str(src), "day.xlsx. .")
+            assert t2.name == "day.xlsx", t2.name
+            t3 = fis.save_uploaded(env.db.db_path, str(src), "长" * 300 + ".csv")
+            assert len(t3.name) <= 120 and t3.name.endswith(".csv"), len(t3.name)
+        finally:
+            src.unlink(missing_ok=True)
+    finally:
+        await env.teardown()
