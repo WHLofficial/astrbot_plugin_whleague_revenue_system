@@ -1059,6 +1059,25 @@ async def test_ask_plain_str_result():
     finally:
         await env.teardown()
 
+
+async def test_extract_json_tolerates_surrounding_prose():
+    """兜底解析：LLM 在 JSON 前后附带说明文字时仍能取出数组。"""
+    from astrbot_plugin_whleague_revenue_system.services.llm_writer import _extract_json
+
+    raw = _extract_json('好的，以下是本次设计：[{"name":"a","weight":5}] 请查收。')
+    assert isinstance(raw, list) and raw[0]["name"] == "a"
+    # 纯净输入不受影响，仍走严格解析
+    assert _extract_json('[{"name":"b"}]') == [{"name": "b"}]
+    assert _extract_json("完全没有结构化内容") is None
+
+
+async def test_extract_json_tolerates_trailing_comma():
+    """兜底解析：围栏内数组带尾逗号时仍能解析。"""
+    from astrbot_plugin_whleague_revenue_system.services.llm_writer import _extract_json
+
+    raw = _extract_json('```json\n[{"name":"a","effects":{"money":1,},},]\n```')
+    assert isinstance(raw, list) and raw[0]["effects"]["money"] == 1
+
 async def test_add_custom_instant_effects_clamped():
     """自定义即发事件效果入库前钳制：越界取边界、非数值拒绝、触发按钳后值入账。"""
     from astrbot_plugin_whleague_revenue_system.services.event_engine import EventError

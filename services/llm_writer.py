@@ -13,6 +13,7 @@ from astrbot.api import logger
 from ..utils.security import sanitize_text
 
 _JSON_BLOCK_RE = re.compile(r"```(?:json)?\s*(.*?)```", re.S)
+_TRAILING_COMMA_RE = re.compile(r",\s*([}\]])")
 
 
 class LlmWriter:
@@ -83,12 +84,16 @@ class LlmWriter:
         name = str(event_row["name"])
         category = str(event_row["category"]) if "category" in event_row.keys() else ""
         prompt = (
-            "你是足球俱乐部的场馆运营播报员。用中文写 1-2 句简短群聊风格的播报文案，"
-            "语气活泼、有画面感，可以带一点梗，但不要编造具体数字之外的金额描述。\n"
+            "你是足球俱乐部的场馆运营播报员，在球迷群里播报一条主场随机事件。\n"
+            "用中文写 1~2 句群聊风格的短播报：语气活泼、有画面感，可以带点梗。\n"
+            "事实信息（不得改动，也不得另外编造）：\n"
             f"事件：{name}（类别：{category}）\n"
             f"球队：{team}，球场：{stadium_name}\n"
             f"附加背景：{context or '无'}\n"
-            "只需要输出播报文案本身，不要解释。"
+            "硬性要求：\n"
+            "- 总长不超过 80 字，一行输出，不要换行。\n"
+            "- 不要出现任何金额、百分比或其他数值——数值由系统另行结算公布。\n"
+            "- 只输出播报文案本身，不要解释，不要用引号包裹。"
         )
         text = await self._ask(prompt)
         if not text:
@@ -109,11 +114,18 @@ class LlmWriter:
         if not self.enabled(flavor=True):
             return _fill_template(template, team, stadium)
         prompt = (
-            "你是足球俱乐部的赛事运营文案，为一次随机事件写一段 2~4 句的中文广播"
-            "（将转发给教练们做选择）。事件："
-            f"{name}（{category}）；球队：{team}，球场：{stadium}。\n"
-            "要求：写出情境与氛围，生动有画面感；不要列举操作选项，不要出现选项编号"
-            "（①②③④）或数字列表，不要出现任何概率百分比与金额数值。只输出广播正文。"
+            "你是足球俱乐部的赛事运营文案。一次主场随机事件即将广播给各位教练，"
+            "由他们自行选择应对方式，你只负责写广播中的情境叙述段。\n"
+            "用中文写 2~4 句：把事件的情境与氛围写生动、有画面感，结尾保持悬念，"
+            "把选择留给读者。\n"
+            "事实信息（不得改动）：\n"
+            f"事件：{name}（{category}）；球队：{team}，球场：{stadium}。\n"
+            "硬性要求：\n"
+            "- 总长不超过 150 字。\n"
+            "- 不要列举应对方式，不要出现选项编号（①②③④）或任何数字列表。\n"
+            "- 不要出现概率、百分比或金额数值。\n"
+            "- 不要替读者做决定或给出建议。\n"
+            "- 只输出叙述正文，不要解释、不要标题。"
         )
         text = await self._ask(prompt)
         if not text:
@@ -128,10 +140,15 @@ class LlmWriter:
             return ""
         effect_txt = "、".join(notes) if notes else "无变化"
         prompt = (
-            "你是足球俱乐部的赛事播报员，为一次随机事件结算写 1~2 句简短中文播报。\n"
-            f"事件：{name}；球队：{team}；本次：{how}；效果：{effect_txt}。\n"
-            "要求：语气简洁，说清这次结果的后果；不要出现选项编号（①②③④）与概率百分比。"
-            "只输出播报。"
+            "你是足球俱乐部的赛事播报员，播报一次主场随机事件的结算结果。\n"
+            "用中文写 1~2 句简短播报，说清这次结果的后果，语气简洁。\n"
+            "事实信息（照实播报，不得改动、不得编造其他数值）：\n"
+            f"事件：{name}；球队：{team}；结果：{how}；效果：{effect_txt}。\n"
+            "硬性要求：\n"
+            "- 总长不超过 80 字。\n"
+            "- 「效果」中给出的数值可照实引用；除此之外不要出现任何金额、百分比。\n"
+            "- 不要提及概率、运气或选项编号（①②③④）。\n"
+            "- 只输出播报，不要解释。"
         )
         text = await self._ask(prompt)
         if not text:
@@ -147,18 +164,28 @@ class LlmWriter:
         fans_clamp = float(self._cfg.get("event_fans_clamp", 0.05))
         maintenance_clamp = float(self._cfg.get("event_maintenance_clamp", 5.0))
         prompt = (
-            "为足球联赛主场随机事件系统设计新事件。"
-            f"主题：{topic or '不限'}。输出 JSON 数组，每个元素二选一：\n"
-            "一、即发事件：{\"event_type\":\"instant\",\"name\":\"事件名\",\"category\":\"分类\","
-            "\"weight\":权重整数1-100,\"effects\":{\"money\":金额M,\"fans_pct\":死忠比例小数如0.03,"
-            "\"maintenance\":维护额外支出M},\"template\":\"带{team}和{stadium}占位符的播报文案\"}\n"
-            "二、选择事件：{\"event_type\":\"choice\",\"name\":\"事件名\",\"category\":\"分类\","
-            "\"weight\":权重整数1-100,\"template\":\"…\",\"options\":[{\"name\":\"操作1\","
-            "\"desc\":\"简短说明\",\"outcomes\":[{\"w\":概率权重整数,\"effects\":{同上效果}},…]},…]}\n"
-            "选择事件需要 2~4 个选项，每个选项 2 条以上概率结果，概率权重为相对大小（会自动归一化）；"
-            "每个选项的高低概率路径应尽量一正一负。\n"
-            f"金额绝对值不要超过 {money_clamp}M，死忠百分比绝对值不要超过 {fans_clamp}，"
-            f"维护不超过 {maintenance_clamp}M。只输出 JSON 数组本身，不要任何解释或多余文字。"
+            "为足球联赛主场随机事件系统设计新事件。\n"
+            f"任务：设计 {count} 个事件，主题：{topic or '不限'}。\n"
+            "数值边界（越界会被系统自动钳制）："
+            f"金额绝对值 ≤ {money_clamp}M；死忠比例变化绝对值 ≤ {fans_clamp}"
+            "（小数，0.03 即 3%）；"
+            f"维护支出 0 ~ {maintenance_clamp}M。\n"
+            "输出 JSON 数组，只输出数组本身，不要任何解释或多余文字。每个元素为以下两类之一：\n"
+            "一、即发事件：{\"event_type\":\"instant\",\"name\":\"事件名(≤20字)\","
+            "\"category\":\"分类(≤10字)\",\"weight\":权重整数1~100,"
+            "\"effects\":{\"money\":金额M,\"fans_pct\":死忠比例小数,\"maintenance\":维护额外支出M},"
+            "\"template\":\"≤200字播报文案，必须包含{team}和{stadium}占位符\"}\n"
+            "   例：{\"event_type\":\"instant\",\"name\":\"草坪闯入者\",\"category\":\"场务\","
+            "\"weight\":30,\"effects\":{\"money\":-2.0,\"fans_pct\":0.01,\"maintenance\":1.5},"
+            "\"template\":\"一只训练海豚闯入{stadium}，{team}的工作人员手忙脚乱。\"}\n"
+            "二、选择事件：{\"event_type\":\"choice\",\"name\":\"事件名(≤20字)\","
+            "\"category\":\"分类(≤10字)\",\"weight\":权重整数1~100,"
+            "\"template\":\"≤200字广播文案，必须包含{team}和{stadium}占位符\","
+            "\"options\":[{\"name\":\"操作名\",\"desc\":\"≤40字说明\","
+            "\"outcomes\":[{\"w\":概率权重整数,\"effects\":{同上效果}},…]},…]}\n"
+            "选择事件需要 2~4 个选项，每个选项至少 2 条概率结果，w 为相对权重（系统自动归一化）；"
+            "每个选项的高概率路径与低概率路径应尽量一正一负。\n"
+            "示例仅供格式参考，不要照抄内容。"
         )
         text = await self._ask(prompt)
         if not text:
@@ -190,14 +217,20 @@ class LlmWriter:
         if not self.enabled(flavor=False):
             raise RuntimeError("LLM 品牌设计未启用（llm_design_enabled）")
         prompt = (
-            "为足球俱乐部球场冠名权设计若干个虚拟赞助品牌。"
-            f"主题：{topic or '不限'}（可以是群聊梗、虚拟科技公司、本地企业风格）。"
-            "输出 JSON 数组，每个元素："
-            "{\"brand\": \"品牌名(4-16字)\", \"heat\": 热度小数0.5-1.5, "
+            "为足球俱乐部球场冠名权市场设计虚拟赞助品牌。\n"
+            f"任务：设计 {count} 个品牌，主题：{topic or '不限'}"
+            "（可以是群聊梗、虚拟科技公司、本地企业风格）。\n"
+            "档位说明：头部=知名大牌；新兴=上升期品牌；口碑=本地亲民品牌。\n"
+            "输出 JSON 数组，只输出数组本身，不要任何解释或多余文字。每个元素：\n"
+            "{\"brand\": \"品牌名(4-16字)\", \"heat\": 热度小数0.5~1.5（越高品牌越活跃、越容易达成签约）, "
             "\"tier\": \"档位(头部/新兴/口碑)\", \"industry\": \"行业(≤8字，如 科技/饮食)\", "
             "\"pitch\": \"一句卖点(≤30字)\", "
-            "\"packages\": [可选，1-3个套餐变体 {\"pkg_name\": \"名(≤6字)\", \"windows\": 窗口数1-12, \"factor\": 每窗价格系数0.5-2.0}]}"
-            "只输出 JSON 数组。"
+            "\"packages\": [可选，1~3个套餐变体 {\"pkg_name\": \"名(≤6字)\", \"windows\": 窗口数1~12, "
+            "\"factor\": 每窗价格系数0.5~2.0}]，不提供则该品牌只有标准价}\n"
+            "   例：{\"brand\": \"星际冷却液\", \"heat\": 1.2, \"tier\": \"新兴\", "
+            "\"industry\": \"科技\", \"pitch\": \"让主场空调永不宕机\", "
+            "\"packages\": [{\"pkg_name\": \"三连冠\", \"windows\": 3, \"factor\": 1.5}]}\n"
+            "示例仅供格式参考，不要照抄内容。"
         )
         text = await self._ask(prompt)
         if not text:
@@ -269,7 +302,19 @@ def _extract_json(text: str):
     try:
         return json.loads(text)
     except json.JSONDecodeError:
-        return None
+        pass
+    # 兜底：LLM 在 JSON 前后附带说明文字、或带尾逗号时，取首尾括号切片重试
+    for open_ch, close_ch in (("[", "]"), ("{", "}")):
+        start = text.find(open_ch)
+        end = text.rfind(close_ch)
+        if start == -1 or end <= start:
+            continue
+        snippet = _TRAILING_COMMA_RE.sub(r"\1", text[start:end + 1])
+        try:
+            return json.loads(snippet)
+        except json.JSONDecodeError:
+            continue
+    return None
 
 
 def _clamp_effects(effects, money_clamp: float, fans_clamp: float, maintenance_clamp: float) -> dict:
