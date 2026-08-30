@@ -428,14 +428,13 @@ class FixtureService:
 
         total = ticket + commercial + broadcast
         await self._dao.ensure_balance(home, float(self._cfg.get("start_funds", 50.0)))
-        await self._dao.apply_balance(home, total)
-        for kind, amount in (("ticket", ticket), ("commercial", commercial), ("broadcast", broadcast)):
-            if amount <= 0:
-                continue
-            await self._dao.add_transaction(
-                home, season, window_seq, kind, amount,
-                note=f"第{match['round_no']}轮 主{home} vs 客{away}", round_no=match["round_no"],
-            )
+        note = f"第{match['round_no']}轮 主{home} vs 客{away}"
+        entries = [
+            (kind, amount, note, match["round_no"])
+            for kind, amount in (("ticket", ticket), ("commercial", commercial), ("broadcast", broadcast))
+            if amount > 0
+        ]
+        await self._dao.record_entries(home, season, window_seq, entries)
         return {
             "home": home, "away": away, "result": result, "score": score,
             "weather": match["weather"],

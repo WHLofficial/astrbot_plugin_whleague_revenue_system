@@ -247,6 +247,42 @@ class StadiumDAO:
         finally:
             await cur.close()
 
+    async def record_entries(
+        self, team_name: str, season: int, window_seq: int,
+        entries: list, build_credit_amount: float = 0.0,
+    ) -> list:
+        """余额增量与流水同事务落盘：balance += Σamount（及建设券增量），逐条插入流水。
+
+        entries: [(kind, amount, note, round_no|None), ...]；返回流水 id 列表（与 entries 等长）。
+        """
+        async def work(conn):
+            ids = []
+            delta = 0.0
+            for kind, amount, note, round_no in entries:
+                delta += amount
+                cur = await conn.execute(
+                    "INSERT INTO revenue_transactions (team_name, season_number, window_seq, round_no, kind, amount, note) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (team_name, season, window_seq, round_no, kind, amount, note),
+                )
+                try:
+                    ids.append(cur.lastrowid or 0)
+                finally:
+                    await cur.close()
+            if delta:
+                await conn.execute(
+                    "UPDATE club_balance SET balance=balance+?, updated_at=datetime('now','localtime') WHERE team_name=?",
+                    (delta, team_name),
+                )
+            if build_credit_amount:
+                await conn.execute(
+                    "UPDATE club_balance SET build_credit=build_credit+?, updated_at=datetime('now','localtime') WHERE team_name=?",
+                    (build_credit_amount, team_name),
+                )
+            return ids
+
+        return await self._db.execute_transaction(work)
+
     async def list_transactions(
         self, team_name: str, season: int | None = None, window_seq: int | None = None,
         limit: int = 100,

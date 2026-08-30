@@ -72,7 +72,10 @@ class WindowService:
             await self._dao.save_window_summary_tx_ids(season, window_seq, json.dumps(created_ids))
 
         async def _record_tx(team: str, kind: str, amount: float, note: str) -> int:
-            tx_id = await self._dao.add_transaction(team, season, window_seq, kind, amount, note=note)
+            # 余额增量与流水同事务落盘，杜绝「流水已记、余额未动」的中间态
+            (tx_id,) = await self._dao.record_entries(
+                team, season, window_seq, [(kind, amount, note, None)],
+            )
             created_ids.append(tx_id)
             await _persist_tx_ids()
             return tx_id
@@ -97,7 +100,6 @@ class WindowService:
             home_matches = await self._dao.get_home_matches_window(team, season, window_seq)
             maintenance = formula.tier_maintenance(self._cfg, s["tier"], s["capacity"], len(home_matches))
             if maintenance > 0:
-                await self._dao.apply_balance(team, -maintenance)
                 await _record_tx(team, "maintenance", -maintenance,
                                  note=f"半赛季维护（{len(home_matches)} 场）")
                 parts.append(f"维护 −{maintenance:.2f}M")
@@ -111,12 +113,10 @@ class WindowService:
                     youth_level=facilities.get(formula.FACILITY_YOUTH, 0),
                 )
                 if act["income"] > 0:
-                    await self._dao.apply_balance(team, act["income"])
                     await _record_tx(team, "activity", act["income"],
                                      note=f"{booking['activity_type']}（档位{booking['slot_no']}）")
                     parts.append(f"活动 +{act['income']:.2f}M")
                 if act["extra_maintenance"] > 0:
-                    await self._dao.apply_balance(team, -act["extra_maintenance"])
                     await _record_tx(team, "maintenance", -act["extra_maintenance"],
                                      note="演唱会草皮损坏")
                     parts.append(f"草皮维修 −{act['extra_maintenance']:.2f}M")
@@ -125,7 +125,6 @@ class WindowService:
             naming = await self._dao.get_active_naming(team)
             if naming:
                 fee = naming["fee_per_window"]
-                await self._dao.apply_balance(team, fee)
                 await _record_tx(team, "naming", fee, note=f"{naming['brand']} 冠名费")
                 parts.append(f"冠名 +{fee:.2f}M")
                 if not redo:

@@ -59,6 +59,39 @@ async def test_ensure_balance_init_tx_once():
         await env.teardown()
 
 
+async def test_record_entries_atomic_pair():
+    """record_entries：余额增量与流水同事务落盘，并发配对不产生账实分离。"""
+    env = await TestEnv().setup()
+    try:
+        await env.dao.ensure_balance("利物浦", 50.0)
+        ids = await env.dao.record_entries("利物浦", 1, 1, [
+            ("ticket", 30.0, "票", 3),
+            ("commercial", -5.5, "商", None),
+        ], build_credit_amount=2.0)
+        assert len(ids) == 2 and all(ids), ids
+        row = await env.dao.get_balance("利物浦")
+        assert abs(row["balance"] - 74.5) < 1e-6, row
+        assert abs(row["build_credit"] - 2.0) < 1e-6, row
+        txs = await env.dao.list_transactions("利物浦")
+        assert {t["kind"] for t in txs} >= {"init", "ticket", "commercial"}
+        # 未重算时账实即一致（配对原子性的核心断言）
+        total = sum(t["amount"] for t in txs if t["kind"] != "credit")
+        assert abs(row["balance"] - total) < 1e-6, (row["balance"], total)
+        # 空 entries 是无操作
+        assert await env.dao.record_entries("利物浦", 1, 1, []) == []
+
+        async def pair(i):
+            await env.dao.record_entries("利物浦", 1, 1, [("event", 1.0, f"e{i}", None)])
+
+        await asyncio.gather(*(pair(i) for i in range(20)))
+        row = await env.dao.get_balance("利物浦")
+        txs = await env.dao.list_transactions("利物浦")
+        total = sum(t["amount"] for t in txs if t["kind"] != "credit")
+        assert abs(row["balance"] - total) < 1e-6, (row["balance"], total)
+    finally:
+        await env.teardown()
+
+
 async def test_deduct_build_credit_never_negative():
     """建设券扣减事务化：券不足只扣余额内部分，并发扣减合计不超过持有量。"""
     env = await TestEnv().setup()

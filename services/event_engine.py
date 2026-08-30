@@ -383,18 +383,16 @@ class EventEngine:
         attendance_mod = float(effects.get("attendance_mod", 1.0))
 
         if money:
-            await self._dao.apply_balance(team_name, money)
-            tx_id = await self._dao.add_transaction(
-                team_name, season, window_seq, "event", money, note=label,
+            (tx_id,) = await self._dao.record_entries(
+                team_name, season, window_seq, [("event", money, label, None)],
             )
             if created_ids is not None:
                 created_ids.append(tx_id)
             notes.append(f"资金 {'+' if money > 0 else ''}{money:.1f}M")
         if maintenance:
-            await self._dao.apply_balance(team_name, -maintenance)
-            tx_id = await self._dao.add_transaction(
-                team_name, season, window_seq, "event", -maintenance,
-                note=f"{label}（维护）",
+            (tx_id,) = await self._dao.record_entries(
+                team_name, season, window_seq,
+                [("event", -maintenance, f"{label}（维护）", None)],
             )
             if created_ids is not None:
                 created_ids.append(tx_id)

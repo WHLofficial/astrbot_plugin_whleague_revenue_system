@@ -198,13 +198,14 @@ class StadiumService:
             return
         await self._dao.ensure_balance(team_name, float(self._cfg.get("start_funds", 50.0)))
         used = await self._dao.deduct_build_credit(team_name, cost)
-        await self._dao.apply_balance(team_name, -cost)
         paid_note = note if not used else f"{note}（建设券抵扣 {used:.1f}M）"
-        await self._dao.add_transaction(team_name, season, window_seq, "expand" if "扩建" in note else "upgrade", -cost, paid_note)
+        entries = [("expand" if "扩建" in note else "upgrade", -cost, paid_note, None)]
+        credit_amount = 0.0
         if self._cfg.get("build_credit_enabled", True):
-            credit = cost * float(self._cfg.get("build_credit_ratio", 0.25))
-            await self._dao.apply_balance(team_name, 0.0, build_credit_amount=credit)
-            await self._dao.add_transaction(team_name, season, window_seq, "credit", credit, "建设券返还")
+            credit_amount = cost * float(self._cfg.get("build_credit_ratio", 0.25))
+            entries.append(("credit", credit_amount, "建设券返还", None))
+        await self._dao.record_entries(team_name, season, window_seq, entries,
+                                       build_credit_amount=credit_amount)
 
     # ─── 子设施 ───────────────────────────────────────────
 

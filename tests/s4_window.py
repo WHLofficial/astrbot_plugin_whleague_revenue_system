@@ -225,7 +225,7 @@ async def test_settle_crash_then_force_rerun_no_double_charge():
         await env.dao.add_booking("利物浦", 1, 1, 1, "esports", "")
         await env.brand_service.sign("利物浦", "亚马逊", 1, 1)
 
-        real_add = env.dao.add_transaction
+        real_add = env.dao.record_entries
         calls = {"n": 0}
 
         async def flaky_add(*args, **kwargs):
@@ -234,14 +234,14 @@ async def test_settle_crash_then_force_rerun_no_double_charge():
                 raise RuntimeError("模拟结算中途崩溃")
             return await real_add(*args, **kwargs)
 
-        env.dao.add_transaction = flaky_add
+        env.dao.record_entries = flaky_add
         crashed = False
         try:
             await env.window_service.settle()
         except RuntimeError:
             crashed = True
         assert crashed, "应在第 3 笔流水处模拟崩溃"
-        env.dao.add_transaction = real_add
+        env.dao.record_entries = real_add
 
         marker = await env.dao.get_window_summary(1, 1)
         assert marker is not None, "崩溃后标记应已存在（结算权先认领）"

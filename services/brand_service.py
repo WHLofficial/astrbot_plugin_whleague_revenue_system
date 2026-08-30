@@ -69,10 +69,9 @@ class BrandService:
             fee_penalty = round(remaining * row["fee_per_window"] * penalty_ratio, 3)
             if fee_penalty > 0:
                 await self._dao.ensure_balance(team_name, float(self._cfg.get("start_funds", 50.0)))
-                await self._dao.apply_balance(team_name, -fee_penalty)
-                await self._dao.add_transaction(
-                    team_name, season, window_seq, "naming", -fee_penalty,
-                    note=f"提前解约赔款（{row['brand']}）",
+                await self._dao.record_entries(
+                    team_name, season, window_seq,
+                    [("naming", -fee_penalty, f"提前解约赔款（{row['brand']}）", None)],
                 )
         await self._dao.terminate_naming(team_name)
         return {"team": team_name, "brand": row["brand"], "penalty": fee_penalty}
