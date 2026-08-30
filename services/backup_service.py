@@ -36,13 +36,17 @@ class BackupService:
 
     def _cleanup_oldest(self) -> int:
         keep = max(1, int(self._cfg.get("backup_keep_count", 10)))
-        files = sorted(
-            (p for p in self.backup_dir.glob("revenue_*.db") if p.is_file()),
-            key=lambda p: p.stat().st_mtime,
-        )
+        files = []
+        for p in self.backup_dir.glob("revenue_*.db"):
+            try:
+                if p.is_file():
+                    files.append((p.stat().st_mtime, p))
+            except OSError as e:
+                logger.warning(f"Failed to stat old backup {p}: {e}")
+        files.sort(key=lambda t: t[0])
         removed = 0
         while len(files) > keep:
-            old = files.pop(0)
+            old = files.pop(0)[1]
             try:
                 old.unlink()
                 removed += 1

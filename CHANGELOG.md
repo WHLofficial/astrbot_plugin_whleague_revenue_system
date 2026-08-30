@@ -3,6 +3,21 @@
 本文件记录本项目的显著变更，格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [2.9.11] - 2026-08-30
+
+### Fixed
+
+- **备份清理对消失文件容错**：`_cleanup_oldest` 排序阶段逐文件 `stat` 失败（文件被并发删除）
+  不再让整次备份失败，与图表清理（v2.9.9）同款修法。
+
+### Added
+
+- **测试覆盖批次**：181 → 199 例。新增 s13 基础设施直测（备份快照/清理/异常、群白名单
+  四态、`_admin_cmd`/`_player_cmd` 门禁、群文件钩子静默与属性文件全链路）；s11/s12 补
+  `parse_int`/`parse_qq`/`parse_choice_no`/`format_m` 等 utils 直测与事务提交/回滚、
+  死锁守卫、`database is locked` 重试；s6 补 8 个 handler 层测试（发放/查看配置/设施/
+  事件与品牌生成采纳/结算/赛季统计/冠名退冠名/三图命令）。
+
 ## [2.9.10] - 2026-08-30
 
 ### Changed

@@ -38,6 +38,10 @@ class _FakeEvent:
         self.results.append(text)
         return text
 
+    def image_result(self, result):
+        self.results.append(result)
+        return result
+
 
 async def test_plugin_import_and_commands():
     from astrbot_plugin_whleague_revenue_system import main as plugin_main
@@ -738,5 +742,209 @@ async def test_remove_admin_last_admin_guard():
             _FakeEvent("/主场删除管理 30003", sender="admin", is_admin=True))]
         assert "已删除" in out2[0], out2
         assert not await env.dao.is_admin("30003")
+    finally:
+        await env.teardown()
+
+
+def _ah(env):
+    from astrbot_plugin_whleague_revenue_system.handlers.admin import AdminHandler
+    return AdminHandler(type("P", (), {
+        "dao": env.dao,
+        "config_cache": env.cfg,
+        "fixture_service": env.fixture_service,
+        "stadium_service": env.stadium_service,
+        "event_engine": env.event_engine,
+        "brand_service": env.brand_service,
+        "window_service": env.window_service,
+        "bridge": env.bridge,
+        "_persist_config": lambda k, v: None,
+    })())
+
+
+def _ph(env, with_charts=False):
+    from astrbot_plugin_whleague_revenue_system.handlers.player import PlayerHandler
+    fields = {
+        "dao": env.dao,
+        "config_cache": env.cfg,
+        "fixture_service": env.fixture_service,
+        "stadium_service": env.stadium_service,
+        "brand_service": env.brand_service,
+        "bridge": env.bridge,
+    }
+    if with_charts:
+        from astrbot_plugin_whleague_revenue_system.services.chart_service import ChartService
+        fields["chart_service"] = ChartService(env.db, env.dao, env.cfg)
+    return PlayerHandler(type("P", (), fields)())
+
+
+async def test_admin_grant_all_and_view_config():
+    env = await TestEnv().setup()
+    try:
+        handler = _ah(env)
+        # 谈判库预置 4 队 → 直接全量发放
+        r1 = [r async for r in handler.grant_all(
+            _FakeEvent("/主场发放", sender="admin", is_admin=True))]
+        assert "已为 4 支球队发放初始球场" in r1[0], r1
+        # 查看配置：标题 + 内部参数隐藏
+        r3 = [r async for r in handler.view_config(
+            _FakeEvent("/主场查看配置", sender="admin", is_admin=True))]
+        assert r3[0].startswith("⚙️ 当前配置（部分）"), r3
+        assert "<内部参数，已隐藏>" in r3[0], r3
+    finally:
+        await env.teardown()
+
+
+async def test_admin_import_facility_usage_and_apply():
+    env = await TestEnv().setup()
+    try:
+        handler = _ah(env)
+        await env.stadium_service.import_attributes("利物浦", influence=100.0)
+        # 参数不足 → 用法
+        r1 = [r async for r in handler.import_facility(
+            _FakeEvent("/主场设施 利物浦 商业区", sender="admin", is_admin=True))]
+        assert "用法: /主场设施" in r1[0], r1
+        # 未知设施
+        r2 = [r async for r in handler.import_facility(
+            _FakeEvent("/主场设施 利物浦 太空电梯 3", sender="admin", is_admin=True))]
+        assert "未知设施: 太空电梯" in r2[0], r2
+        # 等级越界
+        r3 = [r async for r in handler.import_facility(
+            _FakeEvent("/主场设施 利物浦 商业区 9", sender="admin", is_admin=True))]
+        assert "等级需为 0~5" in r3[0], r3
+        # 成功
+        r4 = [r async for r in handler.import_facility(
+            _FakeEvent("/主场设施 利物浦 商业区 2", sender="admin", is_admin=True))]
+        assert "已更新为 2 级" in r4[0], r4
+    finally:
+        await env.teardown()
+
+
+async def test_admin_generate_and_adopt_events():
+    env = await TestEnv().setup()
+    try:
+        handler = _ah(env)
+        # 数量非法
+        r0 = [r async for r in handler.generate_events(
+            _FakeEvent("/主场事件生成 abc", sender="admin", is_admin=True))]
+        assert "数量需为 1-20" in r0[0], r0
+        # 生成（LLM 桩返回 1 条）
+        env.provider.set_response(
+            '[{"name":"雨天免费停车","category":"天气衍生","weight":30,'
+            '"effects":{"money":3},"template":"t"}]'
+        )
+        r1 = [r async for r in handler.generate_events(
+            _FakeEvent("/主场事件生成 1", sender="admin", is_admin=True))]
+        assert "🤖 LLM 起草 1 个事件" in r1[0] and "雨天免费停车" in r1[0], r1
+        # 用法
+        r2 = [r async for r in handler.adopt_event(
+            _FakeEvent("/主场事件采纳", sender="admin", is_admin=True))]
+        assert "用法: /主场事件采纳" in r2[0], r2
+        # 采纳成功
+        pending = await env.dao.list_events("pending")
+        assert len(pending) == 1, pending
+        r3 = [r async for r in handler.adopt_event(
+            _FakeEvent(f"/主场事件采纳 {pending[0]['id']}", sender="admin", is_admin=True))]
+        assert "✅ 事件已采纳" in r3[0], r3
+    finally:
+        await env.teardown()
+
+
+async def test_admin_generate_and_adopt_brands():
+    env = await TestEnv().setup()
+    try:
+        handler = _ah(env)
+        env.provider.set_response('[{"brand":"老八食堂","heat":9}]')
+        r1 = [r async for r in handler.generate_brands(
+            _FakeEvent("/主场品牌生成 1", sender="admin", is_admin=True))]
+        assert "🤖 LLM 起草 1 个品牌" in r1[0] and "老八食堂" in r1[0], r1
+        r2 = [r async for r in handler.adopt_brand(
+            _FakeEvent("/主场品牌采纳", sender="admin", is_admin=True))]
+        assert "用法: /主场品牌采纳" in r2[0], r2
+        pending = await env.dao.list_brands("pending")
+        assert len(pending) == 1, pending
+        r3 = [r async for r in handler.adopt_brand(
+            _FakeEvent(f"/主场品牌采纳 {pending[0]['id']}", sender="admin", is_admin=True))]
+        assert "✅ 品牌已采纳" in r3[0], r3
+    finally:
+        await env.teardown()
+
+
+async def test_admin_settle_window_fresh_env():
+    env = await TestEnv().setup()
+    try:
+        handler = _ah(env)
+        # 新环境：联赛状态已初始化但无球场 → 结算拒绝
+        r1 = [r async for r in handler.settle_window(
+            _FakeEvent("/主场结算", sender="admin", is_admin=True))]
+        assert "没有已建球场的球队" in r1[0], r1
+    finally:
+        await env.teardown()
+
+
+async def test_player_season_stats_empty_and_seeded():
+    env = await TestEnv().setup()
+    try:
+        ph = _ph(env)
+        e1 = _FakeEvent("/主场赛季统计", sender="10001")
+        r1 = [r async for r in ph.season_stats(e1)]
+        assert "暂无已录入赛果的上座数据" in r1[0], r1
+        # 录入一场赛果后再查
+        await env.stadium_service.import_attributes("利物浦", influence=150.0)
+        await env.stadium_service.import_attributes("巴塞罗那", influence=120.0)
+        await env.fixture_service.import_fixtures("1 利物浦 巴塞罗那")
+        await env.fixture_service.record_results("1", "利物浦 胜")
+        e2 = _FakeEvent("/主场赛季统计", sender="10001")
+        r2 = [r async for r in ph.season_stats(e2)]
+        assert "📊 赛季上座统计" in r2[0] and "利物浦 | 1 |" in r2[0], r2
+        assert "合计:" in r2[0], r2
+    finally:
+        await env.teardown()
+
+
+async def test_player_sign_and_terminate_naming():
+    env = await TestEnv().setup()
+    try:
+        ph = _ph(env)
+        await env.stadium_service.import_attributes("利物浦", influence=150.0, capacity=20000)
+        # 用法
+        r1 = [r async for r in ph.sign_naming(_FakeEvent("/主场冠名", sender="10001"))]
+        assert "用法: /主场冠名" in r1[0], r1
+        # 签约（10001 已绑定 利物浦；亚马逊为内置已采纳品牌）
+        r2 = [r async for r in ph.sign_naming(
+            _FakeEvent("/主场冠名 亚马逊", sender="10001"))]
+        assert "✅" in r2[0] and "亚马逊" in r2[0] and "M/窗口" in r2[0], r2
+        # 退冠名（含赔付文案）
+        r3 = [r async for r in ph.terminate_naming(_FakeEvent("/主场退冠名", sender="10001"))]
+        assert "解约" in r3[0] and "亚马逊" in r3[0], r3
+    finally:
+        await env.teardown()
+
+
+async def test_player_chart_handlers():
+    env = await TestEnv().setup()
+    try:
+        ph = _ph(env, with_charts=True)
+        # 用法文案
+        r1 = [r async for r in ph.round_chart(_FakeEvent("/主场轮次统计图", sender="10001"))]
+        assert "用法: /主场轮次统计图" in r1[0], r1
+        r2 = [r async for r in ph.preview_chart(_FakeEvent("/主场轮次预告图", sender="10001"))]
+        assert "用法: /主场轮次预告图" in r2[0], r2
+        # 无数据 → 错误文案（非崩溃）
+        r3 = [r async for r in ph.season_chart(_FakeEvent("/主场赛季走势图", sender="10001"))]
+        assert r3 and "本赛季还没有已录赛果" in r3[0], r3
+        # 有数据 → 出图（image_result 返回文件路径）
+        await env.stadium_service.import_attributes("利物浦", influence=150.0)
+        await env.stadium_service.import_attributes("巴塞罗那", influence=120.0)
+        await env.fixture_service.import_fixtures("1 利物浦 巴塞罗那")
+        await env.fixture_service.record_results("1", "利物浦 胜")
+        e4 = _FakeEvent("/主场赛季走势图", sender="10001")
+        r4 = [r async for r in ph.season_chart(e4)]
+        assert len(r4) == 1 and r4[0] is not None, r4
+        from pathlib import Path as _Path
+        assert _Path(str(r4[0])).exists(), r4
+        # 轮次统计图有赛果后可出图
+        e5 = _FakeEvent("/主场轮次统计图 1", sender="10001")
+        r5 = [r async for r in ph.round_chart(e5)]
+        assert len(r5) == 1 and _Path(str(r5[0])).exists(), r5
     finally:
         await env.teardown()

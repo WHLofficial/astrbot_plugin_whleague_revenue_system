@@ -134,3 +134,107 @@ async def test_add_named_round_concurrent_unique_numbers():
         assert await env.dao.add_named_round(1, "杯赛", "第一轮") == 1
     finally:
         await env.teardown()
+
+
+async def test_execute_transaction_commit_and_rollback():
+    """事务回调成功提交、异常整体回滚；回调内调 dao 触发死锁守卫。"""
+    env = await TestEnv().setup()
+    try:
+        db = env.dao._db
+
+        async def ok(conn):
+            await conn.execute(
+                "INSERT INTO club_balance (team_name, balance) VALUES ('甲', 100.0)"
+            )
+            return "done"
+
+        assert await db.execute_transaction(ok) == "done"
+        row = await env.dao._db.fetchone(
+            "SELECT balance FROM club_balance WHERE team_name='甲'"
+        )
+        assert row and abs(row["balance"] - 100.0) < 1e-6, row
+
+        async def boom(conn):
+            await conn.execute(
+                "INSERT INTO club_balance (team_name, balance) VALUES ('乙', 5.0)"
+            )
+            raise ValueError("boom")
+
+        try:
+            await db.execute_transaction(boom)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("事务回调异常应向上抛出")
+        assert await env.dao._db.fetchone(
+            "SELECT * FROM club_balance WHERE team_name='乙'"
+        ) is None
+
+        async def reenter(conn):
+            await env.dao.get_balance("甲")
+
+        try:
+            await db.execute_transaction(reenter)
+        except RuntimeError as e:
+            assert "禁止在事务回调" in str(e), e
+        else:
+            raise AssertionError("回调内调 dao 应触发死锁守卫")
+    finally:
+        await env.teardown()
+
+
+async def test_execute_locked_retry_and_other_errors():
+    """database is locked 重试后成功；其他 OperationalError 立即上抛。"""
+    import aiosqlite
+
+    env = await TestEnv().setup()
+    try:
+        db = env.dao._db
+
+        class _Flaky:
+            def __init__(self, inner):
+                self._inner = inner
+                self.calls = 0
+
+            async def execute(self, sql, params=()):
+                self.calls += 1
+                if self.calls == 1:
+                    raise aiosqlite.OperationalError("database is locked")
+                return await self._inner.execute(sql, params)
+
+            def __getattr__(self, name):
+                return getattr(self._inner, name)
+
+        proxy = _Flaky(db._conn)
+        db._conn = proxy
+        try:
+            await db.execute(
+                "UPDATE club_balance SET balance=1.0 WHERE team_name='不存在'"
+            )
+            assert proxy.calls == 2, proxy.calls
+        finally:
+            db._conn = proxy._inner
+
+        class _Boom:
+            def __init__(self, inner):
+                self._inner = inner
+
+            async def execute(self, sql, params=()):
+                raise aiosqlite.OperationalError("no such table: xx")
+
+            def __getattr__(self, name):
+                return getattr(self._inner, name)
+
+        boom = _Boom(db._conn)
+        db._conn = boom
+        try:
+            try:
+                await db.execute("SELECT 1")
+            except aiosqlite.OperationalError as e:
+                assert "no such table" in str(e), e
+            else:
+                raise AssertionError("非 locked OperationalError 应立即上抛")
+        finally:
+            db._conn = boom._inner
+    finally:
+        await env.teardown()
