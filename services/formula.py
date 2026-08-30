@@ -299,19 +299,28 @@ def fans_target_table(cfg: dict) -> list[tuple[float, float]]:
     """死忠目标阶梯：[(带上限, 斜率), ...]，上限 0 表示末段开放（高影响力趋于饱和）。
 
     解析失败或缺失时回退为单段线性 (0, fans_per_influence)。
+    条目防御：非 dict、数值非法、上限或斜率为负的条目剔除（坏条目不株连整表）；
+    其余按上限升序、开放段（上限 0）恒排末尾——diehard_target 逐带累计依赖此顺序。
     """
     bands: list[tuple[float, float]] = []
     try:
         data = parse_json_object(cfg.get("fans_target_table"))
         for band in data.get("bands", []):
-            bands.append(
-                (float(band.get("max_influence", 0) or 0),
-                 float(band.get("slope", 0)))
-            )
-    except (TypeError, ValueError):
+            if not isinstance(band, dict):
+                continue
+            try:
+                limit = float(band.get("max_influence", 0) or 0)
+                slope = float(band.get("slope", 0))
+            except (TypeError, ValueError):
+                continue
+            if limit < 0 or slope < 0:
+                continue
+            bands.append((limit, slope))
+    except Exception:
         bands = []
     if not bands:
         return [(0.0, float(cfg.get("fans_per_influence", 20.0)))]
+    bands.sort(key=lambda b: (b[0] <= 0, b[0]))
     return bands
 
 

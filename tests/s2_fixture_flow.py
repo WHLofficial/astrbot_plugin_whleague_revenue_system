@@ -476,3 +476,51 @@ async def test_concurrent_record_claim_rejects_second_pay():
         assert txs == [], txs
     finally:
         await env.teardown()
+
+async def test_record_results_cross_competition_home_collision():
+    """C🟡1：不带赛事前缀录入时，同轮次跨赛事同名主队会碰撞，必须报错而非静默丢场。"""
+    env = await TestEnv().setup()
+    try:
+        r = await env.fixture_service.import_fixtures(
+            "顶级9 利物浦 巴塞罗那\n冠军3 利物浦 勒沃库森\n"
+        )
+        assert r["imported"] == 2, r
+        try:
+            await env.fixture_service.record_results(1, "利物浦 胜")
+            assert False, "跨赛事同名主队应拒绝模糊录入"
+        except FixtureError as e:
+            assert "多场比赛" in str(e) and "利物浦" in str(e), e
+        # 带赛事前缀仍可正常录入各自场次
+        top_comp, _ = await env.fixture_service.resolve_round_arg("顶级9")
+        cup_comp, _ = await env.fixture_service.resolve_round_arg("冠军3")
+        rec_top = await env.fixture_service.record_results(1, "利物浦 胜", top_comp)
+        rec_cup = await env.fixture_service.record_results(1, "利物浦 平", cup_comp)
+        assert rec_top["count"] == 1 and rec_cup["count"] == 1
+    finally:
+        await env.teardown()
+
+
+async def test_record_results_partial_batch_resumes():
+    """C🟡2：部分已录的批次跳过已录行继续录入，整批已录仍拒绝重复。"""
+    env = await TestEnv().setup()
+    try:
+        await env.fixture_service.import_fixtures(
+            "1 利物浦 巴塞罗那\n1 纽卡斯尔联 勒沃库森"
+        )
+        first = await env.fixture_service.record_results(1, "利物浦 胜")
+        assert first["count"] == 1 and first["skipped"] == [], first
+
+        # 混合批次：已录行跳过，未录行续录
+        second = await env.fixture_service.record_results(1, "利物浦 胜\n纽卡斯尔联 负")
+        assert second["count"] == 1 and second["skipped"] == ["利物浦"], second
+        by = {m["home_team"]: m for m in await env.dao.get_round_matches(1, 1, 1)}
+        assert by["利物浦"]["result"] == "W" and by["纽卡斯尔联"]["result"] == "L"
+
+        # 整批已录：仍拒绝
+        try:
+            await env.fixture_service.record_results(1, "利物浦 胜\n纽卡斯尔联 负")
+            assert False, "整批已录应拒绝"
+        except FixtureError as e:
+            assert "已录入" in str(e), e
+    finally:
+        await env.teardown()

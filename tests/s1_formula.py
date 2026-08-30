@@ -288,5 +288,32 @@ def run_all():
     return failures
 
 
+async def test_fans_target_table_defense():
+    """C🟡4：畸形条目剔除不株连整表；升序+开放段恒在尾；全坏回退线性。"""
+    cfg = dict(DEFAULT_CONFIG)
+    # 乱序开放段 + 4 类坏条目（非 dict/负斜率/负上限/数值非法）；
+    # 缺 max_influence 的条目按原设计默认 0=开放段，不算坏条目
+    raw = ('{"bands":[{"max_influence":0,"slope":10},{"max_influence":150,"slope":26},'
+           '"junk",[1,2],{"max_influence":180,"slope":-5},{"max_influence":-3,"slope":9},'
+           '{"slope":7},{"max_influence":"abc","slope":3},{"max_influence":120,"slope":20}]}')
+    cfg["fans_target_table"] = raw
+    bands = formula.fans_target_table(cfg)
+    assert bands == [(120.0, 20.0), (150.0, 26.0), (0.0, 10.0), (0.0, 7.0)], bands
+    # 清洗后逐带累计正确（120×20=2400；+30×26=780；+50×10=500，首个开放段即截断）
+    assert formula.diehard_target(cfg, 100) == 2000.0
+    assert formula.diehard_target(cfg, 130) == 2660.0
+    assert formula.diehard_target(cfg, 200) == 3680.0
+
+    # 整表全坏 → 回退线性
+    bad = dict(DEFAULT_CONFIG)
+    bad["fans_target_table"] = '{"bands":["junk",{"max_influence":-1,"slope":5}]}'
+    assert formula.fans_target_table(bad) == [(0.0, float(bad["fans_per_influence"]))]
+
+    # 根本不是 JSON 对象 → 同样回退
+    bad2 = dict(DEFAULT_CONFIG)
+    bad2["fans_target_table"] = "[1,2,3]"
+    assert formula.fans_target_table(bad2) == [(0.0, float(bad2["fans_per_influence"]))]
+
+
 if __name__ == "__main__":
     sys.exit(1 if run_all() else 0)

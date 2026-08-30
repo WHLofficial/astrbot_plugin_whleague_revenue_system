@@ -200,6 +200,22 @@ class BackfillService:
             )
 
         async def work(conn):
+            # 事务内重读标记：scan 之后另一并发 apply 已落库 → 整体回滚，防双倍补差
+            cur = await conn.execute(
+                "SELECT value FROM plugin_config WHERE key=?", (MARKER_KEY,)
+            )
+            marker_row = await cur.fetchone()
+            marker_now = marker_row["value"] if marker_row else None
+            if marker_now is not None and not data["done"]:
+                raise BackfillError("主场补差已被并发执行，本次未落库，请重新预览")
+            old_payload: dict = {}
+            if marker_now:
+                try:
+                    loaded = json.loads(marker_now)
+                    if isinstance(loaded, dict):
+                        old_payload = loaded
+                except (TypeError, ValueError):
+                    old_payload = {}
             for a in data["affected"]:
                 await conn.execute(
                     "UPDATE matches SET attendance=?, ticket_revenue=?, commercial=? WHERE id=?",
@@ -297,9 +313,9 @@ class BackfillService:
                 "ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=datetime('now','localtime')",
                 (MARKER_KEY, json.dumps({
                     "executed_season": data["season"],
-                    "matches": len(data["affected"]),
-                    "sellouts": sellout_count,
-                    "fans_teams": len(data["fans"]),
+                    "matches": int(old_payload.get("matches", 0)) + len(data["affected"]),
+                    "sellouts": int(old_payload.get("sellouts", 0)) + sellout_count,
+                    "fans_teams": int(old_payload.get("fans_teams", 0)) + len(data["fans"]),
                     "form_skipped": data["form_done"],
                     "forced": force,
                 }, ensure_ascii=False)),

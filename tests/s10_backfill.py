@@ -586,6 +586,83 @@ async def test_backfill_force_rerun():
         now = (await env.dao.get_balance("利物浦"))["balance"]
         assert abs(now - (balance_before + d)) < 1e-6, now
         marker = json.loads(await env.dao.get_config(MARKER_KEY))
-        assert marker["forced"] is True and marker["sellouts"] == 1, marker
+        # 累加语义：sellouts 为历次 apply 之和（首次 1 + 强制重抽 1），forced 记录最近一次
+        assert marker["forced"] is True and marker["sellouts"] == 2, marker
+    finally:
+        await env.teardown()
+
+
+async def test_backfill_marker_payload_accumulates():
+    """payload 累加：多次 apply 的 matches/sellouts/fans_teams 按历史累加，不按次覆盖。"""
+    env = await TestEnv().setup()
+    try:
+        svc = BackfillService(env.db, env.dao, env.cfg)
+        imp = await env.fixture_service.import_fixtures(
+            "1 利物浦 巴塞罗那\n2 利物浦 巴塞罗那\n")
+        assert imp["imported"] == 2, imp
+        cap = (await env.dao.get_stadium("利物浦"))["capacity"]
+        # 第一次 apply：R1 低上座负场只作历史 prior（n=0 不补差），R2 (n=1, 旧分0)
+        # 系数上调 → 战绩成分真实 affected 1 场
+        await _corrupt_legacy(env, await _row(env, 1, "利物浦"), cap // 2, "L")
+        await _corrupt_legacy(env, await _row(env, 2, "利物浦"), cap // 2, "W")
+        scan1 = await svc.scan()
+        assert len(scan1["affected"]) == 1 and scan1["affected"][0]["round_no"] == 2, scan1
+        await svc.apply()
+        marker = json.loads(await env.dao.get_config(MARKER_KEY))
+        assert marker["matches"] == 1 and marker["sellouts"] == 0, marker
+        fans1 = marker["fans_teams"]
+
+        # 第二次 apply：新满座待处理（普通模式放行），只做满座成分
+        await env.fixture_service.advance_window("tester")
+        imp2 = await env.fixture_service.import_fixtures("3 利物浦 巴塞罗那\n")
+        assert imp2["imported"] == 1, imp2
+        cap3 = (await env.dao.get_stadium("利物浦"))["capacity"]
+        await _corrupt_legacy(env, await _row(env, 3, "利物浦"), cap3, "W")
+        scan = await svc.scan()
+        assert len(scan["sellouts"]) == 1 and scan["affected"] == [], scan
+        applied = await svc.apply()
+        assert applied["applied"] is True
+        marker = json.loads(await env.dao.get_config(MARKER_KEY))
+        # 累加而非覆盖：第二次战绩 0 场、死忠 0 队——旧覆盖语义会把 matches/fans_teams 清零
+        assert marker["matches"] == 1 and marker["sellouts"] == 1, marker
+        assert marker["fans_teams"] == fans1, marker
+        assert marker["forced"] is False
+    finally:
+        await env.teardown()
+
+
+async def test_backfill_toctou_marker_guard():
+    """C🟡5：scan 之后另一并发 apply 抢先落标记 → 事务内重读守卫整体回滚。"""
+    env = await TestEnv().setup()
+    try:
+        svc = BackfillService(env.db, env.dao, env.cfg)
+        imp = await env.fixture_service.import_fixtures("1 利物浦 巴塞罗那\n")
+        assert imp["imported"] == 1, imp
+        cap = (await env.dao.get_stadium("利物浦"))["capacity"]
+        m = await _row(env, 1, "利物浦")
+        await _corrupt_legacy(env, m, cap, "W")
+
+        orig_scan = svc.scan
+
+        async def poisoned_scan(force=False):
+            data = await orig_scan(force=force)
+            # 模拟并发实例恰在本次 scan 之后、事务前落库标记
+            await env.dao.set_config(MARKER_KEY, json.dumps({"matches": 9}))
+            return data
+
+        svc.scan = poisoned_scan
+        try:
+            await svc.apply()
+            raise AssertionError("并发落标记后应回滚拒绝")
+        except BackfillError as e:
+            assert "并发" in str(e), e
+
+        # 库未被触碰：上座/流水保持补差前状态
+        m2 = await _row(env, 1, "利物浦")
+        assert m2["attendance"] == cap and m2["result"] == "W", m2
+        txs = await env.dao.list_transactions("利物浦", 1, 1)
+        assert [t for t in txs if "战绩系数补差" in t["note"]] == [], txs
+        # 标记保持并发方写入的值（本次未覆盖）
+        assert json.loads(await env.dao.get_config(MARKER_KEY))["matches"] == 9
     finally:
         await env.teardown()

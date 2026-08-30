@@ -18,7 +18,8 @@ class FansService:
         """窗口平均上座率 = 总上座 / (容量 × 已赛场次)；无场次视为中性 1.0。"""
         matches = await self._dao.get_home_matches_window(team_name, season, window_seq)
         played = [m for m in matches if m["attendance"] is not None]
-        if not played:
+        # 容量非法时无分母可言，按中性处理，避免结算中除零炸掉演化
+        if not played or capacity <= 0:
             return 1.0
         total = sum(m["attendance"] for m in played)
         return total / (capacity * len(played))

@@ -195,6 +195,8 @@ class AdminHandler:
             )
         for e in result.get("file_errors", []):
             lines.append(f"⚠️ {e}")
+        if result.get("skipped"):
+            lines.append(f"⚠️ 已录入跳过：{'、'.join(result['skipped'])}（不重复记账）")
         yield event.plain_result("\n".join(lines))
 
     async def advance(self, event) -> AsyncGenerator[MessageEventResult, None]:

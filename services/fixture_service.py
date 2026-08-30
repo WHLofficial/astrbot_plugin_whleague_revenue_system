@@ -350,17 +350,34 @@ class FixtureService:
         by_home = {m["home_team"]: m for m in matches}
         if not by_home:
             raise FixtureError(f"第 {round_no} 轮({competition or '联赛'})没有赛程")
+        # 未指定赛事时该轮含跨赛事场次，同主队键碰撞会静默丢场，宁可报错
+        if len(by_home) < len(matches):
+            homes_count: dict[str, int] = {}
+            for m in matches:
+                homes_count[m["home_team"]] = homes_count.get(m["home_team"], 0) + 1
+            dups = sorted(h for h, c in homes_count.items() if c > 1)
+            raise FixtureError(
+                f"第 {round_no} 轮({competition or '联赛'})主队「{'、'.join(dups)}」有多场比赛"
+                "（可能跨赛事同轮），请改用带赛事前缀的轮次（如 顶级3）"
+            )
+
+        # 先整批校验再落账：未知主队立即报错；已录行跳过续录（部分批次可续）
+        for home, _r, _s in rows:
+            if home not in by_home:
+                raise FixtureError(f"第{round_no}轮无主队「{home}」的比赛")
+        skipped = [home for home, _r, _s in rows if by_home[home]["result"]]
+        if skipped and len(skipped) == len(rows):
+            raise FixtureError(f"第{round_no}轮「{'、'.join(skipped)}」赛果已录入，不能重复")
 
         results = []
         for home, result, score in rows:
-            m = by_home.get(home)
-            if m is None:
-                raise FixtureError(f"第{round_no}轮无主队「{home}」的比赛")
+            m = by_home[home]
             if m["result"]:
-                raise FixtureError(f"第{round_no}轮「{home}」赛果已录入，不能重复")
+                continue
             detail = await self._record_one(m, result, season, window_seq, score)
             results.append(detail)
-        return {"round_no": round_no, "count": len(results), "results": results}
+        return {"round_no": round_no, "count": len(results), "results": results,
+                "skipped": skipped}
 
     async def record_results_file(self, round_no: int, path: str,
                                   competition: str | None = None) -> dict:

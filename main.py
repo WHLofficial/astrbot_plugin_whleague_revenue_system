@@ -233,6 +233,8 @@ class StadiumPlugin(Star):
             lines.append(f"· {r['home']} {result_cn.get(r['result'], r['result'])}{score_txt} {r['away']}")
         for e in list(result.get("file_errors", [])) + list(result.get("errors", []))[:5]:
             lines.append(f"⚠️ {e}")
+        if result.get("skipped"):
+            lines.append(f"⚠️ 已录入跳过：{'、'.join(result['skipped'])}（不重复记账）")
         return "\n".join(lines)
 
     # ─── cron ───────────────────────────────────────────────

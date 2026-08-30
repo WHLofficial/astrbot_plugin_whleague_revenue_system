@@ -284,3 +284,17 @@ async def test_brand_terminate_returns_tx_id():
         assert "解约" in match[0]["note"], match[0]["note"]
     finally:
         await env.teardown()
+
+
+async def test_window_attend_rate_zero_capacity_guard():
+    """C🟡6：容量非正时窗口上座率按中性 1.0 返回，不除零。"""
+    env = await TestEnv().setup()
+    try:
+        assert await env.fans_service.window_attend_rate("利物浦", 1, 1, 0) == 1.0
+        assert await env.fans_service.window_attend_rate("利物浦", 1, 1, -100) == 1.0
+        # 已有录入场次 + 容量 0 → 仍 1.0（修复前 ZeroDivisionError）
+        await env.fixture_service.import_fixtures("1 利物浦 巴塞罗那\n")
+        await env.fixture_service.record_results(1, "利物浦 胜")
+        assert await env.fans_service.window_attend_rate("利物浦", 1, 1, 0) == 1.0
+    finally:
+        await env.teardown()
