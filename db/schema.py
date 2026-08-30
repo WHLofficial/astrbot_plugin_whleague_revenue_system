@@ -1,6 +1,6 @@
 from astrbot.api import logger
 
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 
 SQL_CREATE_TABLES = r"""
 
@@ -98,6 +98,9 @@ CREATE TABLE IF NOT EXISTS naming_rights (
     status TEXT NOT NULL DEFAULT 'active',
     signed_season INTEGER NOT NULL,
     signed_window INTEGER NOT NULL,
+    -- 套餐快照（'{}'=legacy 老公式合同）；品牌满意度（行情体系）
+    package_json TEXT NOT NULL DEFAULT '{}',
+    satisfaction REAL NOT NULL DEFAULT 1.0,
     created_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
 );
 
@@ -107,6 +110,12 @@ CREATE TABLE IF NOT EXISTS brand_pool (
     heat REAL NOT NULL,
     source TEXT NOT NULL DEFAULT 'builtin',
     status TEXT NOT NULL DEFAULT 'adopted',
+    -- 档位（头部/新兴/口碑）、行业、招商卖点、套餐变体、手动锁档
+    tier TEXT NOT NULL DEFAULT '口碑',
+    industry TEXT NOT NULL DEFAULT '通用',
+    pitch TEXT NOT NULL DEFAULT '',
+    packages_json TEXT NOT NULL DEFAULT '',
+    tier_locked INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
 );
 
@@ -214,6 +223,37 @@ CREATE TABLE IF NOT EXISTS season_names (
     updated_by TEXT NOT NULL DEFAULT '',
     updated_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
 );
+
+-- 冠名权市场：招商期（每窗口一轮，开启时的模式快照）
+CREATE TABLE IF NOT EXISTS market_rounds (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    season_number INTEGER NOT NULL,
+    window_seq INTEGER NOT NULL,
+    bid_mode TEXT NOT NULL DEFAULT '明标',
+    status TEXT NOT NULL DEFAULT 'open',
+    opened_by TEXT NOT NULL DEFAULT '',
+    opened_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+    settled_at TEXT,
+    UNIQUE(season_number, window_seq)
+);
+
+-- 品牌报价（先到先得挂价 team_name 存 ''；package_json 为套餐/档位/性格参数快照）
+CREATE TABLE IF NOT EXISTS market_offers (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    round_id INTEGER NOT NULL REFERENCES market_rounds(id),
+    brand_id INTEGER NOT NULL REFERENCES brand_pool(id),
+    team_name TEXT NOT NULL DEFAULT '',
+    package_no INTEGER NOT NULL DEFAULT 1,
+    amount REAL NOT NULL,
+    windows INTEGER NOT NULL,
+    package_json TEXT NOT NULL DEFAULT '{}',
+    status TEXT NOT NULL DEFAULT 'pending',
+    created_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+    expire_at TEXT,
+    UNIQUE(round_id, brand_id, team_name)
+);
+
+CREATE INDEX IF NOT EXISTS idx_market_offers_round ON market_offers(round_id, status);
 
 """
 
@@ -491,3 +531,74 @@ async def _migrate(db, current_version: int):
         )
         await db.commit()
         logger.info("Migrated season_names table for nameable seasons.")
+    if current_version < 10:
+        # 冠名权市场：brand_pool 档位/行业/卖点/套餐/锁档，naming_rights 套餐快照/满意度，
+        # 新表 market_rounds/market_offers。存量品牌 tier 一律置「口碑」（迁移拿不到配置里的
+        # 配额比例，不猜）；首次招商期按热度排名自动校准。
+        cols = await _table_columns(db, "brand_pool")
+        for col, ddl in (
+            ("tier", "ALTER TABLE brand_pool ADD COLUMN tier TEXT NOT NULL DEFAULT '口碑'"),
+            ("industry", "ALTER TABLE brand_pool ADD COLUMN industry TEXT NOT NULL DEFAULT '通用'"),
+            ("pitch", "ALTER TABLE brand_pool ADD COLUMN pitch TEXT NOT NULL DEFAULT ''"),
+            ("packages_json", "ALTER TABLE brand_pool ADD COLUMN packages_json TEXT NOT NULL DEFAULT ''"),
+            ("tier_locked", "ALTER TABLE brand_pool ADD COLUMN tier_locked INTEGER NOT NULL DEFAULT 0"),
+        ):
+            if col not in cols:
+                await db.execute(ddl)
+        # 内置品牌行业映射（仅补默认值，不覆盖已有行业）
+        await db.execute(
+            """
+            UPDATE brand_pool SET industry = CASE brand
+                WHEN '麒麟生物' THEN '医疗'
+                WHEN '阿迪达斯' THEN '运动'
+                WHEN '亚马逊' THEN '科技'
+                WHEN '可口可乐' THEN '饮食'
+                WHEN '海底捞' THEN '饮食'
+                WHEN '星海通讯' THEN '科技'
+                WHEN 'CVS Health' THEN '医疗'
+                ELSE industry
+            END
+            WHERE source='builtin' AND industry='通用'
+            """
+        )
+        cols = await _table_columns(db, "naming_rights")
+        for col, ddl in (
+            ("package_json", "ALTER TABLE naming_rights ADD COLUMN package_json TEXT NOT NULL DEFAULT '{}'"),
+            ("satisfaction", "ALTER TABLE naming_rights ADD COLUMN satisfaction REAL NOT NULL DEFAULT 1.0"),
+        ):
+            if col not in cols:
+                await db.execute(ddl)
+        await db.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS market_rounds (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                season_number INTEGER NOT NULL,
+                window_seq INTEGER NOT NULL,
+                bid_mode TEXT NOT NULL DEFAULT '明标',
+                status TEXT NOT NULL DEFAULT 'open',
+                opened_by TEXT NOT NULL DEFAULT '',
+                opened_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+                settled_at TEXT,
+                UNIQUE(season_number, window_seq)
+            );
+
+            CREATE TABLE IF NOT EXISTS market_offers (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                round_id INTEGER NOT NULL REFERENCES market_rounds(id),
+                brand_id INTEGER NOT NULL REFERENCES brand_pool(id),
+                team_name TEXT NOT NULL DEFAULT '',
+                package_no INTEGER NOT NULL DEFAULT 1,
+                amount REAL NOT NULL,
+                windows INTEGER NOT NULL,
+                package_json TEXT NOT NULL DEFAULT '{}',
+                status TEXT NOT NULL DEFAULT 'pending',
+                created_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+                expire_at TEXT,
+                UNIQUE(round_id, brand_id, team_name)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_market_offers_round ON market_offers(round_id, status);
+            """
+        )
+        await db.commit()
+        logger.info("Migrated naming market: brand_pool tiers + market_rounds/market_offers.")

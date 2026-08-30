@@ -1,5 +1,6 @@
-"""数据库结构：v4/v5/v6 旧库迁移到最新（事件列 + 选择表 + 命名轮次表 + 赛季命名表）与幂等。"""
+"""数据库结构：v4/v5/v6/v9 旧库迁移到最新（事件列 + 选择表 + 命名轮次表 + 赛季命名表 + 冠名权市场）与幂等。"""
 
+import json
 import os
 import sys
 import tempfile
@@ -9,7 +10,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from tests.common import TestEnv  # noqa: E402
 from astrbot_plugin_whleague_revenue_system.db.connection import DatabaseManager  # noqa: E402
-from astrbot_plugin_whleague_revenue_system.db.schema import _table_columns, init_schema  # noqa: E402
+from astrbot_plugin_whleague_revenue_system.db.schema import SCHEMA_VERSION, _table_columns, init_schema  # noqa: E402
 
 
 async def _make_v4_db(path: str) -> None:
@@ -108,7 +109,7 @@ async def test_v4_to_latest_migration():
             row = await db.fetchone(
                 "SELECT value FROM plugin_config WHERE key='schema_version'"
             )
-            assert row["value"] == "9"
+            assert row["value"] == str(SCHEMA_VERSION)
             # 事件池新增列
             cols = await _table_columns(db.conn, "event_pool")
             assert {"event_type", "options_json"} <= cols, cols
@@ -131,7 +132,7 @@ async def test_v4_to_latest_migration():
             row2 = await db.fetchone(
                 "SELECT value FROM plugin_config WHERE key='schema_version'"
             )
-            assert row2["value"] == "9"
+            assert row2["value"] == str(SCHEMA_VERSION)
         finally:
             await db.close()
     finally:
@@ -151,7 +152,7 @@ async def test_v5_to_latest_migration():
             row = await db.fetchone(
                 "SELECT value FROM plugin_config WHERE key='schema_version'"
             )
-            assert row["value"] == "9"
+            assert row["value"] == str(SCHEMA_VERSION)
             cols = await _table_columns(db.conn, "round_names")
             assert {"season_number", "competition", "token", "round_no"} <= cols, cols
             sn = await _table_columns(db.conn, "season_names")
@@ -234,7 +235,7 @@ async def test_v6_to_latest_migration():
             row = await db.fetchone(
                 "SELECT value FROM plugin_config WHERE key='schema_version'"
             )
-            assert row["value"] == "9"
+            assert row["value"] == str(SCHEMA_VERSION)
             # 迁移后旧数据保留
             rows = await db.fetchall("SELECT * FROM matches")
             assert rows and rows[0]["home_team"] == "利物浦"
@@ -337,3 +338,174 @@ async def test_fresh_db_has_choice_schema():
         assert await env.dao.season_label(3) == "第 3 赛季"  # 未命名回退
     finally:
         await env.teardown()
+
+
+async def _make_v9_db(path: str) -> None:
+    """构造一个真实的 v9 结构数据库（naming_rights/brand_pool 无市场列、无 market 表）。"""
+    import aiosqlite
+
+    conn = await aiosqlite.connect(path)
+    try:
+        await conn.executescript(
+            """
+            CREATE TABLE plugin_config (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL,
+                updated_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
+            );
+            CREATE TABLE naming_rights (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                team_name TEXT NOT NULL UNIQUE,
+                brand TEXT NOT NULL,
+                heat REAL NOT NULL,
+                fee_per_window REAL NOT NULL,
+                windows_total INTEGER NOT NULL,
+                windows_remaining INTEGER NOT NULL,
+                status TEXT NOT NULL DEFAULT 'active',
+                signed_season INTEGER NOT NULL,
+                signed_window INTEGER NOT NULL,
+                created_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
+            );
+            CREATE TABLE brand_pool (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                brand TEXT NOT NULL,
+                heat REAL NOT NULL,
+                source TEXT NOT NULL DEFAULT 'builtin',
+                status TEXT NOT NULL DEFAULT 'adopted',
+                created_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
+            );
+            INSERT INTO plugin_config (key, value) VALUES ('schema_version', '9');
+            INSERT INTO naming_rights (team_name, brand, heat, fee_per_window, windows_total, windows_remaining, status, signed_season, signed_window)
+            VALUES ('利物浦', '麒麟生物', 1.2, 5.0, 4, 2, 'active', 1, 3);
+            INSERT INTO brand_pool (brand, heat, source, status) VALUES
+                ('麒麟生物', 1.2, 'builtin', 'adopted'),
+                ('阿迪达斯', 1.1, 'builtin', 'adopted'),
+                ('星际咖啡', 0.9, 'llm', 'adopted');
+            """
+        )
+        await conn.commit()
+    finally:
+        await conn.close()
+
+
+async def test_migrate_v9_to_v10_market_schema():
+    """v9 库迁移：市场列补齐、builtin 行业映射、market 表就绪、在途合同 legacy 快照、幂等。"""
+    import aiosqlite
+
+    tmp = tempfile.TemporaryDirectory()
+    db_path = str(Path(tmp.name) / "v9.db")
+    await _make_v9_db(db_path)
+    db = DatabaseManager(db_path)
+    try:
+        await db.init()
+        await init_schema(db)
+        ver = await db.fetchone(
+            "SELECT value FROM plugin_config WHERE key='schema_version'"
+        )
+        assert ver["value"] == str(SCHEMA_VERSION), ver
+        bp = await _table_columns(db.conn, "brand_pool")
+        assert {"tier", "industry", "pitch", "packages_json", "tier_locked"} <= bp, bp
+        nr = await _table_columns(db.conn, "naming_rights")
+        assert {"package_json", "satisfaction"} <= nr, nr
+        # 在途老合同：legacy 快照 + 中性满意度
+        row = await db.fetchone(
+            "SELECT package_json, satisfaction FROM naming_rights WHERE team_name='利物浦'"
+        )
+        assert row["package_json"] == "{}" and row["satisfaction"] == 1.0, row
+        # 存量品牌一律口碑（迁移不猜配额，首次招商期自动校准）；builtin 行业映射、llm 品牌保持通用
+        brands = {r["brand"]: r for r in await db.fetchall("SELECT * FROM brand_pool")}
+        assert all(b["tier"] == "口碑" and b["tier_locked"] == 0 for b in brands.values())
+        assert brands["麒麟生物"]["industry"] == "医疗"
+        assert brands["阿迪达斯"]["industry"] == "运动"
+        assert brands["星际咖啡"]["industry"] == "通用", brands["星际咖啡"]
+        # market 表可用；同轮同品牌同队唯一（先到先得挂价 team_name='' 同品牌仅一条）
+        await db.execute(
+            "INSERT INTO market_rounds (season_number, window_seq, bid_mode) VALUES (1, 1, '明标')"
+        )
+        await db.execute(
+            "INSERT INTO market_offers (round_id, brand_id, team_name, package_no, amount, windows)"
+            " VALUES (1, 1, '利物浦', 1, 5.0, 6)"
+        )
+        try:
+            await db.execute(
+                "INSERT INTO market_offers (round_id, brand_id, team_name, package_no, amount, windows)"
+                " VALUES (1, 1, '利物浦', 2, 5.0, 6)"
+            )
+            assert False, "同轮同品牌同队重复报价应违反唯一约束"
+        except aiosqlite.IntegrityError:
+            pass
+        # 幂等：再次 init_schema 不报错、版本不回退
+        await init_schema(db)
+        ver2 = await db.fetchone(
+            "SELECT value FROM plugin_config WHERE key='schema_version'"
+        )
+        assert ver2["value"] == str(SCHEMA_VERSION)
+    finally:
+        await db.close()
+        tmp.cleanup()
+
+
+async def test_fresh_db_has_market_schema():
+    """全新安装：市场列/表就绪，品牌池新列按默认值；配置键注册齐全 + market_bid_mode 白名单。"""
+    env = await TestEnv().setup()
+    try:
+        bp = await _table_columns(env.db.conn, "brand_pool")
+        assert {"tier", "industry", "pitch", "packages_json", "tier_locked"} <= bp, bp
+        nr = await _table_columns(env.db.conn, "naming_rights")
+        assert {"package_json", "satisfaction"} <= nr, nr
+        cols = await _table_columns(env.db.conn, "market_rounds")
+        assert {"season_number", "window_seq", "bid_mode", "status", "settled_at"} <= cols, cols
+        cols = await _table_columns(env.db.conn, "market_offers")
+        assert {
+            "round_id", "brand_id", "team_name", "package_no", "amount", "windows",
+            "package_json", "status", "expire_at",
+        } <= cols, cols
+        # 品牌池已播种 7 内置品牌，档位默认口碑
+        rows = await env.dao.list_brands()
+        builtin = [r for r in rows if r["source"] == "builtin"]
+        assert len(builtin) == 7
+        assert all(r["tier"] == "口碑" for r in builtin)
+    finally:
+        await env.teardown()
+
+    from astrbot_plugin_whleague_revenue_system.config.defaults import (
+        DEFAULT_CONFIG,
+        validate_and_cast,
+    )
+
+    assert DEFAULT_CONFIG["market_bid_mode"] == "明标"
+    assert DEFAULT_CONFIG["market_top_seat_ratio"] == 8
+    assert DEFAULT_CONFIG["market_offers_per_brand"] == 3
+    assert DEFAULT_CONFIG["market_emerging_slots"] == 2
+    assert DEFAULT_CONFIG["market_offer_ttl_hours"] == 72
+    assert DEFAULT_CONFIG["naming_pkg_stable_windows"] == 6
+    assert DEFAULT_CONFIG["naming_pkg_stable_factor"] == 0.85
+    assert DEFAULT_CONFIG["naming_pkg_short_windows"] == 2
+    assert DEFAULT_CONFIG["naming_pkg_short_factor"] == 1.25
+    assert DEFAULT_CONFIG["naming_pkg_bet_windows"] == 4
+    assert DEFAULT_CONFIG["naming_pkg_bet_factor"] == 0.7
+    assert DEFAULT_CONFIG["naming_pkg_bet_bonus_rate"] == 0.7
+    assert DEFAULT_CONFIG["naming_pkg_bet_attend"] == 0.8
+    assert DEFAULT_CONFIG["naming_pkg_bet_fans"] == 0.03
+    assert DEFAULT_CONFIG["naming_bet_expected_prob"] == 0.5
+    assert DEFAULT_CONFIG["market_satisfy_floor"] == 0.6
+    satisfy = json.loads(DEFAULT_CONFIG["market_satisfy_config"])
+    assert satisfy["attend_weight"] == 0.5 and satisfy["line_buffer"] == 0.05
+    heat = json.loads(DEFAULT_CONFIG["market_heat_config"])
+    assert heat["champion"] == 0.10 and heat["clamp_high"] == 1.5
+    profiles = json.loads(DEFAULT_CONFIG["market_tier_profiles"])
+    assert set(profiles) == {"头部", "新兴", "口碑"}
+    for name, prof in profiles.items():
+        assert {
+            "satisfy_floor", "good_attend", "bad_attend",
+            "penalty_mult", "attend_buff", "fans_buff",
+        } <= set(prof), (name, prof)
+    json.loads(DEFAULT_CONFIG["market_industry_templates"])
+
+    assert validate_and_cast("market_bid_mode", " 暗标 ") == "暗标"
+    assert validate_and_cast("market_bid_mode", "先到先得") == "先到先得"
+    try:
+        validate_and_cast("market_bid_mode", "密封递价")
+        assert False, "非法招商模式应被拒绝"
+    except ValueError as e:
+        assert "明标" in str(e)

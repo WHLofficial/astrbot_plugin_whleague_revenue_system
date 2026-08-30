@@ -77,6 +77,15 @@ _FLOAT_RANGES = {
     "start_funds": (0.0, 1e9),
     "build_credit_ratio": (0.0, 1.0),
     "llm_timeout_seconds": (1, 300),
+    # 冠名权市场：套餐系数/对赌线/行情参数
+    "naming_pkg_stable_factor": (0.1, 3.0),
+    "naming_pkg_short_factor": (0.1, 3.0),
+    "naming_pkg_bet_factor": (0.1, 3.0),
+    "naming_pkg_bet_bonus_rate": (0.0, 3.0),
+    "naming_pkg_bet_attend": (0.0, 1.0),
+    "naming_pkg_bet_fans": (0.0, 1.0),
+    "naming_bet_expected_prob": (0.0, 1.0),
+    "market_satisfy_floor": (0.0, 2.0),
 }
 
 # 整数配置业务上限（超出拒绝）；未列出的整数键不设上限
@@ -89,6 +98,14 @@ _INT_UPPER_BOUNDS = {
     "event_batch_window_seconds": 3600,
     "llm_max_calls": 100,
     "backup_keep_count": 10_000,
+    # 冠名权市场：配额/名额/TTL/套餐窗口数
+    "market_top_seat_ratio": 100,
+    "market_offers_per_brand": 20,
+    "market_emerging_slots": 20,
+    "market_offer_ttl_hours": 8760,
+    "naming_pkg_stable_windows": 100,
+    "naming_pkg_short_windows": 100,
+    "naming_pkg_bet_windows": 100,
 }
 
 _INT_LOWER_BOUNDS = {
@@ -100,6 +117,13 @@ _INT_LOWER_BOUNDS = {
     "event_batch_window_seconds": 0,
     "llm_max_calls": 0,
     "backup_keep_count": 1,
+    "market_top_seat_ratio": 1,
+    "market_offers_per_brand": 1,
+    "market_emerging_slots": 0,
+    "market_offer_ttl_hours": 0,
+    "naming_pkg_stable_windows": 1,
+    "naming_pkg_short_windows": 1,
+    "naming_pkg_bet_windows": 1,
 }
 
 _TIME_KEYS = ("backup_time",)
@@ -112,6 +136,10 @@ _JSON_STRING_KEYS = (
     "facility_effects",
     "activity_config",
     "competition_aliases",
+    "market_satisfy_config",
+    "market_heat_config",
+    "market_industry_templates",
+    "market_tier_profiles",
 )
 
 
@@ -173,6 +201,12 @@ def validate_and_cast(key: str, raw: str):
 
     if key in _JSON_STRING_KEYS:
         return _validate_json_object(raw, key)
+
+    if key == "market_bid_mode":
+        mode = raw.strip()
+        if mode not in ("明标", "暗标", "先到先得", "常态"):
+            raise ValueError("market_bid_mode 需为 明标/暗标/先到先得/常态 之一")
+        return mode
 
     if key == "facility_upgrade_costs":
         values = parse_float_list(raw)

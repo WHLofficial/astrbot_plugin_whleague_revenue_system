@@ -310,5 +310,125 @@
     "hint": "备份目录最多保留的备份文件数，超限自动删除最旧。",
     "type": "int",
     "default": 30
+  },
+  "market_bid_mode": {
+    "description": "冠名招商模式",
+    "hint": "明标=定向报价+全员报价板；暗标=仅收价队可见，成交即揭晓；先到先得=公开一口价先签先得；常态=不走市场（/主场冠名 直签）。",
+    "type": "string",
+    "default": "明标"
+  },
+  "market_top_seat_ratio": {
+    "description": "头部品牌配额除数",
+    "hint": "头部品牌数上限 = 球队数 ÷ 该值向上取整（按热度排名自动校准）。",
+    "type": "int",
+    "default": 8
+  },
+  "market_offers_per_brand": {
+    "description": "每品牌单轮报价上限",
+    "hint": "招商期每个品牌最多发出的报价份数。",
+    "type": "int",
+    "default": 3
+  },
+  "market_emerging_slots": {
+    "description": "新兴档每品牌名额",
+    "hint": "新兴档品牌同时最多可签约的球队数。",
+    "type": "int",
+    "default": 2
+  },
+  "market_offer_ttl_hours": {
+    "description": "报价时效（小时）",
+    "hint": "品牌报价超过该时长未被签约即作废；0=不限时（活到下次推进）。",
+    "type": "int",
+    "default": 72
+  },
+  "naming_pkg_stable_windows": {
+    "description": "稳健套餐窗口数",
+    "hint": "冠名稳健套餐的合同期限（窗口数）。",
+    "type": "int",
+    "default": 6
+  },
+  "naming_pkg_stable_factor": {
+    "description": "稳健套餐金额系数",
+    "hint": "稳健套餐每窗冠名费 = 底价 × 该系数。",
+    "type": "float",
+    "default": 0.85
+  },
+  "naming_pkg_short_windows": {
+    "description": "进取套餐窗口数",
+    "hint": "冠名进取套餐的合同期限（窗口数）。",
+    "type": "int",
+    "default": 2
+  },
+  "naming_pkg_short_factor": {
+    "description": "进取套餐金额系数",
+    "hint": "进取套餐每窗冠名费 = 底价 × 该系数。",
+    "type": "float",
+    "default": 1.25
+  },
+  "naming_pkg_bet_windows": {
+    "description": "对赌套餐窗口数",
+    "hint": "冠名对赌套餐的合同期限（窗口数）。",
+    "type": "int",
+    "default": 4
+  },
+  "naming_pkg_bet_factor": {
+    "description": "对赌套餐保底系数",
+    "hint": "对赌套餐每窗保底冠名费 = 底价 × 该系数。",
+    "type": "float",
+    "default": 0.7
+  },
+  "naming_pkg_bet_bonus_rate": {
+    "description": "对赌奖金比例",
+    "hint": "达成条件时奖金 = 窗口保底 × 该比例。",
+    "type": "float",
+    "default": 0.7
+  },
+  "naming_pkg_bet_attend": {
+    "description": "对赌奖金上座线",
+    "hint": "窗口上座率 ≥ 该值时发放对赌奖金。",
+    "type": "float",
+    "default": 0.8
+  },
+  "naming_pkg_bet_fans": {
+    "description": "对赌奖金死忠增长线",
+    "hint": "窗口死忠增长 ≥ 该比例时发放对赌奖金。",
+    "type": "float",
+    "default": 0.03
+  },
+  "naming_bet_expected_prob": {
+    "description": "对赌期望达成概率",
+    "hint": "报价面板展示期望价值用的估计概率，仅展示不影响结算。",
+    "type": "float",
+    "default": 0.5
+  },
+  "market_satisfy_floor": {
+    "description": "品牌满意度兜底地板",
+    "hint": "档位性格缺失 satisfy_floor 时的回退值；满意度跌破地板品牌解约。",
+    "type": "float",
+    "default": 0.6
+  },
+  "market_satisfy_config": {
+    "description": "满意度演化参数",
+    "hint": "内部参数，请勿修改。JSON：上座/战绩/事件三信号权重与缓冲带。",
+    "type": "string",
+    "default": "{\"attend_weight\":0.5,\"result_weight\":0.3,\"event_weight\":0.2,\"line_buffer\":0.05}"
+  },
+  "market_heat_config": {
+    "description": "品牌热度演化参数",
+    "hint": "内部参数，请勿修改。JSON：夺冠/连胜/低迷/成交/冷落增量与钳制区间。",
+    "type": "string",
+    "default": "{\"champion\":0.10,\"win_streak\":0.03,\"slump\":-0.02,\"deal\":0.02,\"ignored\":-0.03,\"clamp_low\":0.5,\"clamp_high\":1.5}"
+  },
+  "market_industry_templates": {
+    "description": "行业金额系数",
+    "hint": "JSON：行业名→金额系数；缺省行业按 1.0。",
+    "type": "string",
+    "default": "{}"
+  },
+  "market_tier_profiles": {
+    "description": "档位性格参数",
+    "hint": "内部参数，请勿修改。JSON：头部/新兴/口碑三档的满意度地板、上座好差线、解约赔率乘数与增益。",
+    "type": "string",
+    "default": "{\"头部\":{\"satisfy_floor\":0.7,\"good_attend\":0.95,\"bad_attend\":0.6,\"penalty_mult\":1.5,\"attend_buff\":0.02,\"fans_buff\":0.0},\"新兴\":{\"satisfy_floor\":0.6,\"good_attend\":0.9,\"bad_attend\":0.6,\"penalty_mult\":1.0,\"attend_buff\":0.0,\"fans_buff\":0.0},\"口碑\":{\"satisfy_floor\":0.5,\"good_attend\":0.85,\"bad_attend\":0.5,\"penalty_mult\":0.75,\"attend_buff\":0.0,\"fans_buff\":0.005}}"
   }
 }
