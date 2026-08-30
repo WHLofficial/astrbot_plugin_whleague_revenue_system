@@ -20,6 +20,7 @@ MODULES = [
     "tests.s9_listeners",
     "tests.s10_backfill",
     "tests.s11_validation",
+    "tests.s12_dao_atomicity",
 ]
 
 

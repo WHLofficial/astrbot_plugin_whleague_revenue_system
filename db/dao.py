@@ -191,20 +191,29 @@ class StadiumDAO:
             )
 
     async def deduct_build_credit(self, team_name: str, amount: float) -> float:
-        """用建设券抵扣建设支出，返回实际抵扣金额。"""
+        """用建设券抵扣建设支出，返回实际抵扣金额（事务内读改写，防并发扣成负券）。"""
         if amount <= 0:
             return 0.0
-        row = await self._db.fetchone(
-            "SELECT build_credit FROM club_balance WHERE team_name=?", (team_name,)
-        )
-        credit = row["build_credit"] if row else 0.0
-        used = min(credit, amount)
-        if used > 0:
-            await self._db.execute(
+
+        async def work(conn):
+            cur = await conn.execute(
+                "SELECT build_credit FROM club_balance WHERE team_name=?", (team_name,)
+            )
+            try:
+                row = await cur.fetchone()
+            finally:
+                await cur.close()
+            credit = row["build_credit"] if row else 0.0
+            used = min(credit, amount)
+            if used <= 0:
+                return 0.0
+            await conn.execute(
                 "UPDATE club_balance SET build_credit=build_credit-?, updated_at=datetime('now','localtime') WHERE team_name=?",
                 (used, team_name),
             )
-        return used
+            return used
+
+        return await self._db.execute_transaction(work)
 
     # ─── 账务流水 ─────────────────────────────────────────
 
@@ -279,17 +288,39 @@ class StadiumDAO:
         return int(row["m"]) if row else 0
 
     async def add_named_round(self, season: int, competition: str, token: str) -> int:
-        """登记命名轮次：已存在返回原号，否则分配该赛事内下一个号并入库。"""
-        existing = await self.get_named_round(season, competition, token)
-        if existing is not None:
-            return existing
-        next_no = await self.max_named_round_no(season, competition) + 1
-        await self._db.execute(
-            "INSERT OR IGNORE INTO round_names (season_number, competition, token, round_no) "
-            "VALUES (?, ?, ?, ?)",
-            (season, competition, token, next_no),
-        )
-        return next_no
+        """登记命名轮次：已存在返回原号，否则分配该赛事内下一个号并入库。
+
+        查重→取号→插入在同一事务内完成，防并发登记同一赛事时分配到相同轮次号。
+        """
+        async def work(conn):
+            cur = await conn.execute(
+                "SELECT round_no FROM round_names WHERE season_number=? AND competition=? AND token=?",
+                (season, competition, token),
+            )
+            try:
+                row = await cur.fetchone()
+            finally:
+                await cur.close()
+            if row:
+                return int(row["round_no"])
+            cur = await conn.execute(
+                "SELECT COALESCE(MAX(round_no), 0) AS m FROM round_names "
+                "WHERE season_number=? AND competition=?",
+                (season, competition),
+            )
+            try:
+                row = await cur.fetchone()
+            finally:
+                await cur.close()
+            next_no = (int(row["m"]) if row else 0) + 1
+            await conn.execute(
+                "INSERT OR IGNORE INTO round_names (season_number, competition, token, round_no) "
+                "VALUES (?, ?, ?, ?)",
+                (season, competition, token, next_no),
+            )
+            return next_no
+
+        return await self._db.execute_transaction(work)
 
     async def get_round_matches(
         self, season: int, window_seq: int, round_no: int, competition: str | None = None
@@ -300,10 +331,6 @@ class StadiumDAO:
                 "AND competition=? ORDER BY id",
                 (season, window_seq, round_no, competition),
             )
-        return await self._db.fetchall(
-            "SELECT * FROM matches WHERE season_number=? AND window_seq=? AND round_no=? ORDER BY id",
-            (season, window_seq, round_no),
-        )
         return await self._db.fetchall(
             "SELECT * FROM matches WHERE season_number=? AND window_seq=? AND round_no=? ORDER BY id",
             (season, window_seq, round_no),
@@ -705,18 +732,19 @@ class StadiumDAO:
             await cur.close()
 
     async def recompute_balance(self, team_name: str) -> None:
-        """按流水重算余额（建设券流水不影响余额，故排除 credit 类）。"""
+        """按流水重算余额（建设券流水不影响余额，故排除 credit 类）。
+
+        SUM 子查询内联在 UPDATE 语句中，取数与写回为单条原子语句，
+        与并发 apply_balance 的 balance=balance+? 叠加语义保持一致。
+        """
         await self._db.execute(
             "INSERT OR IGNORE INTO club_balance (team_name, balance, build_credit) VALUES (?, 0, 0)",
             (team_name,),
         )
-        row = await self._db.fetchone(
-            "SELECT COALESCE(SUM(amount), 0.0) AS s FROM revenue_transactions "
-            "WHERE team_name=? AND kind != 'credit'",
-            (team_name,),
-        )
-        total = row["s"] if row else 0.0
         await self._db.execute(
-            "UPDATE club_balance SET balance=?, updated_at=datetime('now','localtime') WHERE team_name=?",
-            (total, team_name),
+            "UPDATE club_balance SET balance=("
+            "SELECT COALESCE(SUM(amount), 0.0) FROM revenue_transactions "
+            "WHERE team_name=club_balance.team_name AND kind != 'credit'"
+            "), updated_at=datetime('now','localtime') WHERE team_name=?",
+            (team_name,),
         )
