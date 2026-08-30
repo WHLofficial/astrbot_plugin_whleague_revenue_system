@@ -794,6 +794,26 @@ class StadiumDAO:
                     "windows": int(offer["windows"]), "package_json": offer["package_json"]}
         return await self._db.execute_transaction(work)
 
+    # ─── 窗口死忠快照（对赌奖金 redo 口径） ─────────────────
+
+    async def upsert_window_fans_log(self, season: int, window_seq: int, team_name: str,
+                                     fans_before: float, fans_after: float) -> None:
+        await self._db.execute(
+            "INSERT OR REPLACE INTO window_fans_log (season_number, window_seq, team_name, fans_before, fans_after) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (season, window_seq, team_name, float(fans_before), float(fans_after)),
+        )
+
+    async def get_window_fans_log(self, season: int, window_seq: int, team_name: str) -> dict | None:
+        cur = await self._db.execute(
+            "SELECT * FROM window_fans_log WHERE season_number=? AND window_seq=? AND team_name=?",
+            (season, window_seq, team_name),
+        )
+        try:
+            return await cur.fetchone()
+        finally:
+            await cur.close()
+
     # ─── 档期 ─────────────────────────────────────────────
 
     async def add_booking(

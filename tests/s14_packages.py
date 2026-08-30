@@ -233,3 +233,61 @@ async def test_fans_buff_evolve():
 async def test_dice_terminate_removed():
     """旧「死忠暴跌掷骰解约」已由确定性规则（满意度下限，批次④）取代。"""
     assert not hasattr(BrandService, "maybe_brand_terminate")
+
+
+async def test_bet_bonus_fans_line_survives_redo():
+    """对赌奖金 redo 口径（schema v11）：上座线关闭后奖金只来自死忠增长，
+    强制重算按 window_fans_log 快照复算不丢。"""
+    env = await TestEnv(cfg_override={"naming_pkg_bet_attend": 1.5}).setup()
+    try:
+        await env.stadium_service.import_attributes("利物浦", influence=500.0, capacity=20000)
+        await env.dao.update_fans("利物浦", 3000)
+        await env.brand_service.sign("利物浦", "亚马逊", 1, 1, package_no=3)
+        # 前置：影响力 500 → 目标 8200，一轮演化增长远超 3% 死忠线
+        assert formula.diehard_target(env.cfg, 500.0) > 8200.0 - 1e-6
+        result = await env.window_service.settle()
+        joined = "\n".join(result["lines"])
+        assert "对赌奖金" in joined, joined  # 上座 1.0 < 1.5 线不达，纯死忠线触发
+        amounts = sorted(t["amount"] for t in
+                         await env.dao.list_transactions("利物浦", season=1, window_seq=1)
+                         if t["kind"] == "naming")
+        assert len(amounts) == 2, amounts
+        # redo：evolve 跳过（fd 为空），奖金按死忠快照重算不丢
+        await env.window_service.settle(force=True)
+        amounts2 = sorted(t["amount"] for t in
+                          await env.dao.list_transactions("利物浦", season=1, window_seq=1)
+                          if t["kind"] == "naming")
+        assert amounts2 == amounts, amounts2
+        log = await env.dao.get_window_fans_log(1, 1, "利物浦")
+        assert log is not None and float(log["fans_before"]) == 3000.0
+        # 冠名窗口数不因 redo 重复扣减
+        naming = await env.dao.get_active_naming("利物浦")
+        assert int(naming["windows_remaining"]) == int(naming["windows_total"]) - 1
+    finally:
+        await env.teardown()
+
+
+async def test_bet_bonus_redo_reads_fans_log():
+    """redo 的死忠增长口径以 window_fans_log 为唯一来源：快照达线即发。"""
+    env = await TestEnv(cfg_override={"naming_pkg_bet_attend": 1.5}).setup()
+    try:
+        await env.stadium_service.import_attributes("利物浦", influence=500.0, capacity=20000)
+        await env.dao.update_fans("利物浦", 8000)
+        await env.brand_service.sign("利物浦", "亚马逊", 1, 1, package_no=3)
+        # 目标 8200：本轮演化增长 < 3%，首结不发奖金
+        assert formula.diehard_target(env.cfg, 500.0) > 8200.0 - 1e-6
+        await env.window_service.settle()
+        amounts = sorted(t["amount"] for t in
+                         await env.dao.list_transactions("利物浦", season=1, window_seq=1)
+                         if t["kind"] == "naming")
+        assert len(amounts) == 1, amounts  # 只有冠名费
+        # 快照写入达线增长 → redo 按快照发放奖金（口径来源是快照本身）
+        await env.dao.upsert_window_fans_log(1, 1, "利物浦", 3000.0, 8200.0)
+        await env.window_service.settle(force=True)
+        snap = json.loads((await env.dao.get_active_naming("利物浦"))["package_json"])
+        amounts2 = [t["amount"] for t in
+                    await env.dao.list_transactions("利物浦", season=1, window_seq=1)
+                    if t["kind"] == "naming"]
+        assert snap["bonus"] in amounts2, (snap, amounts2)
+    finally:
+        await env.teardown()

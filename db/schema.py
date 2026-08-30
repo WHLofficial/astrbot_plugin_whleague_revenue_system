@@ -1,6 +1,6 @@
 from astrbot.api import logger
 
-SCHEMA_VERSION = 10
+SCHEMA_VERSION = 11
 
 SQL_CREATE_TABLES = r"""
 
@@ -254,6 +254,18 @@ CREATE TABLE IF NOT EXISTS market_offers (
 );
 
 CREATE INDEX IF NOT EXISTS idx_market_offers_round ON market_offers(round_id, status);
+
+-- 每窗每队死忠快照（对赌奖金 redo 重算的增长口径来源）
+CREATE TABLE IF NOT EXISTS window_fans_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    season_number INTEGER NOT NULL,
+    window_seq INTEGER NOT NULL,
+    team_name TEXT NOT NULL,
+    fans_before REAL NOT NULL,
+    fans_after REAL NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+    UNIQUE(season_number, window_seq, team_name)
+);
 
 """
 
@@ -602,3 +614,23 @@ async def _migrate(db, current_version: int):
         )
         await db.commit()
         logger.info("Migrated naming market: brand_pool tiers + market_rounds/market_offers.")
+
+    if current_version < 11:
+        # 每窗每队死忠快照：对赌奖金 redo 重算的增长口径来源（v11 前旧窗无快照，
+        # redo 回退现状行为）
+        await db.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS window_fans_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                season_number INTEGER NOT NULL,
+                window_seq INTEGER NOT NULL,
+                team_name TEXT NOT NULL,
+                fans_before REAL NOT NULL,
+                fans_after REAL NOT NULL,
+                created_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+                UNIQUE(season_number, window_seq, team_name)
+            );
+            """
+        )
+        await db.commit()
+        logger.info("Migrated window_fans_log: per-team diehard snapshot per window.")

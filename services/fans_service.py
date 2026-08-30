@@ -56,6 +56,10 @@ class FansService:
             if abs(delta) < 0.5:
                 continue
             await self._dao.update_fans(team, new_fans)
+            # 死忠快照：对赌奖金 redo 重算的增长口径来源（evolve 仅非 redo 执行，
+            # 快照恰好只在首次结算写入）
+            await self._dao.upsert_window_fans_log(season, window_seq, team,
+                                                   s["fans_diehards"], new_fans)
             details.append({
                 "team": team,
                 "before": round(s["fans_diehards"], 1),

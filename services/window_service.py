@@ -160,8 +160,15 @@ class WindowService:
                 if isinstance(package, dict) and package.get("pkg_no") == 3:
                     attend_rate = await self._fans_service.window_attend_rate(
                         team, season, window_seq, s["capacity"])
-                    before = float(s["fans_diehards"])
-                    after = float(fd["after"]) if fd else float(s["fans_diehards"])
+                    # 增长口径以死忠快照为准：首次结算与 redo 同源（redo 时 evolve
+                    # 跳过、fd 为空，快照仍在）；无快照（v11 前旧窗）回退现状
+                    log = await self._dao.get_window_fans_log(season, window_seq, team)
+                    if log is not None:
+                        before = float(log["fans_before"])
+                        after = float(log["fans_after"])
+                    else:
+                        before = float(s["fans_diehards"])
+                        after = float(fd["after"]) if fd else before
                     growth = (after - before) / before if before > 0 else 0.0
                     bonus = formula.bet_bonus_due(package, attend_rate, growth)
                     if bonus > 0:
