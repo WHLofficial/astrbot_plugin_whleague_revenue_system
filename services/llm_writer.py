@@ -192,7 +192,11 @@ class LlmWriter:
         prompt = (
             "为足球俱乐部球场冠名权设计若干个虚拟赞助品牌。"
             f"主题：{topic or '不限'}（可以是群聊梗、虚拟科技公司、本地企业风格）。"
-            "输出 JSON 数组，每个元素：{\"brand\": \"品牌名(4-16字)\", \"heat\": 热度小数0.5-1.5}"
+            "输出 JSON 数组，每个元素："
+            "{\"brand\": \"品牌名(4-16字)\", \"heat\": 热度小数0.5-1.5, "
+            "\"tier\": \"档位(头部/新兴/口碑)\", \"industry\": \"行业(≤8字，如 科技/饮食)\", "
+            "\"pitch\": \"一句卖点(≤30字)\", "
+            "\"packages\": [可选，1-3个套餐变体 {\"pkg_name\": \"名(≤6字)\", \"windows\": 窗口数1-12, \"factor\": 每窗价格系数0.5-2.0}]}"
             "只输出 JSON 数组。"
         )
         text = await self._ask(prompt)
@@ -347,4 +351,25 @@ def _clamp_brand(d) -> dict:
     if not brand or len(brand) > 20:
         raise ValueError("品牌名需为 1-20 字")
     heat = max(0.5, min(1.5, float(d.get("heat", 1.0))))
-    return {"brand": brand, "heat": round(heat, 3)}
+    tier = sanitize_text(str(d.get("tier", "")), 4)
+    tier = tier if tier in ("头部", "新兴", "口碑") else "口碑"
+    industry = sanitize_text(str(d.get("industry", "")), 8) or "通用"
+    pitch = sanitize_text(str(d.get("pitch", "")), 30)
+    packages = []
+    raw_pkgs = d.get("packages")
+    if isinstance(raw_pkgs, list):
+        for p in raw_pkgs[:3]:
+            if not isinstance(p, dict):
+                continue
+            try:
+                windows = max(1, min(12, int(p.get("windows", 4))))
+                factor = max(0.5, min(2.0, float(p.get("factor", 1.0))))
+            except (TypeError, ValueError):
+                continue
+            name = sanitize_text(str(p.get("pkg_name", "")), 6) or f"定制{len(packages) + 1}"
+            packages.append({"pkg_name": name, "windows": windows, "factor": round(factor, 3)})
+    out = {"brand": brand, "heat": round(heat, 3), "tier": tier,
+           "industry": industry, "pitch": pitch}
+    if packages:
+        out["packages"] = packages
+    return out

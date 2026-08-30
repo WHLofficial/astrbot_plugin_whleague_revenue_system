@@ -230,6 +230,19 @@ class AdminHandler:
             return
         season_label = await self._plugin.dao.season_label(result["season_number"])
         yield event.plain_result(f"✅ 已进入 {season_label} 窗口 {result['window_seq']}")
+        if kind in ("赛季", "season", "s"):  # 上赛季冠军加成（品牌热度/满意度）
+            brands = getattr(self._plugin, "brand_service", None)
+            if brands is not None:
+                champ = await self._run(
+                    event, brands.champion_bonuses(result["season_number"] - 1))
+                if isinstance(champ, dict) and champ.get("team"):
+                    if champ.get("brand"):
+                        yield event.plain_result(
+                            f"🏆 上季冠军 {champ['team']}（{champ['pts']} 分）——"
+                            f"品牌「{champ['brand']}」热度 +0.10，满意度 +0.10")
+                    else:
+                        yield event.plain_result(
+                            f"🏆 上季冠军 {champ['team']}（{champ['pts']} 分）")
         market = getattr(self._plugin, "market_service", None)
         if market is not None:
             lines = await self._run(

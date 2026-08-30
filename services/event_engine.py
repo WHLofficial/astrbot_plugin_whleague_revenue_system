@@ -221,6 +221,28 @@ DEFAULT_EVENTS = [
           "outcomes": [{"w": 60, "effects": {"money": 3.0, "fans_pct": 0.01}},
                        {"w": 40, "effects": {"money": -1.5, "fans_pct": -0.01}}]},
      ]},
+    {"event_id": "brand_cocreate", "name": "品牌联合营销", "category": "冠名联动", "weight": 4,
+     "event_type": "choice", "conditions": {"requires_naming": True},
+     "template": "冠名品牌找上门：想在 {stadium} 搞一波联合营销，方案摆上了桌。",
+     "options": [
+         {"no": 1, "name": "联名球衣上市", "desc": "大干一场",
+          "outcomes": [{"w": 60, "effects": {"money": 5.0, "fans_pct": 0.02, "brand_heat": 0.05}},
+                       {"w": 40, "effects": {"money": -2.0, "satisfaction": -0.1}}]},
+         {"no": 2, "name": "门店互相引流", "desc": "稳妥试点",
+          "outcomes": [{"w": 70, "effects": {"money": 2.0, "satisfaction": 0.05}},
+                       {"w": 30, "effects": {"money": -0.5}}]},
+     ]},
+    {"event_id": "brand_poach", "name": "竞品挖角", "category": "冠名联动", "weight": 3,
+     "event_type": "choice", "conditions": {"requires_naming": True},
+     "template": "竞品品牌私下接触 {team}，想撬走你家的冠名商。",
+     "options": [
+         {"no": 1, "name": "加码稳住现品牌", "desc": "忠诚为本",
+          "outcomes": [{"w": 65, "effects": {"satisfaction": 0.15}},
+                       {"w": 35, "effects": {"money": -2.0, "satisfaction": -0.05}}]},
+         {"no": 2, "name": "接触竞价的新品牌", "desc": "待价而沽",
+          "outcomes": [{"w": 50, "effects": {"money": 3.0, "satisfaction": -0.2}},
+                       {"w": 50, "effects": {"money": -1.0, "satisfaction": -0.1}}]},
+     ]},
 ]
 
 
@@ -419,6 +441,26 @@ class EventEngine:
                 notes.append(f"下一场上座 {'+' if attendance_mod > 1 else ''}{attendance_mod * 100:.0f}%")
             else:
                 notes.append(f"下一场上座 ×{attendance_mod:.2f}（重算跳过）")
+        # 品牌效果键：satisfaction 不在此处落库（由行情演化按权重并入满意度信号，
+        # 避免与上座/战绩信号双重计账）；brand_heat 直接改品牌热度（状态类）。
+        satisfaction = float(effects.get("satisfaction", 0.0))
+        brand_heat = float(effects.get("brand_heat", 0.0))
+        if satisfaction or brand_heat:
+            naming = await self._dao.get_active_naming(team_name)
+            if satisfaction and naming:
+                notes.append(f"品牌满意度 {'+' if satisfaction > 0 else ''}{satisfaction:.2f}（计入品牌评估）")
+            if brand_heat and naming:
+                if apply_state:
+                    rules = formula.parse_json_object(self._cfg.get("market_heat_config", "{}"))
+                    low = float(rules.get("clamp_low", 0.5))
+                    high = float(rules.get("clamp_high", 1.5))
+                    brand = await self._dao.get_brand_by_name(naming["brand"])
+                    if brand:
+                        heat = min(max(float(brand["heat"]) + brand_heat, low), high)
+                        await self._dao.update_brand_heat(int(brand["id"]), round(heat, 3))
+                    notes.append(f"品牌热度 {'+' if brand_heat > 0 else ''}{brand_heat:.2f}")
+                else:
+                    notes.append(f"品牌热度 {'+' if brand_heat > 0 else ''}{brand_heat:.2f}（重算跳过）")
         return notes
 
     async def _apply(self, event, team_name: str, season: int, window_seq: int) -> dict:

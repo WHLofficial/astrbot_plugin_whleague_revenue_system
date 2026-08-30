@@ -183,6 +183,16 @@ class WindowService:
             parts.append(f"余额 {balance['balance']:.2f}M" if balance else "余额 0M")
             lines.append(f"· {team}：{'，'.join(parts) if parts else '无变动'}")
 
+        # 行情演化（状态类，重算整步跳过）：满意度三信号步进，跌破下限品牌解约
+        if not redo:
+            attend_rates = {}
+            for s in stadiums:
+                attend_rates[s["team_name"]] = await self._fans_service.window_attend_rate(
+                    s["team_name"], season, window_seq, s["capacity"])
+            term_lines, _ = await self._brand_service.evolve_sentiment(
+                season, window_seq, attend_rates)
+            lines.extend(term_lines)
+
         await self._dao.expire_namings()
         await _persist_tx_ids()
         return {"season": season, "window_seq": window_seq, "lines": lines}

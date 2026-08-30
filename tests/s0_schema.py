@@ -301,10 +301,10 @@ async def test_fresh_db_has_choice_schema():
         assert {"event_type", "options_json"} <= cols, cols
         cc = await _table_columns(env.db.conn, "event_choices")
         assert "choice_no" in cc
-        # 默认事件池：22 条内置（提交 2 起拆分为 6 即发 + 16 选择）
+        # 默认事件池：24 条内置（提交 2 起拆分为 6 即发 + 16 选择；v2.10.0 增 2 条冠名联动）
         rows = await env.dao.list_events("adopted")
         builtin = [r for r in rows if r["source"] == "builtin"]
-        assert len(builtin) == 22
+        assert len(builtin) == 24
         # choice 决策表 API 可用
         await env.dao.add_event_choice("利物浦", 1, 1, "storm_buzz")
         await env.dao.add_event_choice("利物浦", 1, 1, "storm_buzz")  # 幂等

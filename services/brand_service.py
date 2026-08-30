@@ -68,6 +68,39 @@ def _snapshot(package: dict) -> dict:
              "bet_attend", "bet_fans")}
 
 
+def variant_packages(cfg: dict, base_fee: float, packages_json: str) -> list[dict] | None:
+    """品牌自定义套餐变体（LLM 生成，金额=底价×factor，无奖金条款）；无效返回 None。
+
+    packages_json 形如 {"variants": [{"pkg_name","windows","factor"}]}，
+    窗口 1-12、系数 0.5-2.0、至多 3 档；解析失败/为空时调用方回退默认三套餐。
+    """
+    try:
+        data = json.loads(packages_json or "{}")
+    except (ValueError, TypeError):
+        return None
+    variants = data.get("variants") if isinstance(data, dict) else None
+    if not isinstance(variants, list) or not variants:
+        return None
+    bet_attend = float(cfg.get("naming_pkg_bet_attend", 0.8))
+    bet_fans = float(cfg.get("naming_pkg_bet_fans", 0.03))
+    packages = []
+    for i, v in enumerate(variants[:3], start=1):
+        if not isinstance(v, dict):
+            continue
+        try:
+            windows = max(1, min(12, int(v.get("windows", 4))))
+            factor = max(0.5, min(2.0, float(v.get("factor", 1.0))))
+        except (TypeError, ValueError):
+            continue
+        amount = round(base_fee * factor, 3)
+        name = str(v.get("pkg_name") or f"定制{i}")[:6]
+        packages.append({"pkg_no": len(packages) + 1, "pkg_name": name, "windows": windows,
+                         "amount": amount, "base_fee": round(base_fee, 3), "bonus": 0.0,
+                         "bet_attend": bet_attend, "bet_fans": bet_fans,
+                         "desc": f"{windows} 个窗口，每窗 {amount:g}M（底价×{factor:g}）"})
+    return packages or None
+
+
 class BrandService:
     def __init__(self, db, dao, cfg, llm=None):
         self._db = db
@@ -96,12 +129,15 @@ class BrandService:
         return no
 
     async def _quote(self, capacity: float, fans: float, brand_row) -> tuple[float, list[dict]]:
-        """按队况算底价（×行业系数）并生成三套餐。"""
+        """按队况算底价（×行业系数）并生成套餐；品牌自定义变体优先，缺省三套餐。"""
         heat = float(brand_row["heat"])
         industry = (brand_row["industry"] or "通用") if brand_row else "通用"
         base_fee = formula.naming_fee(self._cfg, capacity, fans, heat)
         base_fee = round(base_fee * formula.industry_factor(self._cfg, industry), 3)
-        return base_fee, build_packages(self._cfg, base_fee)
+        packages = None
+        if brand_row:
+            packages = variant_packages(self._cfg, base_fee, brand_row["packages_json"] or "{}")
+        return base_fee, packages or build_packages(self._cfg, base_fee)
 
     async def sign(self, team_name: str, brand: str, season: int, window_seq: int,
                    package_no: int = 1) -> dict:
@@ -173,6 +209,146 @@ class BrandService:
                 "windows": package["windows"], "package": package["pkg_name"],
                 "package_no": package["pkg_no"]}
 
+    # ─── 行情演化 ─────────────────────────────────────────
+
+    def _satisfy_rules(self) -> dict:
+        return formula.parse_json_object(self._cfg.get("market_satisfy_config", "{}"))
+
+    def _heat_rules(self) -> dict:
+        return formula.parse_json_object(self._cfg.get("market_heat_config", "{}"))
+
+    def _tier_profile(self, tier: str) -> dict:
+        profiles = formula.parse_json_object(self._cfg.get("market_tier_profiles", {}))
+        profile = profiles.get(tier or "口碑")
+        return profile if isinstance(profile, dict) else {}
+
+    async def _adjust_heat(self, brand_id: int, current: float, delta: float) -> float:
+        rules = self._heat_rules()
+        heat = min(max(current + delta, float(rules.get("clamp_low", 0.5))),
+                   float(rules.get("clamp_high", 1.5)))
+        heat = round(heat, 3)
+        await self._dao.update_brand_heat(brand_id, heat)
+        return heat
+
+    async def evolve_sentiment(self, season: int, window_seq: int,
+                               attend_rates: dict[str, float]) -> tuple[list[str], dict]:
+        """行情演化（状态类，重算整步跳过）：对每支有冠名的队按三信号步进满意度。
+
+        delta = attend_weight×line_buffer×上座档 + result_weight×line_buffer×战绩档
+                + event_weight×事件满意度原始值；负向按档位 penalty_mult 放大，钳 [0,2]。
+        上座档按档位 good/bad_attend 定 ±1；战绩档按本窗口该队全部场次（主客场统一
+        换算队视角）的胜率对 0.5±line_buffer 定 ±1；事件满意度由即发型 effect_json 与
+        选择型 outcome 的 effects 求和（两处都不在此落库，只经此加权入信号）。
+        满意度跌破档位下限（profile.satisfy_floor，缺省 market_satisfy_floor）→
+        品牌解约（无赔偿）。近 3 场（主客场）全胜/全败只调品牌热度，静默。
+        attend_rates: {队名: 本窗平均上座率}，缺省按中性 1.0。
+        返回 (解约广播行, {队名: {"sat","delta","terminated"}})。
+        """
+        rules = self._satisfy_rules()
+        attend_w = float(rules.get("attend_weight", 0.5))
+        result_w = float(rules.get("result_weight", 0.3))
+        event_w = float(rules.get("event_weight", 0.2))
+        buffer = float(rules.get("line_buffer", 0.05))
+        heat_rules = self._heat_rules()
+        lines: list[str] = []
+        details: dict[str, dict] = {}
+        for s in await self._dao.list_stadiums():
+            team = s["team_name"]
+            naming = await self._dao.get_active_naming(team)
+            if not naming:
+                continue
+            brand_row = await self._dao.get_brand_by_name(naming["brand"])
+            profile = self._tier_profile((brand_row["tier"] if brand_row else "") or "口碑")
+            rate = float(attend_rates.get(team, 1.0))
+            good = float(profile.get("good_attend", 0.9))
+            bad = float(profile.get("bad_attend", 0.6))
+            s_attend = 1 if rate >= good else (-1 if rate <= bad else 0)
+            wins = played = 0
+            for m in await self._dao.get_team_matches_window(team, season, window_seq):
+                res = m["result"]
+                if res not in ("W", "L", "D"):
+                    continue
+                if m["home_team"] != team and res in ("W", "L"):
+                    res = "L" if res == "W" else "W"
+                played += 1
+                wins += 1 if res == "W" else 0
+            if not played:
+                s_result = 0
+            else:
+                win_rate = wins / played
+                s_result = 1 if win_rate >= 0.5 + buffer else (
+                    -1 if win_rate <= 0.5 - buffer else 0)
+            event_raw = 0.0
+            for ev in await self._dao.get_window_events(team, season, window_seq):
+                data = formula.parse_json_object(ev["effect_json"])
+                event_raw += float(data.get("satisfaction", 0.0) or 0.0)
+            for ch in await self._dao.get_window_choice_outcomes(team, season, window_seq):
+                data = formula.parse_json_object(ch["outcome"])
+                effects = data.get("effects") if isinstance(data.get("effects"), dict) else {}
+                event_raw += float(effects.get("satisfaction", 0.0) or 0.0)
+            delta = (attend_w * buffer * s_attend + result_w * buffer * s_result
+                     + event_w * event_raw)
+            if delta < 0:
+                delta *= float(profile.get("penalty_mult", 1.0))
+            sat = min(2.0, max(0.0, round(float(naming["satisfaction"]) + delta, 3)))
+            await self._dao.update_naming_satisfaction(team, sat)
+            if brand_row:
+                recent = await self._dao.get_team_results_recent(team, 3)
+                if len(recent) == 3:
+                    marks = {r["result_team"] for r in recent}
+                    if marks == {"W"}:
+                        await self._adjust_heat(int(brand_row["id"]), float(brand_row["heat"]),
+                                                float(heat_rules.get("win_streak", 0.03)))
+                    elif marks == {"L"}:
+                        await self._adjust_heat(int(brand_row["id"]), float(brand_row["heat"]),
+                                                float(heat_rules.get("slump", -0.02)))
+            floor = float(profile.get("satisfy_floor",
+                                      self._cfg.get("market_satisfy_floor", 0.6)))
+            terminated = False
+            if sat < floor:
+                await self._dao.terminate_naming(team)
+                terminated = True
+                lines.append(f"💔 品牌「{naming['brand']}」对 {team} 的满意度降至 {sat:.2f}"
+                             f"（低于 {floor:.2f}），已解除冠名（无赔偿）")
+            details[team] = {"sat": sat, "delta": round(delta, 4), "terminated": terminated}
+        return lines, details
+
+    async def champion_bonuses(self, season: int) -> dict | None:
+        """赛季冠军加成：按已有比分场次算积分（胜3平1负0）→ 净胜球 → 队名定冠军。
+
+        冠军队有生效冠名时品牌热度 +champion、合同满意度 +0.10；
+        无比分场次跳过，无任何比分返回 None。
+        """
+        matches = await self._dao.get_season_result_matches(season)
+        table: dict[str, dict] = {}
+        for m in matches:
+            goals = formula.score_goals(m["score"])
+            if goals is None:
+                continue
+            home_goals, away_goals = goals
+            res = m["result"]  # 主队视角 W/L/D
+            pairs = ((m["home_team"], home_goals, away_goals, res),
+                     (m["away_team"], away_goals, home_goals,
+                      "W" if res == "L" else ("L" if res == "W" else "D")))
+            for team, gf, ga, r in pairs:
+                row = table.setdefault(team, {"team": team, "pts": 0, "gd": 0})
+                row["pts"] += 3 if r == "W" else (1 if r == "D" else 0)
+                row["gd"] += gf - ga
+        if not table:
+            return None
+        champ = sorted(table.values(), key=lambda r: (-r["pts"], -r["gd"], r["team"]))[0]
+        naming = await self._dao.get_active_naming(champ["team"])
+        info = {**champ, "brand": naming["brand"] if naming else None}
+        if naming:
+            brand = await self._dao.get_brand_by_name(naming["brand"])
+            if brand:
+                await self._adjust_heat(int(brand["id"]), float(brand["heat"]),
+                                        float(self._heat_rules().get("champion", 0.10)))
+            sat = min(2.0, round(float(naming["satisfaction"]) + 0.10, 3))
+            await self._dao.update_naming_satisfaction(champ["team"], sat)
+            info["satisfaction"] = sat
+        return info
+
     # ─── 品牌池 ───────────────────────────────────────────
 
     async def add_custom(self, brand: str, heat: float) -> None:
@@ -189,8 +365,19 @@ class BrandService:
         drafts = await self._llm.design_brands(count, topic)
         added = []
         for d in drafts:
-            await self._dao.add_brand(d["brand"], d["heat"], source="llm", status="pending")
-            added.append({"brand": d["brand"], "heat": d["heat"]})
+            packages = d.get("packages") if isinstance(d.get("packages"), list) else None
+            await self._dao.add_brand(
+                d["brand"], d["heat"], source="llm", status="pending",
+                industry=d.get("industry") or "通用",
+                tier=d.get("tier") or "",
+                pitch=d.get("pitch") or "",
+                packages_json=(json.dumps({"variants": packages}, ensure_ascii=False)
+                               if packages else "{}"),
+            )
+            added.append({"brand": d["brand"], "heat": d["heat"],
+                          "tier": d.get("tier") or "口碑",
+                          "industry": d.get("industry") or "通用",
+                          "pitch": d.get("pitch") or ""})
         return added
 
     async def adopt(self, brand_id: int) -> None:

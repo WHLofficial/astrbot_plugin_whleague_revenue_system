@@ -143,6 +143,14 @@ def result_from_score(text) -> str | None:
     return "D"
 
 
+def score_goals(text) -> tuple[int, int] | None:
+    """由比分取 (主队进球, 客队进球)，点球部分不计入净胜球；无法解析返回 None。"""
+    m = _SCORE_RE.match(str(text or ""))
+    if not m:
+        return None
+    return int(m.group(1)), int(m.group(2))
+
+
 def competition_aliases(cfg: dict) -> dict:
     aliases = parse_json_object(cfg.get("competition_aliases", {}))
     return aliases if aliases else DEFAULT_COMPETITION_ALIASES

@@ -11,7 +11,7 @@ import math
 from datetime import datetime, timedelta
 
 from . import formula
-from .brand_service import _snapshot, build_packages
+from .brand_service import _snapshot, build_packages, variant_packages
 
 
 class MarketError(Exception):
@@ -152,10 +152,12 @@ class MarketService:
         out.sort(key=lambda x: x[1], reverse=True)
         return out
 
-    def _brand_package(self, tier: str, base_fee: float) -> dict:
-        """品牌选套餐：头部大牌只做短约（进取），新兴/口碑走稳健。"""
-        packages = build_packages(self._cfg, base_fee)
-        return packages[1] if tier == "头部" else packages[0]
+    def _brand_package(self, brand_row, tier: str, base_fee: float) -> dict:
+        """品牌选套餐：自定义变体优先；缺省头部大牌只做短约（进取），新兴/口碑走稳健。"""
+        packages = (variant_packages(self._cfg, base_fee, brand_row["packages_json"] or "{}")
+                    if brand_row else None) or build_packages(self._cfg, base_fee)
+        idx = 1 if tier == "头部" else 0
+        return packages[min(idx, len(packages) - 1)]
 
     async def _targeted_offers(self, round_id: int, sellers: list, expire_at: str | None,
                                mode: str) -> list[str]:
@@ -179,7 +181,7 @@ class MarketService:
                 picks = (zero + rest)[:per_brand]
             for team, fee in picks:
                 offered_teams.add(team)
-                rows.append((brand, team, self._brand_package(tier, fee)))
+                rows.append((brand, team, self._brand_package(brand, tier, fee)))
         for brand, team, package in rows:
             await self._dao.add_market_offer(
                 round_id, int(brand["id"]), team, int(package["pkg_no"]),
@@ -207,7 +209,9 @@ class MarketService:
         for brand in sellers:
             fee = formula.naming_fee(self._cfg, avg_cap, avg_fans, float(brand["heat"]))
             fee = round(fee * formula.industry_factor(self._cfg, brand["industry"] or "通用"), 3)
-            package = build_packages(self._cfg, fee)[0]  # 稳健结构
+            packages = (variant_packages(self._cfg, fee, brand["packages_json"] or "{}")
+                        or build_packages(self._cfg, fee))
+            package = packages[0]  # 稳健结构（自定义变体取第一档）
             await self._dao.add_market_offer(
                 round_id, int(brand["id"]), "", int(package["pkg_no"]),
                 float(package["amount"]), int(package["windows"]),

@@ -77,13 +77,13 @@ async def test_default_event_pool():
     env = await TestEnv().setup()
     try:
         rows = await env.dao.list_events("adopted")
-        # 内置 22 条：6 即发 + 16 选择
+        # 内置 24 条：6 即发 + 18 选择（v2.10.0 增品牌联合营销/竞品挖角 2 条冠名联动）
         builtin = [r for r in rows if r["source"] == "builtin"]
-        assert len(builtin) == 22, len(builtin)
+        assert len(builtin) == 24, len(builtin)
         instant = [r for r in builtin if r["event_type"] == "instant"]
         choice = [r for r in builtin if r["event_type"] == "choice"]
         assert len(instant) == 6, len(instant)
-        assert len(choice) == 16, len(choice)
+        assert len(choice) == 18, len(choice)
         categories = {r["category"] for r in builtin}
         assert len(categories) >= 8, categories
         # 选择型必须带 2~4 项操作，每项操作有概率表
@@ -96,7 +96,7 @@ async def test_default_event_pool():
         # 幂等
         await env.event_engine.init_defaults()
         rows2 = await env.dao.list_events("adopted")
-        assert len([r for r in rows2 if r["source"] == "builtin"]) == 22
+        assert len([r for r in rows2 if r["source"] == "builtin"]) == 24
     finally:
         await env.teardown()
 

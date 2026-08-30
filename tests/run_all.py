@@ -24,6 +24,7 @@ MODULES = [
     "tests.s13_infra",
     "tests.s14_packages",
     "tests.s15_market",
+    "tests.s16_sentiment",
 ]
 
 

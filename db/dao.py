@@ -425,6 +425,52 @@ class StadiumDAO:
         )
         return [r for r in rows if r["result"] != "C"][:limit]
 
+    async def get_team_results_recent(self, team_name: str, limit: int = 3) -> list:
+        """最近 limit 场已置赛果（主客场都算），主客场视角统一换算为该队 W/D/L。
+
+        行新增 result_team 列（W/D/L/C），供连胜/低迷判定使用。
+        """
+        rows = await self._db.fetchall(
+            "SELECT * FROM matches WHERE (home_team=? OR away_team=?) AND result IS NOT NULL "
+            "ORDER BY season_number DESC, window_seq DESC, round_no DESC LIMIT ?",
+            (team_name, team_name, max(limit * 5, 20)),
+        )
+        out = []
+        for r in rows:
+            if r["result"] == "C":
+                continue
+            res = r["result"]
+            if r["home_team"] != team_name and res in ("W", "L"):
+                res = "L" if res == "W" else "W"
+            out.append({**r, "result_team": res})
+            if len(out) >= limit:
+                break
+        return out
+
+    async def get_season_result_matches(self, season: int) -> list:
+        """该赛季已有赛果且有比分的场次（冠军积分只认有比分的场次，缺比分跳过）。"""
+        return await self._db.fetchall(
+            "SELECT * FROM matches WHERE season_number=? AND result IS NOT NULL "
+            "AND result!='C' AND score IS NOT NULL AND score!=''",
+            (season,),
+        )
+
+    async def get_team_matches_window(self, team_name: str, season: int, window_seq: int) -> list:
+        """该窗口该队全部场次（主客场都算），战绩信号用。"""
+        return await self._db.fetchall(
+            "SELECT * FROM matches WHERE (home_team=? OR away_team=?) "
+            "AND season_number=? AND window_seq=? ORDER BY round_no, id",
+            (team_name, team_name, season, window_seq),
+        )
+
+    async def get_window_choice_outcomes(self, team_name: str, season: int, window_seq: int) -> list:
+        """该队该窗口已结算选择的 outcome JSON 列表（事件满意度信号回读用）。"""
+        return await self._db.fetchall(
+            "SELECT outcome FROM event_choices WHERE team_name=? AND season_number=? "
+            "AND window_seq=? AND resolved=1",
+            (team_name, season, window_seq),
+        )
+
     async def set_match_weather(self, match_id: int, weather: str) -> None:
         await self._db.execute("UPDATE matches SET weather=? WHERE id=?", (weather, match_id))
 
@@ -521,11 +567,17 @@ class StadiumDAO:
     # ─── 品牌池 ───────────────────────────────────────────
 
     async def add_brand(self, brand: str, heat: float, source: str, status: str = "adopted",
-                        industry: str = "通用") -> None:
+                        industry: str = "通用", tier: str = "口碑", pitch: str = "",
+                        packages_json: str = "{}") -> None:
         await self._db.execute(
-            "INSERT OR IGNORE INTO brand_pool (brand, heat, source, status, industry) "
-            "VALUES (?, ?, ?, ?, ?)",
-            (brand, heat, source, status, industry),
+            "INSERT OR IGNORE INTO brand_pool (brand, heat, source, status, industry, tier, pitch, packages_json) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (brand, heat, source, status, industry, tier, pitch, packages_json),
+        )
+
+    async def get_brand_by_name(self, brand: str):
+        return await self._db.fetchone(
+            "SELECT * FROM brand_pool WHERE brand=?", (brand,)
         )
 
     async def list_brands(self, status: str | None = None) -> list:
@@ -548,6 +600,12 @@ class StadiumDAO:
     async def update_brand_heat(self, brand_id: int, heat: float) -> None:
         await self._db.execute(
             "UPDATE brand_pool SET heat=? WHERE id=?", (heat, brand_id)
+        )
+
+    async def update_naming_satisfaction(self, team_name: str, satisfaction: float) -> None:
+        await self._db.execute(
+            "UPDATE naming_rights SET satisfaction=? WHERE team_name=? AND status='active'",
+            (satisfaction, team_name),
         )
 
     async def update_brand_tier(self, brand_id: int, tier: str, industry: str | None = None,
