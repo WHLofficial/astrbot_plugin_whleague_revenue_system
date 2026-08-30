@@ -235,6 +235,23 @@ async def test_dice_terminate_removed():
     assert not hasattr(BrandService, "maybe_brand_terminate")
 
 
+async def test_sign_package_two_explicit():
+    """直签显式套餐号 2（进取）：常态模式可选套餐（缺省走稳健=套餐 1）。"""
+    env = await TestEnv().setup()
+    try:
+        await env.stadium_service.import_attributes("利物浦", influence=150.0, capacity=20000)
+        await env.dao.update_fans("利物浦", 3000)
+        r = await env.brand_service.sign("利物浦", "亚马逊", 1, 1, package_no=2)
+        assert r["package"] == "进取" and r["package_no"] == 2 and r["windows"] == 2
+        naming = await env.dao.get_active_naming("利物浦")
+        snap = json.loads(naming["package_json"])
+        expect_base = round(naming_fee(env.cfg, 20000, 3000, 1.3) * 1.0, 3)
+        assert snap["amount"] == round(expect_base * 1.25, 3)
+        assert naming["fee_per_window"] == snap["amount"]
+    finally:
+        await env.teardown()
+
+
 async def test_bet_bonus_fans_line_survives_redo():
     """对赌奖金 redo 口径（schema v11）：上座线关闭后奖金只来自死忠增长，
     强制重算按 window_fans_log 快照复算不丢。"""

@@ -255,7 +255,7 @@ class PlayerHandler:
     async def sign_naming(self, event) -> AsyncGenerator[MessageEventResult, None]:
         parts = event.get_message_str().split(maxsplit=1)
         if len(parts) < 2:
-            yield event.plain_result("用法: /主场冠名 <品牌>")
+            yield event.plain_result("用法: /主场冠名 <品牌> [套餐号 1-3，缺省稳健套餐]")
             return
         market = getattr(self._plugin, "market_service", None)
         if market is not None and market.mode() != "常态":
@@ -268,17 +268,26 @@ class PlayerHandler:
         except StadiumError as e:
             yield event.plain_result(str(e))
             return
+        # 末位整数 token 视为套餐号（1-3），其余为品牌名（兼容 CVS Health 等含空格品牌）
+        brand_spec = parts[1].strip()
+        package_no = 1
+        head, _, tail = brand_spec.rpartition(" ")
+        if head and tail in ("1", "2", "3"):
+            package_no = int(tail)
+            brand_spec = head
         state = await self._plugin.dao.get_league_state()
         season = state["season_number"] if state else 1
         window_seq = state["window_seq"] if state else 1
         result = await self._run(
-            event, self._plugin.brand_service.sign(team, parts[1], season, window_seq)
+            event, self._plugin.brand_service.sign(team, brand_spec, season, window_seq,
+                                                   package_no=package_no)
         )
         if "error" in result:
             yield event.plain_result(result["error"])
             return
         yield event.plain_result(
-            f"✅ 「{result['brand']}」冠名 {result['team']}！{result['fee_per_window']}M/窗口 × {result['windows']} 窗口"
+            f"✅ 「{result['brand']}」冠名 {result['team']}（{result['package']}套餐）！"
+            f"{result['fee_per_window']}M/窗口 × {result['windows']} 窗口"
         )
 
     async def terminate_naming(self, event) -> AsyncGenerator[MessageEventResult, None]:
