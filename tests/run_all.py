@@ -23,6 +23,7 @@ MODULES = [
     "tests.s12_dao_atomicity",
     "tests.s13_infra",
     "tests.s14_packages",
+    "tests.s15_market",
 ]
 
 

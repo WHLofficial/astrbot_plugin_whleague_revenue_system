@@ -8,6 +8,7 @@ from astrbot.api.event import MessageEventResult
 from ..services.brand_service import BrandError
 from ..services.chart_service import ChartError
 from ..services import formula
+from ..services.market_service import MarketError
 from ..services.stadium_service import StadiumError
 from ..utils.help_text import build_help
 from ..utils.security import format_m
@@ -32,7 +33,7 @@ class PlayerHandler:
     async def _run(self, event, coro):
         try:
             return await coro
-        except (StadiumError, BrandError, ChartError, ValueError, IndexError) as e:
+        except (StadiumError, BrandError, ChartError, MarketError, ValueError, IndexError) as e:
             return {"error": str(e)}
         except Exception as e:
             logger.error(f"Player handler error: {e}")
@@ -256,6 +257,12 @@ class PlayerHandler:
         if len(parts) < 2:
             yield event.plain_result("用法: /主场冠名 <品牌>")
             return
+        market = getattr(self._plugin, "market_service", None)
+        if market is not None and market.mode() != "常态":
+            yield event.plain_result(
+                f"当前为{market.mode()}模式，品牌报价走市场：/主场招商 查看报价，/主场签约 <报价号> 签约"
+            )
+            return
         try:
             team = await self._my_team(event)
         except StadiumError as e:
@@ -291,6 +298,82 @@ class PlayerHandler:
             return
         penalty = f"，赔付 {result['penalty']}M" if result["penalty"] else ""
         yield event.plain_result(f"✅ 已与「{result['brand']}」解约{penalty}")
+
+    async def market_board(self, event) -> AsyncGenerator[MessageEventResult, None]:
+        try:
+            team = await self._my_team(event)
+        except StadiumError as e:
+            yield event.plain_result(str(e))
+            return
+        state = await self._plugin.dao.get_league_state()
+        season = state["season_number"] if state else 1
+        window_seq = state["window_seq"] if state else 1
+        lines = await self._run(
+            event, self._plugin.market_service.board(team, season, window_seq)
+        )
+        if isinstance(lines, dict) and "error" in lines:
+            yield event.plain_result(lines["error"])
+            return
+        yield event.plain_result("\n".join(lines))
+
+    async def accept_offer(self, event) -> AsyncGenerator[MessageEventResult, None]:
+        parts = event.get_message_str().split()
+        if len(parts) < 2:
+            yield event.plain_result("用法: /主场签约 <报价号>（/主场招商 查看报价号）")
+            return
+        try:
+            offer_id = int(parts[1])
+        except ValueError:
+            yield event.plain_result("报价号需为整数（/主场招商 查看报价号）")
+            return
+        try:
+            team = await self._my_team(event)
+        except StadiumError as e:
+            yield event.plain_result(str(e))
+            return
+        state = await self._plugin.dao.get_league_state()
+        season = state["season_number"] if state else 1
+        window_seq = state["window_seq"] if state else 1
+        result = await self._run(
+            event, self._plugin.market_service.accept(team, offer_id, season, window_seq)
+        )
+        if "error" in result:
+            yield event.plain_result(result["error"])
+            return
+        bonus = f"，对赌奖金上限 {result['bonus']:g}M" if result["bonus"] > 0 else ""
+        yield event.plain_result(
+            f"✅ 「{result['brand']}」冠名 {result['team']}！{result['fee_per_window']:g}M/窗口 × "
+            f"{result['windows']} 窗口（{result['package']}）{bonus}"
+        )
+
+    async def renew_naming(self, event) -> AsyncGenerator[MessageEventResult, None]:
+        parts = event.get_message_str().split()
+        package_no = None
+        if len(parts) >= 2:
+            try:
+                package_no = int(parts[1])
+            except ValueError:
+                yield event.plain_result("套餐号需为整数（1=稳健 2=进取 3=对赌，可省略）")
+                return
+        try:
+            team = await self._my_team(event)
+        except StadiumError as e:
+            yield event.plain_result(str(e))
+            return
+        state = await self._plugin.dao.get_league_state()
+        season = state["season_number"] if state else 1
+        window_seq = state["window_seq"] if state else 1
+        kwargs = {"package_no": package_no} if package_no is not None else {}
+        result = await self._run(
+            event, self._plugin.brand_service.renew(team, season, window_seq, **kwargs)
+        )
+        if "error" in result:
+            yield event.plain_result(result["error"])
+            return
+        yield event.plain_result(
+            f"✅ 已与「{result['brand']}」续约：{result['fee_per_window']:g}M/窗口 × "
+            f"{result['windows']} 窗口（{result['package']}）"
+        )
 
     # ─── 财务 ─────────────────────────────────────────────
 

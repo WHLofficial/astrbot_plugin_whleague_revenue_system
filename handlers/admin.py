@@ -12,6 +12,7 @@ from ..services.brand_service import BrandError
 from ..services.event_engine import EventError
 from ..services.file_import_service import FileImportError
 from ..services.fixture_service import FixtureError
+from ..services.market_service import MarketError
 from ..services.stadium_service import StadiumError
 from ..services.formula import SELL_OUT_FILL
 from ..services.window_service import SettleError
@@ -42,7 +43,7 @@ class AdminHandler:
             # 避免上层 `"error" in None`；list（选择列表/批量导入）原样保留
             return result if result is not None else {}
         except (StadiumError, FixtureError, EventError, BrandError, SettleError,
-                FileImportError, BackfillError, ValueError) as e:
+                FileImportError, BackfillError, MarketError, ValueError) as e:
             return {"error": str(e)}
         except Exception as e:
             logger.error(f"Admin handler error: {e}")
@@ -229,6 +230,15 @@ class AdminHandler:
             return
         season_label = await self._plugin.dao.season_label(result["season_number"])
         yield event.plain_result(f"✅ 已进入 {season_label} 窗口 {result['window_seq']}")
+        market = getattr(self._plugin, "market_service", None)
+        if market is not None:
+            lines = await self._run(
+                event, market.run_window(result["season_number"], result["window_seq"])
+            )
+            if isinstance(lines, dict) and "error" in lines:
+                yield event.plain_result(f"市场例行失败: {lines['error']}")
+            elif lines:
+                yield event.plain_result("\n".join(lines))
 
     async def name_season(self, event) -> AsyncGenerator[MessageEventResult, None]:
         deny = await self._guard(event)
@@ -804,6 +814,32 @@ class AdminHandler:
             yield event.plain_result(result["error"])
             return
         yield event.plain_result("✅ 品牌已丢弃")
+
+    async def set_brand_tier(self, event) -> AsyncGenerator[MessageEventResult, None]:
+        deny = await self._guard(event)
+        if deny:
+            yield event.plain_result(deny)
+            return
+        parts = event.get_message_str().split()
+        if len(parts) < 3 or parts[2] not in ("头部", "新兴", "口碑"):
+            yield event.plain_result("用法: /主场品牌定档 <品牌id> <头部/新兴/口碑> [行业]")
+            return
+        try:
+            brand_id = parse_int(parts[1], min_val=1)
+        except ValueError:
+            brand_id = None
+        if brand_id is None:
+            yield event.plain_result("用法: /主场品牌定档 <品牌id> <头部/新兴/口碑> [行业]")
+            return
+        industry = parts[3] if len(parts) >= 4 else None
+        result = await self._run(
+            event, self._plugin.market_service.set_tier(brand_id, parts[2], industry)
+        )
+        if "error" in result:
+            yield event.plain_result(result["error"])
+            return
+        extra = f"，行业改为 {industry}" if industry else ""
+        yield event.plain_result(f"✅ 品牌 #{brand_id} 已定档 {parts[2]} 并锁档{extra}")
 
     # ─── 结算 ─────────────────────────────────────────────
 

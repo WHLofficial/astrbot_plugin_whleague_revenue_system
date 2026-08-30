@@ -28,6 +28,7 @@ from astrbot_plugin_whleague_revenue_system.services.event_engine import EventEn
 from astrbot_plugin_whleague_revenue_system.services.fans_service import FansService  # noqa: E402
 from astrbot_plugin_whleague_revenue_system.services.fixture_service import FixtureService  # noqa: E402
 from astrbot_plugin_whleague_revenue_system.services.llm_writer import LlmWriter  # noqa: E402
+from astrbot_plugin_whleague_revenue_system.services.market_service import MarketService  # noqa: E402
 from astrbot_plugin_whleague_revenue_system.services.negotiation_bridge import NegotiationBridge  # noqa: E402
 from astrbot_plugin_whleague_revenue_system.services.stadium_service import StadiumService  # noqa: E402
 from astrbot_plugin_whleague_revenue_system.services.window_service import WindowService  # noqa: E402
@@ -94,6 +95,7 @@ class TestEnv:
         self.fans_service = FansService(self.db, self.dao, self.cfg)
         self.llm_writer = LlmWriter(self.cfg, get_provider=lambda: self.provider)
         self.brand_service = BrandService(self.db, self.dao, self.cfg, self.llm_writer)
+        self.market_service = MarketService(self.db, self.dao, self.cfg, self.brand_service)
         self.event_engine = EventEngine(self.db, self.dao, self.cfg, self.llm_writer)
         self.fixture_service = FixtureService(self.db, self.dao, self.cfg, self.stadium_service)
         self.window_service = WindowService(

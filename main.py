@@ -60,6 +60,7 @@ class StadiumPlugin(Star):
         from .services.fans_service import FansService
         from .services.fixture_service import FixtureService
         from .services.llm_writer import LlmWriter
+        from .services.market_service import MarketService
         from .services.negotiation_bridge import NegotiationBridge
         from .services.stadium_service import StadiumService
         from .services.window_service import WindowService
@@ -69,6 +70,9 @@ class StadiumPlugin(Star):
         self.fans_service = FansService(self.db, self.dao, self.config_cache)
         self.llm_writer = LlmWriter(self.config_cache, get_provider=self._get_provider)
         self.brand_service = BrandService(self.db, self.dao, self.config_cache, self.llm_writer)
+        self.market_service = MarketService(
+            self.db, self.dao, self.config_cache, self.brand_service
+        )
         self.event_engine = EventEngine(self.db, self.dao, self.config_cache, self.llm_writer)
         self.fixture_service = FixtureService(
             self.db, self.dao, self.config_cache, self.stadium_service,
@@ -492,6 +496,26 @@ class StadiumPlugin(Star):
     @filter.command("主场退冠名", alias={"退冠名"})
     async def cmd_terminate_naming(self, event: AstrMessageEvent) -> AsyncGenerator[MessageEventResult, None]:
         async for r in self._player_cmd(event, self.player_handler.terminate_naming):
+            yield r
+
+    @filter.command("主场招商", alias={"招商"})
+    async def cmd_market_board(self, event: AstrMessageEvent) -> AsyncGenerator[MessageEventResult, None]:
+        async for r in self._player_cmd(event, self.player_handler.market_board):
+            yield r
+
+    @filter.command("主场签约", alias={"签约"})
+    async def cmd_accept_offer(self, event: AstrMessageEvent) -> AsyncGenerator[MessageEventResult, None]:
+        async for r in self._player_cmd(event, self.player_handler.accept_offer):
+            yield r
+
+    @filter.command("主场续约", alias={"续约"})
+    async def cmd_renew_naming(self, event: AstrMessageEvent) -> AsyncGenerator[MessageEventResult, None]:
+        async for r in self._player_cmd(event, self.player_handler.renew_naming):
+            yield r
+
+    @filter.command("主场品牌定档")
+    async def cmd_set_brand_tier(self, event: AstrMessageEvent) -> AsyncGenerator[MessageEventResult, None]:
+        async for r in self._admin_cmd(event, self.admin_handler.set_brand_tier):
             yield r
 
     @filter.command("主场财务")

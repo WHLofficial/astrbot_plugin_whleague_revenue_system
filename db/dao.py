@@ -545,6 +545,185 @@ class StadiumDAO:
             "UPDATE brand_pool SET status='discarded' WHERE id=? AND status='pending'", (brand_id,)
         )
 
+    async def update_brand_heat(self, brand_id: int, heat: float) -> None:
+        await self._db.execute(
+            "UPDATE brand_pool SET heat=? WHERE id=?", (heat, brand_id)
+        )
+
+    async def update_brand_tier(self, brand_id: int, tier: str, industry: str | None = None,
+                                lock: bool = False) -> None:
+        """档位写入；lock=True 同时锁档（退出自动排名）。"""
+        sets, params = ["tier=?"], [tier]
+        if industry is not None:
+            sets.append("industry=?")
+            params.append(industry)
+        if lock:
+            sets.append("tier_locked=1")
+        params.append(brand_id)
+        await self._db.execute(
+            f"UPDATE brand_pool SET {', '.join(sets)} WHERE id=?", params
+        )
+
+    async def count_active_namings_by_brand(self, brand: str) -> int:
+        cur = await self._db.execute(
+            "SELECT COUNT(*) AS n FROM naming_rights WHERE brand=? AND status='active'", (brand,)
+        )
+        try:
+            row = await cur.fetchone()
+            return int(row["n"]) if row else 0
+        finally:
+            await cur.close()
+
+    # ─── 冠名权市场 ───────────────────────────────────────
+
+    async def get_market_round(self, season: int, window_seq: int):
+        return await self._db.fetchone(
+            "SELECT * FROM market_rounds WHERE season_number=? AND window_seq=?",
+            (season, window_seq),
+        )
+
+    async def list_open_rounds(self) -> list:
+        return await self._db.fetchall("SELECT * FROM market_rounds WHERE status='open' ORDER BY id")
+
+    async def open_market_round(self, season: int, window_seq: int, bid_mode: str,
+                                opened_by: str) -> int:
+        """开启招商轮；同窗已存在（推进幂等）时返回既有轮 id。"""
+        row = await self.get_market_round(season, window_seq)
+        if row:
+            return int(row["id"])
+        cur = await self._db.execute(
+            "INSERT INTO market_rounds (season_number, window_seq, bid_mode, status, opened_by) "
+            "VALUES (?, ?, ?, 'open', ?)",
+            (season, window_seq, bid_mode, opened_by),
+        )
+        try:
+            return int(cur.lastrowid or 0)
+        finally:
+            await cur.close()
+
+    async def settle_market_round(self, round_id: int) -> None:
+        """轮次收口：未成交报价作废+轮置 settled，同事务。"""
+        async def work(conn):
+            await conn.execute(
+                "UPDATE market_offers SET status='expired' WHERE round_id=? AND status='pending'",
+                (round_id,),
+            )
+            await conn.execute(
+                "UPDATE market_rounds SET status='settled', settled_at=datetime('now','localtime') "
+                "WHERE id=? AND status='open'",
+                (round_id,),
+            )
+        await self._db.execute_transaction(work)
+
+    async def add_market_offer(self, round_id: int, brand_id: int, team_name: str,
+                               package_no: int, amount: float, windows: int,
+                               package_json: str, expire_at: str | None) -> int:
+        cur = await self._db.execute(
+            "INSERT OR IGNORE INTO market_offers (round_id, brand_id, team_name, package_no, "
+            "amount, windows, package_json, status, expire_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?)",
+            (round_id, brand_id, team_name, package_no, amount, windows, package_json, expire_at),
+        )
+        try:
+            return int(cur.lastrowid or 0)
+        finally:
+            await cur.close()
+
+    async def list_round_offers(self, round_id: int) -> list:
+        return await self._db.fetchall(
+            "SELECT o.*, b.brand, b.tier, b.industry, b.pitch FROM market_offers o "
+            "JOIN brand_pool b ON b.id=o.brand_id WHERE o.round_id=? ORDER BY o.id",
+            (round_id,),
+        )
+
+    async def get_market_offer(self, offer_id: int):
+        return await self._db.fetchone(
+            "SELECT o.*, b.brand, b.tier, b.industry, b.pitch, "
+            "r.status AS round_status, r.bid_mode AS round_mode "
+            "FROM market_offers o JOIN brand_pool b ON b.id=o.brand_id "
+            "JOIN market_rounds r ON r.id=o.round_id WHERE o.id=?",
+            (offer_id,),
+        )
+
+    async def list_pending_offers_for_team(self, team_name: str) -> list:
+        """本队当前收到的报价（挂 open 轮；含已过期，展示层标注）。"""
+        return await self._db.fetchall(
+            "SELECT o.*, b.brand, b.tier, b.industry, b.pitch FROM market_offers o "
+            "JOIN brand_pool b ON b.id=o.brand_id "
+            "JOIN market_rounds r ON r.id=o.round_id "
+            "WHERE o.team_name=? AND r.status='open' ORDER BY o.id",
+            (team_name,),
+        )
+
+    async def list_fcfs_offers(self) -> list:
+        """先到先得公开挂价（team_name=''，open 轮）。"""
+        return await self._db.fetchall(
+            "SELECT o.*, b.brand, b.tier, b.industry, b.pitch FROM market_offers o "
+            "JOIN brand_pool b ON b.id=o.brand_id "
+            "JOIN market_rounds r ON r.id=o.round_id "
+            "WHERE o.team_name='' AND o.status='pending' AND r.status='open' ORDER BY o.id",
+        )
+
+    async def expire_stale_offers(self) -> int:
+        """TTL 懒清理：expire_at 已到的 pending 报价置 expired，返回数量。"""
+        cur = await self._db.execute(
+            "UPDATE market_offers SET status='expired' "
+            "WHERE status='pending' AND expire_at IS NOT NULL AND expire_at <= ?",
+            (self._now_str(),),
+        )
+        return max(0, cur.rowcount)
+
+    async def accept_market_offer(self, offer_id: int, team_name: str, season: int,
+                                  window_seq: int) -> dict | None:
+        """原子签约：报价认领与合同写入同事务（防先到先得/独家名额并发双签）。
+
+        服务层已做前置校验，此处兜底复查（报价 pending、未过期、定向匹配、队无
+        active 冠名）；任一失败返回 None，整体回滚。
+        """
+        async def work(conn):
+            cur = await conn.execute("SELECT * FROM market_offers WHERE id=?", (offer_id,))
+            try:
+                offer = await cur.fetchone()
+            finally:
+                await cur.close()
+            if not offer or offer["status"] != "pending":
+                return None
+            if offer["expire_at"] is not None and offer["expire_at"] <= self._now_str():
+                return None
+            if offer["team_name"] and offer["team_name"] != team_name:
+                return None
+            cur = await conn.execute(
+                "SELECT id FROM naming_rights WHERE team_name=? AND status='active'", (team_name,)
+            )
+            try:
+                if await cur.fetchone():
+                    return None
+            finally:
+                await cur.close()
+            cur = await conn.execute(
+                "SELECT brand, heat FROM brand_pool WHERE id=?", (offer["brand_id"],)
+            )
+            try:
+                brand_row = await cur.fetchone()
+            finally:
+                await cur.close()
+            if not brand_row:
+                return None
+            await conn.execute(
+                "INSERT OR REPLACE INTO naming_rights (team_name, brand, heat, fee_per_window, "
+                "windows_total, windows_remaining, status, signed_season, signed_window, package_json) "
+                "VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?, ?)",
+                (team_name, brand_row["brand"], float(brand_row["heat"]), float(offer["amount"]),
+                 int(offer["windows"]), int(offer["windows"]), season, window_seq,
+                 offer["package_json"]),
+            )
+            await conn.execute(
+                "UPDATE market_offers SET status='accepted' WHERE id=?", (offer_id,)
+            )
+            return {"brand": brand_row["brand"], "amount": float(offer["amount"]),
+                    "windows": int(offer["windows"]), "package_json": offer["package_json"]}
+        return await self._db.execute_transaction(work)
+
     # ─── 档期 ─────────────────────────────────────────────
 
     async def add_booking(
