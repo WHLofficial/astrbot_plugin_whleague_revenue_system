@@ -268,6 +268,35 @@ async def test_quota_full():
         await env.teardown()
 
 
+async def test_accept_tx_brand_quota_guard():
+    """dao 层事务内名额兜底：服务层检查与事务提交交错也不会击穿档位名额。"""
+    env = await TestEnv(cfg_override={"max_open_tier": 4}).setup()
+    try:
+        await _seed_fields(env)
+        await env.dao.add_naming("利物浦", "亚马逊", 1.3, 2.0, 2, 1, 1)
+        rnd_id = await env.dao.open_market_round(1, 1, "明标", "test")
+        amz = await _brand(env, "亚马逊")
+        kele = await _brand(env, "可口可乐")
+        off_amz = await env.dao.add_market_offer(
+            int(rnd_id), int(amz["id"]), "巴塞罗那", 1, 1.0, 6, "{}", None)
+        off_kele = await env.dao.add_market_offer(
+            int(rnd_id), int(kele["id"]), "巴塞罗那", 1, 1.0, 6, "{}", None)
+        # 亚马逊（头部 quota=1）已有 1 队生效合同：事务内复查拦截并回滚
+        assert await env.dao.accept_market_offer(
+            int(off_amz), "巴塞罗那", 1, 1, brand_quota=1) is None
+        assert await env.dao.get_active_naming("巴塞罗那") is None
+        # 同一名额参数、名额未满的品牌正常成交
+        got = await env.dao.accept_market_offer(
+            int(off_kele), "巴塞罗那", 1, 1, brand_quota=1)
+        assert got is not None and got["brand"] == "可口可乐"
+        row = await env.dao.get_active_naming("巴塞罗那")
+        assert row is not None and row["brand"] == "可口可乐"
+        offer = await env.dao.get_market_offer(int(off_amz))
+        assert offer["status"] == "pending"
+    finally:
+        await env.teardown()
+
+
 async def test_set_tier_lock():
     env = await TestEnv().setup()
     try:

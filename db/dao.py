@@ -732,11 +732,12 @@ class StadiumDAO:
         return max(0, cur.rowcount)
 
     async def accept_market_offer(self, offer_id: int, team_name: str, season: int,
-                                  window_seq: int) -> dict | None:
+                                  window_seq: int, brand_quota: int | None = None) -> dict | None:
         """原子签约：报价认领与合同写入同事务（防先到先得/独家名额并发双签）。
 
         服务层已做前置校验，此处兜底复查（报价 pending、未过期、定向匹配、队无
-        active 冠名）；任一失败返回 None，整体回滚。
+        active 冠名、品牌档位名额）；任一失败返回 None，整体回滚。brand_quota
+        非空时在事务内复查品牌生效冠名数（服务层检查与事务提交之间无原子性）。
         """
         async def work(conn):
             cur = await conn.execute("SELECT * FROM market_offers WHERE id=?", (offer_id,))
@@ -767,6 +768,17 @@ class StadiumDAO:
                 await cur.close()
             if not brand_row:
                 return None
+            if brand_quota is not None:
+                cur = await conn.execute(
+                    "SELECT COUNT(*) AS n FROM naming_rights WHERE brand=? AND status='active'",
+                    (brand_row["brand"],),
+                )
+                try:
+                    used = await cur.fetchone()
+                finally:
+                    await cur.close()
+                if used and int(used["n"]) >= int(brand_quota):
+                    return None
             await conn.execute(
                 "INSERT OR REPLACE INTO naming_rights (team_name, brand, heat, fee_per_window, "
                 "windows_total, windows_remaining, status, signed_season, signed_window, package_json) "

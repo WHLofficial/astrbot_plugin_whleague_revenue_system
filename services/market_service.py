@@ -251,7 +251,8 @@ class MarketService:
             used = await self._dao.count_active_namings_by_brand(offer["brand"])
             if used >= quota:
                 raise MarketError(f"「{offer['brand']}」{tier}档名额已满（{quota} 队）")
-        result = await self._dao.accept_market_offer(int(offer_id), team_name, season, window_seq)
+        result = await self._dao.accept_market_offer(int(offer_id), team_name, season, window_seq,
+                                                     brand_quota=quota)
         if result is None:
             raise MarketError("签约失败：报价刚被占用或已失效，请刷新报价后重试")
         await self._adjust_heat(int(offer["brand_id"]),
