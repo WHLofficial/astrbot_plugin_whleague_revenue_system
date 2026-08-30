@@ -172,10 +172,25 @@ class StadiumDAO:
         )
 
     async def ensure_balance(self, team_name: str, start_funds: float) -> None:
-        await self._db.execute(
-            "INSERT OR IGNORE INTO club_balance (team_name, balance, build_credit) VALUES (?, ?, 0)",
-            (team_name, start_funds),
-        )
+        """确保余额行存在；实际新插入时同事务补记 init 流水，
+        使 recompute_balance（balance=SUM(非 credit 流水)）不丢启动资金。"""
+        async def work(conn):
+            cur = await conn.execute(
+                "INSERT OR IGNORE INTO club_balance (team_name, balance, build_credit) VALUES (?, ?, 0)",
+                (team_name, start_funds),
+            )
+            try:
+                inserted = cur.rowcount
+            finally:
+                await cur.close()
+            if inserted:
+                await conn.execute(
+                    "INSERT INTO revenue_transactions (team_name, season_number, window_seq, kind, amount, note) "
+                    "VALUES (?, 0, 0, 'init', ?, '初始球场与启动资金')",
+                    (team_name, start_funds),
+                )
+
+        await self._db.execute_transaction(work)
 
     async def apply_balance(self, team_name: str, amount: float, build_credit_amount: float = 0.0) -> None:
         if build_credit_amount:

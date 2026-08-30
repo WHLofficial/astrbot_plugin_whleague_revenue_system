@@ -10,10 +10,10 @@ from tests.common import TestEnv, install_stubs  # noqa: E402,F401  (导入即�
 
 
 async def test_recompute_balance_single_statement():
-    """余额重算：SUM 与写回同语句，重算后余额恒等于非 credit 流水合计。"""
+    """余额重算：SUM 与写回同语句，重算后余额恒等于含 init 在内的非 credit 流水合计。"""
     env = await TestEnv().setup()
     try:
-        await env.dao.ensure_balance("利物浦", 100.0)
+        await env.dao.ensure_balance("利物浦", 100.0)  # 实插 → 补记 init 流水 +100
         await env.dao.add_transaction("利物浦", 1, 1, kind="ticket", amount=50.0)
         await env.dao.add_transaction("利物浦", 1, 1, kind="credit", amount=7.0)
         await env.dao.add_transaction("利物浦", 1, 2, kind="commercial", amount=-12.5)
@@ -21,7 +21,7 @@ async def test_recompute_balance_single_statement():
         await env.dao._db.execute("UPDATE club_balance SET balance=999.0 WHERE team_name='利物浦'")
         await env.dao.recompute_balance("利物浦")
         bal = (await env.dao.get_balance("利物浦"))["balance"]
-        assert abs(bal - 37.5) < 1e-6, bal
+        assert abs(bal - 137.5) < 1e-6, bal
 
         # 并发「流水+入账+重算」交错后归一，不变量成立：balance == SUM(非 credit)
         async def bump():
@@ -33,7 +33,28 @@ async def test_recompute_balance_single_statement():
         await asyncio.gather(bump(), bump())
         await env.dao.recompute_balance("利物浦")
         bal = (await env.dao.get_balance("利物浦"))["balance"]
-        assert abs(bal - 77.5) < 1e-6, bal
+        assert abs(bal - 177.5) < 1e-6, bal
+    finally:
+        await env.teardown()
+
+
+async def test_ensure_balance_init_tx_once():
+    """ensure_balance 实插时同事务补记 init 流水；重复调用不重复记账，recompute 不丢启动资金。"""
+    env = await TestEnv().setup()
+    try:
+        await env.dao.ensure_balance("利物浦", 50.0)
+        await env.dao.ensure_balance("利物浦", 50.0)  # 已存在 → 不再补记
+        txs = [t for t in await env.dao.list_transactions("利物浦") if t["kind"] == "init"]
+        assert len(txs) == 1, txs
+        assert abs(txs[0]["amount"] - 50.0) < 1e-6 and txs[0]["season_number"] == 0, txs[0]
+        await env.dao.recompute_balance("利物浦")
+        bal = (await env.dao.get_balance("利物浦"))["balance"]
+        assert abs(bal - 50.0) < 1e-6, bal
+        # 建场路径走 ensure_balance，同样只产生一条 init（不双记）
+        await env.stadium_service.ensure_stadium("巴塞罗那")
+        await env.stadium_service.ensure_stadium("巴塞罗那")
+        txs = [t for t in await env.dao.list_transactions("巴塞罗那") if t["kind"] == "init"]
+        assert len(txs) == 1, txs
     finally:
         await env.teardown()
 

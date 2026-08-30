@@ -69,11 +69,8 @@ class StadiumService:
         await self._dao.create_stadium(
             team_name, capacity=12000, tier=0, influence=influence, fans=fans
         )
+        # ensure_balance 实插时已在事务内补记 init 流水，此处不再重复
         await self._dao.ensure_balance(team_name, float(self._cfg.get("start_funds", 50.0)))
-        await self._dao.add_transaction(
-            team_name, 0, 0, "init", float(self._cfg.get("start_funds", 50.0)),
-            note="初始球场与启动资金",
-        )
         return await self._dao.get_stadium(team_name)
 
     async def grant_all(self) -> dict:
