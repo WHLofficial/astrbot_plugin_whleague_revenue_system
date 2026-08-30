@@ -29,8 +29,13 @@ class FansService:
         results = await self._dao.get_last_results(team_name, 3)
         return formula.effective_form_pts([r["result"] for r in results])
 
-    async def evolve(self, season: int, window_seq: int) -> list[dict]:
-        """对所有球场执行一次死忠演化，返回各队变动摘要。"""
+    async def evolve(self, season: int, window_seq: int,
+                     fans_buffs: dict | None = None) -> list[dict]:
+        """对所有球场执行一次死忠演化，返回各队变动摘要。
+
+        fans_buffs：各队冠名死忠加成（档位性格 fans_buff），增长额×(1+buff)。
+        """
+        buffs = fans_buffs or {}
         details = []
         stadiums = await self._dao.list_stadiums()
         for s in stadiums:
@@ -44,6 +49,9 @@ class FansService:
                 self._cfg, fans=s["fans_diehards"], target=target,
                 attend_rate=attend_rate, youth_level=youth_level, form_pts_value=form_pts,
             )
+            buff = float(buffs.get(team, 0.0) or 0.0)
+            if buff:
+                new_fans = s["fans_diehards"] + (new_fans - s["fans_diehards"]) * (1.0 + buff)
             delta = round(new_fans - s["fans_diehards"])
             if abs(delta) < 0.5:
                 continue

@@ -477,11 +477,26 @@ class StadiumDAO:
     async def add_naming(
         self, team_name: str, brand: str, heat: float, fee_per_window: float,
         windows_total: int, season: int, window_seq: int,
+        package_json: str = "{}",
     ) -> None:
+        # team_name UNIQUE（一队一行）：顶替同队 expired/terminated 旧行；active 冲突由服务层校验拦截
         await self._db.execute(
-            "INSERT INTO naming_rights (team_name, brand, heat, fee_per_window, windows_total, "
-            "windows_remaining, status, signed_season, signed_window) VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?)",
-            (team_name, brand, heat, fee_per_window, windows_total, windows_total, season, window_seq),
+            "INSERT OR REPLACE INTO naming_rights (team_name, brand, heat, fee_per_window, windows_total, "
+            "windows_remaining, status, signed_season, signed_window, package_json) "
+            "VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?, ?)",
+            (team_name, brand, heat, fee_per_window, windows_total, windows_total,
+             season, window_seq, package_json),
+        )
+
+    async def renew_naming(self, team_name: str, fee_per_window: float, windows_total: int,
+                           season: int, window_seq: int, package_json: str = "{}") -> None:
+        """续约原地换约：费用/窗口总数与剩余/签约期/套餐快照一次更新（无缝直签）。"""
+        await self._db.execute(
+            "UPDATE naming_rights SET fee_per_window=?, windows_total=?, windows_remaining=?, "
+            "package_json=?, signed_season=?, signed_window=? "
+            "WHERE team_name=? AND status='active'",
+            (fee_per_window, windows_total, windows_total, package_json,
+             season, window_seq, team_name),
         )
 
     async def tick_naming(self, team_name: str) -> None:
@@ -505,10 +520,12 @@ class StadiumDAO:
 
     # ─── 品牌池 ───────────────────────────────────────────
 
-    async def add_brand(self, brand: str, heat: float, source: str, status: str = "adopted") -> None:
+    async def add_brand(self, brand: str, heat: float, source: str, status: str = "adopted",
+                        industry: str = "通用") -> None:
         await self._db.execute(
-            "INSERT OR IGNORE INTO brand_pool (brand, heat, source, status) VALUES (?, ?, ?, ?)",
-            (brand, heat, source, status),
+            "INSERT OR IGNORE INTO brand_pool (brand, heat, source, status, industry) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (brand, heat, source, status, industry),
         )
 
     async def list_brands(self, status: str | None = None) -> list:

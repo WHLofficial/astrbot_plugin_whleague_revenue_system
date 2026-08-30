@@ -450,6 +450,33 @@ def naming_fee(cfg: dict, capacity: int, fans: float, heat: float) -> float:
     return round((base + per_cap * (capacity / 10000.0) + per_fans * (fans / 10000.0)) * heat, 3)
 
 
+def industry_factor(cfg: dict, industry: str) -> float:
+    """行业金额系数（market_industry_templates 行业→系数）；缺省/非法按 1.0。"""
+    templates = parse_json_object(cfg.get("market_industry_templates", {}))
+    try:
+        value = float(templates.get(industry, 1.0))
+    except (TypeError, ValueError):
+        return 1.0
+    return value if 0.0 < value < float("inf") else 1.0
+
+
+def bet_bonus_due(package: dict, attend_rate: float, fans_growth: float) -> float:
+    """对赌套餐奖金判定：窗口上座率或死忠增长率任一达线即发全额奖金，否则 0。"""
+    try:
+        if int(package.get("pkg_no", 0)) != 3:
+            return 0.0
+        bonus = float(package.get("bonus", 0.0))
+        if bonus <= 0:
+            return 0.0
+        bet_attend = float(package.get("bet_attend", 0.8))
+        bet_fans = float(package.get("bet_fans", 0.03))
+    except (TypeError, ValueError):
+        return 0.0
+    if attend_rate >= bet_attend or fans_growth >= bet_fans:
+        return bonus
+    return 0.0
+
+
 def activity_income(cfg: dict, activity_type: str, pitch_level: int = 0, youth_level: int = 0) -> dict:
     """档期活动结算；返回 {income, extra_maintenance}（演唱会草皮损坏概率受草皮级影响）。"""
     config = parse_json_object(cfg.get("activity_config", {}))

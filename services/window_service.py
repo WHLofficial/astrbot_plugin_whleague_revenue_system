@@ -29,6 +29,18 @@ class WindowService:
         self._brand_service = brand_service
         self._event_engine = event_engine
 
+    async def _tier_profile(self, team: str) -> dict:
+        """品牌档位性格（实时档位，改档即生效）；无生效冠名或档位缺失返回空。"""
+        naming = await self._dao.get_active_naming(team)
+        if not naming:
+            return {}
+        brand = next((b for b in await self._dao.list_brands()
+                      if b["brand"] == naming["brand"]), None)
+        tier = (brand["tier"] if brand else "") or "口碑"
+        profiles = formula.parse_json_object(self._cfg.get("market_tier_profiles", {}))
+        profile = profiles.get(tier)
+        return profile if isinstance(profile, dict) else {}
+
     async def settle(self, force: bool = False) -> dict:
         state = await self._dao.get_league_state()
         if not state:
@@ -88,8 +100,16 @@ class WindowService:
                                                 tx_sink=created_ids, on_batch=_persist_tx_ids)
         lines = []
 
-        # 死忠演化每窗口仅执行一轮（一次调用作用于全部球队），重算时跳过
-        fans_details = [] if redo else await self._fans_service.evolve(season, window_seq)
+        # 死忠演化每窗口仅执行一轮（一次调用作用于全部球队），重算时跳过；
+        # 冠名死忠加成随演化应用，状态类随重算一起跳过
+        fans_buffs = {}
+        if not redo:
+            for s0 in stadiums:
+                buff = float((await self._tier_profile(s0["team_name"])).get("fans_buff", 0.0) or 0.0)
+                if buff:
+                    fans_buffs[s0["team_name"]] = buff
+        fans_details = [] if redo else await self._fans_service.evolve(
+            season, window_seq, fans_buffs=fans_buffs)
         fans_by_team = {fd["team"]: fd for fd in fans_details}
         for s in stadiums:
             team = s["team_name"]
@@ -104,7 +124,8 @@ class WindowService:
                                  note=f"半赛季维护（{len(home_matches)} 场）")
                 parts.append(f"维护 −{maintenance:.2f}M")
 
-            # 2) 档期活动兑现
+            # 2) 档期活动兑现（头部品牌上座加成按实时档位性格乘收入）
+            attend_buff = float((await self._tier_profile(team)).get("attend_buff", 0.0) or 0.0)
             for booking in await self._dao.get_bookings(team, season, window_seq):
                 facilities = await self._dao.get_facilities(team)
                 act = formula.activity_income(
@@ -113,15 +134,18 @@ class WindowService:
                     youth_level=facilities.get(formula.FACILITY_YOUTH, 0),
                 )
                 if act["income"] > 0:
-                    await _record_tx(team, "activity", act["income"],
+                    income = round(act["income"] * (1.0 + attend_buff), 3)
+                    await _record_tx(team, "activity", income,
                                      note=f"{booking['activity_type']}（档位{booking['slot_no']}）")
-                    parts.append(f"活动 +{act['income']:.2f}M")
+                    parts.append(f"活动 +{income:.2f}M")
                 if act["extra_maintenance"] > 0:
                     await _record_tx(team, "maintenance", -act["extra_maintenance"],
                                      note="演唱会草皮损坏")
                     parts.append(f"草皮维修 −{act['extra_maintenance']:.2f}M")
 
-            # 3) 冠名费 + 到期（重算时不重复扣窗口数）
+            fd = fans_by_team.get(team)
+
+            # 3) 冠名费 + 到期 + 对赌奖金（重算时不重复扣窗口数；奖金为纯流水可重算）
             naming = await self._dao.get_active_naming(team)
             if naming:
                 fee = naming["fee_per_window"]
@@ -129,21 +153,26 @@ class WindowService:
                 parts.append(f"冠名 +{fee:.2f}M")
                 if not redo:
                     await self._dao.tick_naming(team)
+                try:
+                    package = json.loads(naming["package_json"] or "{}")
+                except (ValueError, TypeError):
+                    package = {}
+                if isinstance(package, dict) and package.get("pkg_no") == 3:
+                    attend_rate = await self._fans_service.window_attend_rate(
+                        team, season, window_seq, s["capacity"])
+                    before = float(s["fans_diehards"])
+                    after = float(fd["after"]) if fd else float(s["fans_diehards"])
+                    growth = (after - before) / before if before > 0 else 0.0
+                    bonus = formula.bet_bonus_due(package, attend_rate, growth)
+                    if bonus > 0:
+                        await _record_tx(team, "naming", bonus,
+                                         note=f"{naming['brand']} 对赌奖金（上座/死忠达线）")
+                        parts.append(f"对赌奖金 +{bonus:.2f}M")
 
-            # 4) 死忠演化（记录变动前后数值，供品牌解约判断）
-            fd = fans_by_team.get(team)
-            if fd:
-                fans_before, fans_after = fd["before"], fd["after"]
-                if fans_after != fans_before:
-                    delta = round(fans_after - fans_before)
-                    parts.append(f"死忠 {fans_before:,.0f}→{fans_after:,.0f} ({delta:+d})")
-            else:
-                fans_before = fans_after = s["fans_diehards"]
-            terminated = await self._brand_service.maybe_brand_terminate(
-                team, season, window_seq, fans_before, fans_after)
-            if terminated and terminated.get("tx_id"):
-                created_ids.append(terminated["tx_id"])
-                await _persist_tx_ids()
+            # 4) 死忠演化展示
+            if fd and fd["after"] != fd["before"]:
+                delta = round(fd["after"] - fd["before"])
+                parts.append(f"死忠 {fd['before']:,.0f}→{fd['after']:,.0f} ({delta:+d})")
 
             # 事件回顾
             events = await self._dao.get_window_events(team, season, window_seq)

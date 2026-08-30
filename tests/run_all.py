@@ -22,6 +22,7 @@ MODULES = [
     "tests.s11_validation",
     "tests.s12_dao_atomicity",
     "tests.s13_infra",
+    "tests.s14_packages",
 ]
 
 
