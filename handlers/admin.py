@@ -898,7 +898,7 @@ class AdminHandler:
         pending = bool(affected or fans or sellouts)
         if r.get("done") and not pending:
             mk = r.get("marker") or {}
-            tail = "、战绩成分已由旧版补差完成" if mk.get("form_skipped") else ""
+            tail = "、战绩成分已执行过" if mk.get("form_skipped") else ""
             body = (f"✅ 主场补差已执行过：赛季 S{mk.get('executed_season')}，"
                     f"{mk.get('matches', 0)} 场票房补差、{mk.get('sellouts', 0)} 场满座微降、"
                     f"{mk.get('fans_teams', 0)} 队死忠重定基{tail}")
@@ -909,6 +909,9 @@ class AdminHandler:
         if r.get("done"):
             head += "｜已执行过，本次仅重算待处理项"
         if not pending:
+            if r.get("applied"):
+                return (f"✅ 未发现需要补差的数据，完成标记已写入（赛季 S{r['season']}）。"
+                        "\n此后重复执行将直接显示执行统计。")
             return head + "\n✅ 未发现需要补差的数据。\n仍要写入完成标记请发：/主场补差 确认"
         lines.append(head)
         if force:

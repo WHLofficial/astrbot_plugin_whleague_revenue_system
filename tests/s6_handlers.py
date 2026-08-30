@@ -948,3 +948,34 @@ async def test_player_chart_handlers():
         assert len(r5) == 1 and _Path(str(r5[0])).exists(), r5
     finally:
         await env.teardown()
+
+
+async def test_backfill_receipt_zero_data_first_confirm():
+    """批次8：零数据首次「确认」→ 提示标记已写入而非「仍要发确认」；预览路径引导保留。"""
+    from astrbot_plugin_whleague_revenue_system.handlers.admin import AdminHandler
+
+    base = {"done": False, "marker": None, "season": 9, "form_done": False,
+            "force": False, "affected": [], "sellouts": [], "teams": [], "fans": []}
+    # apply 返回 applied=True，且 done/marker 是 apply 前快照（首次执行为空）
+    out = AdminHandler._format_backfill({**base, "applied": True})
+    assert "完成标记已写入" in out, out
+    assert "仍要写入完成标记" not in out, out
+    assert "尚未生效" not in out, out
+    # 未确认的预览：保留引导确认文案
+    out2 = AdminHandler._format_backfill(dict(base))
+    assert "仍要写入完成标记请发：/主场补差 确认" in out2, out2
+    assert "尚未生效" in out2, out2
+
+
+async def test_backfill_receipt_form_skipped_tail():
+    """批次8：form_skipped 尾注改为「战绩成分已执行过」（统一/旧版标记路径都成立）。"""
+    from astrbot_plugin_whleague_revenue_system.handlers.admin import AdminHandler
+
+    r = {"done": True, "season": 9, "form_done": True, "force": False,
+         "affected": [], "sellouts": [], "teams": [], "fans": [],
+         "marker": {"executed_season": 9, "matches": 3, "sellouts": 2,
+                    "fans_teams": 4, "form_skipped": True}}
+    out = AdminHandler._format_backfill(r)
+    assert "战绩成分已执行过" in out, out
+    assert "旧版" not in out, out
+    assert "无需重复执行" in out, out
