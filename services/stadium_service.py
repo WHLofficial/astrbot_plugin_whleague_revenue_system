@@ -84,6 +84,16 @@ class StadiumService:
             created += 1
         return {"created": created}
 
+    async def book_activity(self, team_name: str, activity_type: str, slot_no: int) -> dict:
+        """预订本窗口档期（服务层收口：确保球场存在后事务化落库，防推进竞态）。"""
+        await self.ensure_stadium(team_name)
+        r = await self._dao.book_activity(team_name, activity_type, slot_no)
+        names = formula.activity_names(self._cfg)
+        r["name"] = names.get(activity_type, activity_type)
+        if r["replaced"]:
+            r["replaced_name"] = names.get(r["replaced"], r["replaced"])
+        return r
+
     def _validate_tier(self, tier: int) -> None:
         max_tier = int(self._cfg.get("max_open_tier", 1))
         if tier > max_tier:

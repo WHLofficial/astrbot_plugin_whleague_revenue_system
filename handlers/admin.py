@@ -838,8 +838,13 @@ class AdminHandler:
         except ValueError as e:
             yield event.plain_result(f"配置无效: {e}")
             return
+        try:
+            await self._plugin._persist_config(key, value)
+        except Exception as e:
+            # 先持久化后改缓存：落库失败时内存与磁盘保持一致，不产生半生效状态
+            yield event.plain_result(f"配置持久化失败，未生效: {e}")
+            return
         self._plugin.config_cache[key] = value
-        await self._plugin._persist_config(key, value)
         yield event.plain_result(f"✅ 配置 {key} 已更新")
 
     async def view_config(self, event) -> AsyncGenerator[MessageEventResult, None]:

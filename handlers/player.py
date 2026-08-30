@@ -70,6 +70,9 @@ class PlayerHandler:
                 yield event.plain_result(str(e))
                 return
         result = await self._run(event, self._build_view(team))
+        if isinstance(result, dict) and "error" in result:
+            yield event.plain_result(result["error"])
+            return
         yield event.plain_result(result if isinstance(result, str) else str(result))
 
     async def _build_view(self, team: str) -> str:
@@ -205,30 +208,32 @@ class PlayerHandler:
         if activity_type is None:
             yield event.plain_result(f"未知活动类型: {parts[1]}（{_ACTIVITY_HINT}）")
             return
-        slot = int(parts[2]) if len(parts) >= 3 else 1
+        if len(parts) >= 3:
+            try:
+                slot = int(parts[2])
+            except ValueError:
+                max_slots = int(self._plugin.config_cache.get("activity_slots", 2))
+                yield event.plain_result(f"档位需为数字（1~{max_slots}）")
+                return
+        else:
+            slot = 1
         max_slots = int(self._plugin.config_cache.get("activity_slots", 2))
         if not (1 <= slot <= max_slots):
             yield event.plain_result(f"档位需在 1~{max_slots} 之间")
             return
-        state = await self._plugin.dao.get_league_state()
         result = await self._run(
             event,
-            self._book(team, activity_type, slot, state),
+            self._plugin.stadium_service.book_activity(team, activity_type, slot),
         )
         if "error" in result:
             yield event.plain_result(result["error"])
             return
-        yield event.plain_result(f"✅ 已预订本窗口档位{slot}: {result['name']}")
-
-    async def _book(self, team: str, activity_type: str, slot: int, state) -> dict:
-        dao = self._plugin.dao
-        await self._plugin.stadium_service.ensure_stadium(team)
-        season = state["season_number"] if state else 1
-        window_seq = state["window_seq"] if state else 1
-        await dao.add_booking(team, season, window_seq, slot, activity_type, "")
-        from ..services import formula
-
-        return {"name": formula.activity_names(self._plugin.config_cache).get(activity_type, activity_type)}
+        prev = result.get("replaced")
+        if prev and prev != activity_type:
+            yield event.plain_result(
+                f"✅ 已改订本窗口档位{slot}: {result['name']}（原 {result['replaced_name']}）")
+        else:
+            yield event.plain_result(f"✅ 已预订本窗口档位{slot}: {result['name']}")
 
     @staticmethod
     def _resolve_activity(raw: str) -> str | None:
@@ -296,8 +301,11 @@ class PlayerHandler:
         state = await self._plugin.dao.get_league_state()
         season = int(state["season_number"]) if state else 1
         window_seq = None
-        if len(parts) >= 2 and parts[1].isdigit():
-            window_seq = int(parts[1])
+        if len(parts) >= 2:
+            try:
+                window_seq = int(parts[1])
+            except ValueError:
+                window_seq = None  # 非数字参数按无窗口过滤处理（"²" 等 isdigit 陷阱不再崩溃）
         rows = await self._plugin.dao.list_transactions(
             team, season=season, window_seq=window_seq, limit=50
         )

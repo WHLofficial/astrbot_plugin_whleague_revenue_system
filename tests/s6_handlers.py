@@ -562,3 +562,122 @@ async def test_none_returning_handlers_no_crash():
         assert out3 and "已丢弃" in out3[0], out3
     finally:
         await env.teardown()
+
+async def test_booking_handler_flow():
+    """档期预订：服务层事务化收口、档位解析容错、改订透明提示。"""
+    from astrbot_plugin_whleague_revenue_system.handlers.player import PlayerHandler
+
+    env = await TestEnv().setup()
+    try:
+        ph = PlayerHandler(type("P", (), {
+            "dao": env.dao,
+            "config_cache": env.cfg,
+            "fixture_service": env.fixture_service,
+            "stadium_service": env.stadium_service,
+            "brand_service": env.brand_service,
+            "bridge": env.bridge,
+        })())
+        # 正常预订（自动建场）
+        e1 = _FakeEvent("/主场档期 演唱会 1", sender="10001")
+        r1 = [r async for r in ph.book_activity(e1)]
+        assert r1 and "已预订本窗口档位1" in r1[0] and "演唱会" in r1[0], r1
+        rows = await env.dao.get_bookings("利物浦", 1, 1)
+        assert len(rows) == 1 and rows[0]["activity_type"] == "concert", rows
+        # 同档位改订 → 明确提示原活动（不再静默覆盖）
+        e2 = _FakeEvent("/主场档期 电竞 1", sender="10001")
+        r2 = [r async for r in ph.book_activity(e2)]
+        assert "已改订" in r2[0] and "演唱会" in r2[0] and "电竞" in r2[0], r2
+        rows = await env.dao.get_bookings("利物浦", 1, 1)
+        assert len(rows) == 1 and rows[0]["activity_type"] == "esports", rows
+        # 同活动重复提交 → 普通预订提示（不算改订）
+        e3 = _FakeEvent("/主场档期 电竞", sender="10001")
+        r3 = [r async for r in ph.book_activity(e3)]
+        assert "已预订" in r3[0] and "改订" not in r3[0], r3
+        # 档位非数字 → 提示而非崩溃
+        e4 = _FakeEvent("/主场档期 演唱会 abc", sender="10001")
+        r4 = [r async for r in ph.book_activity(e4)]
+        assert r4 and "档位需为数字" in r4[0], r4
+        # 档位越界 → 提示
+        e5 = _FakeEvent("/主场档期 演唱会 99", sender="10001")
+        r5 = [r async for r in ph.book_activity(e5)]
+        assert r5 and "档位需在" in r5[0], r5
+    finally:
+        await env.teardown()
+
+
+async def test_player_parse_and_error_rendering():
+    """玩家命令解析容错：财务窗口号陷阱字符不崩、查他人球场错误渲染为文案。"""
+    from astrbot_plugin_whleague_revenue_system.handlers.player import PlayerHandler
+
+    env = await TestEnv().setup()
+    try:
+        ph = PlayerHandler(type("P", (), {
+            "dao": env.dao,
+            "config_cache": env.cfg,
+            "fixture_service": env.fixture_service,
+            "stadium_service": env.stadium_service,
+            "brand_service": env.brand_service,
+            "bridge": env.bridge,
+        })())
+        # "/主场财务 ²"：isdigit 为真但 int() 拒绝——旧版直接崩，现按无过滤处理
+        e1 = _FakeEvent("/主场财务 ²", sender="10001")
+        r1 = [r async for r in ph.my_finance(e1)]
+        assert r1 and ("暂无流水" in r1[0] or "财务" in r1[0]), r1
+        # 任意队名查看未建球场 → 文案而非 {'error': ...} repr
+        e2 = _FakeEvent("/主场 不存在的队", sender="10001")
+        r2 = [r async for r in ph.my_stadium(e2)]
+        assert r2 and "{'error'" not in r2[0] and "还没有球场" in r2[0], r2
+    finally:
+        await env.teardown()
+
+
+async def test_set_config_persist_first():
+    """/主场设置：持久化失败时缓存不得先改（防内存与磁盘分叉的半生效状态）。"""
+    from astrbot_plugin_whleague_revenue_system.handlers.admin import AdminHandler
+
+    env = await TestEnv().setup()
+    try:
+        async def broken_persist(plugin, key, value):
+            raise IOError("磁盘不可写")
+
+        ah = AdminHandler(type("P", (), {
+            "dao": env.dao,
+            "config_cache": dict(env.cfg),
+            "fixture_service": env.fixture_service,
+            "stadium_service": env.stadium_service,
+            "event_engine": env.event_engine,
+            "brand_service": env.brand_service,
+            "window_service": env.window_service,
+            "bridge": env.bridge,
+            "_persist_config": broken_persist,
+        })())
+        e = _FakeEvent("/主场设置 start_funds 66", sender="admin", is_admin=True)
+        results = [r async for r in ah.set_config(e)]
+        assert results and "持久化失败" in results[0], results
+        assert "start_funds" not in ah._plugin.config_cache or \
+            ah._plugin.config_cache["start_funds"] == env.cfg["start_funds"], \
+            ah._plugin.config_cache.get("start_funds")
+
+        # 成功路径：先落库后改缓存
+        persisted = {}
+        async def ok_persist(plugin, key, value):
+            persisted[key] = value
+
+        ah2 = AdminHandler(type("P", (), {
+            "dao": env.dao,
+            "config_cache": dict(env.cfg),
+            "fixture_service": env.fixture_service,
+            "stadium_service": env.stadium_service,
+            "event_engine": env.event_engine,
+            "brand_service": env.brand_service,
+            "window_service": env.window_service,
+            "bridge": env.bridge,
+            "_persist_config": ok_persist,
+        })())
+        e2 = _FakeEvent("/主场设置 start_funds 77", sender="admin", is_admin=True)
+        results2 = [r async for r in ah2.set_config(e2)]
+        assert results2 and "已更新" in results2[0], results2
+        assert ah2._plugin.config_cache["start_funds"] == 77.0
+        assert persisted.get("start_funds") == 77.0
+    finally:
+        await env.teardown()

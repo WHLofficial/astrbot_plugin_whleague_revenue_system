@@ -536,6 +536,39 @@ class StadiumDAO:
             (team_name, season, window_seq, slot_no, activity_type, booked_by),
         )
 
+    async def book_activity(self, team_name: str, activity_type: str,
+                            slot_no: int, booked_by: str = "") -> dict:
+        """预订本窗口档期：赛程状态读取、占用检查与写入同事务，
+        防止与 /主场推进 并发时订到旧窗口，且覆盖已有预订时返回原活动。"""
+        async def work(conn):
+            cur = await conn.execute(
+                "SELECT season_number, window_seq FROM league_state WHERE id=1"
+            )
+            try:
+                state_row = await cur.fetchone()
+            finally:
+                await cur.close()
+            season = int(state_row["season_number"]) if state_row else 1
+            window_seq = int(state_row["window_seq"]) if state_row else 1
+            cur = await conn.execute(
+                "SELECT activity_type FROM venue_bookings "
+                "WHERE team_name=? AND season_number=? AND window_seq=? AND slot_no=?",
+                (team_name, season, window_seq, slot_no),
+            )
+            try:
+                prev = await cur.fetchone()
+            finally:
+                await cur.close()
+            await conn.execute(
+                "INSERT OR REPLACE INTO venue_bookings (team_name, season_number, window_seq, slot_no, activity_type, booked_by) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (team_name, season, window_seq, slot_no, activity_type, booked_by),
+            )
+            return {"season": season, "window_seq": window_seq,
+                    "replaced": prev["activity_type"] if prev else None}
+
+        return await self._db.execute_transaction(work)
+
     async def get_bookings(self, team_name: str, season: int, window_seq: int) -> list:
         return await self._db.fetchall(
             "SELECT * FROM venue_bookings WHERE team_name=? AND season_number=? AND window_seq=? ORDER BY slot_no",
