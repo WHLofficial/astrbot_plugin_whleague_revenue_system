@@ -34,6 +34,7 @@ class _FakeEvent:
         self.sender = sender
         self.admin = is_admin
         self.messages = messages or []
+        self.results = []
 
     def get_message_str(self):
         return self.message
@@ -56,9 +57,6 @@ class _FakeEvent:
     def plain_result(self, text):
         self.results.append(text)
         return text
-
-
-_FakeEvent.results = []
 
 
 def _make_admin_handler(env):
@@ -672,7 +670,6 @@ async def test_handler_import_fixtures_by_name():
         d = fis.imports_dir(env.db.db_path)
         (d / "赛程_w1.csv").write_text(
             "轮次,主队,客队\n1,利物浦,巴塞罗那\n2,利物浦,纽卡斯尔联\n", encoding="utf-8")
-        _FakeEvent.results = []
         event = _FakeEvent("/主场赛程导入 赛程_w1.csv", sender="10001", is_admin=True, messages=[])
         results = [r async for r in handler.import_fixtures(event)]
         assert results and "已导入" in results[0] and "2 场" in results[0], results
@@ -687,7 +684,6 @@ async def test_handler_import_by_name_missing():
     env = await TestEnv().setup()
     try:
         handler = _make_admin_handler(env)
-        _FakeEvent.results = []
         event = _FakeEvent("/主场赛程导入 缺失.csv", sender="10001", is_admin=True, messages=[])
         results = [r async for r in handler.import_fixtures(event)]
         assert results and "imports 目录里没有" in results[0], results
@@ -703,13 +699,11 @@ async def test_handler_results_and_attributes_by_name():
         await env.fixture_service.set_weather(1, "利物浦", "晴")
         d = fis.imports_dir(env.db.db_path)
         (d / "赛果_1.csv").write_text("主队,赛果\n利物浦,胜\n", encoding="utf-8")
-        _FakeEvent.results = []
         event = _FakeEvent("/主场赛果 1 赛果_1.csv", sender="10001", is_admin=True, messages=[])
         results = [r async for r in handler.record_results(event)]
         assert results and "已录入" in results[0], results
 
         (d / "属性_w1.csv").write_text("队名,影响力,容量,等级\n利物浦,160,12000,0\n", encoding="utf-8-sig")
-        _FakeEvent.results = []
         event2 = _FakeEvent("/主场属性导入 属性_w1.csv", sender="10001", is_admin=True, messages=[])
         results2 = [r async for r in handler.import_attributes_batch(event2)]
         assert results2 and "文件导入属性" in results2[0], results2
@@ -724,7 +718,6 @@ async def test_handler_no_arg_lists_imports_dir():
         d = fis.imports_dir(env.db.db_path)
         (d / "赛程_w1.csv").write_text("轮次,主队,客队\n1,利物浦,巴塞罗那\n", encoding="utf-8")
         for msg in ("/主场赛程导入", "/主场属性导入"):
-            _FakeEvent.results = []
             event = _FakeEvent(msg, sender="10001", is_admin=True, messages=[])
             if "赛程" in msg:
                 results = [r async for r in handler.import_fixtures(event)]
@@ -740,7 +733,6 @@ async def test_handler_text_paste_still_works():
     env = await TestEnv().setup()
     try:
         handler = _make_admin_handler(env)
-        _FakeEvent.results = []
         event = _FakeEvent("/主场赛程导入\n1 利物浦 巴塞罗那", sender="10001", is_admin=True, messages=[])
         results = [r async for r in handler.import_fixtures(event)]
         assert results and "已导入" in results[0], results

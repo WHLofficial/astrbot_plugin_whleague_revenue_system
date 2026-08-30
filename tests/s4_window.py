@@ -149,36 +149,19 @@ async def test_settle_force_idempotent():
         await env.teardown()
 
 
-async def test_brand_terminate_on_fan_drop():
+async def test_brand_terminate_drop_below_threshold():
+    """死忠单窗跌幅未达阈值（默认 0.3）时，即便解约概率命中也不解约
+    （命中分支见 test_brand_terminate_returns_tx_id）。"""
+    from unittest.mock import patch
     env = await TestEnv().setup()
     try:
-        await _seed_window(env, fans_override={"利物浦": 4000})
+        await env.stadium_service.import_attributes("利物浦", influence=100.0)
         await env.brand_service.sign("利物浦", "亚马逊", 1, 1)
-        # 死忠暴跌 50%：跌到 2000（阶梯目标 2600 以下，掉粉方向）
-        await env.dao.update_fans("利物浦", 4000)
-        await env.stadium_service.import_attributes("利物浦", influence=100.0)  # 目标 2600
-        # 强制让掉粉发生
-        import random
-
-        random.seed(1)
-        # naming_terminate_probability 默认 0.3，这里手动触发验证
-        await env.fixture_service.advance_window("tester")
-        await env.fixture_service.import_fixtures("1 利物浦 巴塞罗那\n")
-        await env.fixture_service.forecast_round(1)
-        await env.fixture_service.record_results(1, "利物浦 负\n")
-        before_fans = (await env.dao.get_stadium("利物浦"))["fans_diehards"]
-        after_fans = await env.fans_service.evolve(1, 2)
-        fans_after = before_fans
-        for fd in after_fans:
-            if fd["team"] == "利物浦":
-                fans_after = fd["after"]
-        result = await env.brand_service.maybe_brand_terminate("利物浦", 1, 2, before_fans, fans_after)
-        # 掉幅若 ≥30% 且概率命中则解约
-        drop = (before_fans - fans_after) / before_fans if before_fans else 0
-        if drop >= 0.3:
-            assert result is not None, "触发跌幅阈值应有机会解约"
+        with patch("random.random", return_value=0.0):
+            result = await env.brand_service.maybe_brand_terminate("利物浦", 1, 2, 4000, 3900)
+        assert result is None, result
         naming = await env.dao.get_active_naming("利物浦")
-        assert naming is None or naming["status"] == "active"
+        assert naming is not None, "未达阈值不应解约"
     finally:
         await env.teardown()
 

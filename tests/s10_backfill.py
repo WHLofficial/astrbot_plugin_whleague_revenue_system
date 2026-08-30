@@ -561,10 +561,16 @@ async def test_backfill_force_rerun():
         await env.dao.recompute_balance("利物浦")
         balance_before = (await env.dao.get_balance("利物浦"))["balance"]
 
+        import random
+        random.seed(20260829)
         applied2 = await svc.apply(force=True)
         assert applied2["applied"] is True
+        # 同种子复算期望值：钉住满座重抽确实发生（防 ratio==1.0 的退化通过）
+        random.seed(20260829)
+        expected_att = int(cap * random.uniform(*formula.SELL_OUT_FILL))
 
         m1b = await _row(env, 1, "利物浦")
+        assert m1b["attendance"] == expected_att, (m1b["attendance"], expected_att)
         assert int(cap * lo) <= m1b["attendance"] < cap, m1b["attendance"]
         ratio = m1b["attendance"] / m1["attendance"]
         t1, c1 = float(m1["ticket_revenue"]), float(m1["commercial"])

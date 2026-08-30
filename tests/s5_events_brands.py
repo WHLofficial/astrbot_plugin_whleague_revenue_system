@@ -114,12 +114,9 @@ async def test_trigger_team_forced():
         # 日志带文案（LLM 桩不可用时回退模板）
         logs = await env.dao.get_window_events("利物浦", 1, 1)
         assert logs and logs[0]["text"]
-        # 事件条件（冠名联动）无冠名时不应被抽中——直接指定可强制
-        try:
-            await env.event_engine.trigger_team("利物浦", 1, 1, event_id="brand_crisis")
-            raise AssertionError("指定事件应允许强制触发")
-        except Exception:
-            pass
+        # 事件条件（冠名联动）不满足时不会被随机抽中——直接指定仍可强制触发
+        forced = await env.event_engine.trigger_team("利物浦", 1, 1, event_id="brand_crisis")
+        assert forced["hits"][0]["event"] == "冠名品牌危机", forced["hits"]
     finally:
         await env.teardown()
 
@@ -747,10 +744,11 @@ async def test_brand_pool_and_sign():
         r = await env.brand_service.sign("利物浦", "亚马逊", 1, 1)
         assert r["fee_per_window"] > 0
         # 重复签约拒绝
+        from astrbot_plugin_whleague_revenue_system.services.brand_service import BrandError
         try:
             await env.brand_service.sign("利物浦", "可口可乐", 1, 1)
             raise AssertionError("已有冠名应拒绝")
-        except Exception:
+        except BrandError:
             pass
         # 退冠名赔付
         naming = await env.dao.get_active_naming("利物浦")
@@ -960,10 +958,11 @@ async def test_choice_import_batch_and_validation():
         assert r[2]["ok"] is False and "待定选择事件" in r[2]["error"], r
         # 结算后不可再改
         await env.event_engine.settle_choices(1, 1)
+        from astrbot_plugin_whleague_revenue_system.services.event_engine import EventError
         try:
             await env.event_engine.record_choice("利物浦", 1, 1, "周边爆款", 2)
             raise AssertionError("已结算选择应拒绝修改")
-        except Exception:
+        except EventError:
             pass
     finally:
         await env.teardown()
