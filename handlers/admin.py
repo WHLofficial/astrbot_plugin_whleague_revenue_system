@@ -427,8 +427,8 @@ class AdminHandler:
         if len(parts) < 2 or not parts[1].strip():
             yield event.plain_result(
                 "用法: /主场事件选择 <队名> <事件名> <选项号>\n"
-                "也可多行批量（每行：队名 事件名 选项号，支持 ①②③④）\n"
-                "例：\n利物浦 周边爆款 1\n巴塞罗那 草皮病害 ②"
+                "也可多行批量（每行：队名 事件名 选项号，支持 ①②③④；事件名可含空格）\n"
+                "例：\n利物浦 周边爆款 1\n巴塞罗那 赞助商考察 ②"
             )
             return
         results = await self._run(event, self._plugin.event_engine.import_choices(parts[1]))

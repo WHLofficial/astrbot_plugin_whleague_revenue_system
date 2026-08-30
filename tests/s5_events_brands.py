@@ -1074,3 +1074,89 @@ async def test_add_custom_instant_effects_clamped():
         assert abs((await env.dao.get_balance("利物浦"))["balance"] - (bal0 + 8.0)) < 1e-6
     finally:
         await env.teardown()
+
+
+async def test_hit_prob_config_defensive():
+    """hit_prob 防御：NaN 不再等价于全员命中；非法/负值回退默认；>1 钳为必中。"""
+    from unittest.mock import patch
+
+    env = await TestEnv().setup()
+    try:
+        for team in ("利物浦", "巴塞罗那", "纽卡斯尔联", "勒沃库森"):
+            await env.stadium_service.import_attributes(team, influence=120.0)
+        await env.event_engine.add_custom("必中测试", "通用", 100, '{"money": 1}')
+        # random() 恒 0.99：默认 0.4 与回退 0.4 均不命中，钳到 1.0 则必命中
+        with patch("random.random", return_value=0.99):
+            for bad in (float("nan"), -0.5, "abc"):
+                env.cfg["event_hit_probability"] = bad
+                r = await env.event_engine.trigger_all(1, 1)
+                assert r["hits"] == [], (bad, r["hits"])
+            env.cfg["event_hit_probability"] = 5.0
+            r = await env.event_engine.trigger_all(1, 1)
+            assert len(r["hits"]) == 4, r["hits"]
+    finally:
+        await env.teardown()
+
+
+async def test_choice_empty_outcomes_settle_safe():
+    """遗留空 outcomes 数据不崩结算：已定按无效果结算、未定整条跳过，均不中断整批。"""
+    env = await TestEnv().setup()
+    try:
+        await env.stadium_service.import_attributes("利物浦", influence=150.0)
+        await env.stadium_service.import_attributes("巴塞罗那", influence=150.0)
+        # 直接落库模拟旧版/手改遗留数据（写路径 _clamp_choice_event 已拒绝空 outcomes）
+        await env.dao.upsert_event(
+            "legacy_bad", "烂尾工程", "事故", 10,
+            "{}", "{}", "烂尾工程：{team} 出了状况。",
+            source="custom", status="adopted", event_type="choice",
+            options_json=json.dumps([
+                {"no": 1, "name": "赶工", "outcomes": []},
+                {"no": 2, "name": "停工", "outcomes": []},
+            ], ensure_ascii=False),
+        )
+        await env.event_engine.trigger_team("利物浦", 1, 1, event_id="legacy_bad")
+        await env.event_engine.trigger_team("巴塞罗那", 1, 1, event_id="legacy_bad")
+        await env.event_engine.record_choice("利物浦", 1, 1, "烂尾工程", 1)
+        r = await env.event_engine.settle_choices(1, 1)
+        by_team = {x["team"]: x for x in r["resolved"]}
+        # 已定：选项存在但无结果 → 无效果结算 + 说明备注，不中断
+        assert by_team["利物浦"].get("skipped") is not True, by_team["利物浦"]
+        assert "选项无结果配置，按无效果结算" in by_team["利物浦"]["notes"], by_team["利物浦"]
+        # 未定：全部选项无结果 → 整条跳过
+        assert by_team["巴塞罗那"].get("skipped") is True, by_team["巴塞罗那"]
+        # 均不产生资金流水
+        for team in ("利物浦", "巴塞罗那"):
+            txs = [t for t in await env.dao.list_transactions(team, season=1, window_seq=1)
+                   if t["kind"] == "event"]
+            assert txs == [], (team, txs)
+    finally:
+        await env.teardown()
+
+
+async def test_import_choices_spaced_event_name():
+    """批量导入：事件名可含空格——末位 token 为选项号，中间归事件名。"""
+    env = await TestEnv().setup()
+    try:
+        await env.stadium_service.import_attributes("利物浦", influence=150.0)
+        await env.event_engine.add_custom(
+            "赞助商 考察", "运营", 5, "{}", event_type="choice",
+            options_text=json.dumps([
+                {"name": "高调接待", "outcomes": [
+                    {"w": 60, "effects": {"money": 3}},
+                    {"w": 40, "effects": {"money": -2}}]},
+                {"name": "低调安排", "outcomes": [
+                    {"w": 70, "effects": {"fans_pct": 0.02}},
+                    {"w": 30, "effects": {"maintenance": 1}}]},
+            ]),
+        )
+        ev = next(r for r in await env.dao.list_events("adopted")
+                  if r["name"] == "赞助商 考察")
+        await env.event_engine.trigger_team("利物浦", 1, 1, event_id=ev["event_id"])
+        r = await env.event_engine.import_choices("利物浦 赞助商 考察 ①")
+        assert r[0]["ok"] is True and r[0]["event"] == "赞助商 考察", r
+        assert r[0]["choice_no"] == 1, r
+        # 旧式无空格名不受影响，越界仍逐行报错
+        r2 = await env.event_engine.import_choices("利物浦 赞助商 考察 999")
+        assert r2[0]["ok"] is False and "选项号需在" in r2[0]["error"], r2
+    finally:
+        await env.teardown()

@@ -6,6 +6,7 @@
 """
 
 import json
+import math
 import random
 from datetime import datetime, timedelta
 
@@ -255,7 +256,13 @@ class EventEngine:
         if not stadiums:
             raise EventError("没有已建球场的球队")
         events_pool = await self._dao.list_events("adopted")
-        hit_prob = float(self._cfg.get("event_hit_probability", 0.4))
+        try:
+            hit_prob = float(self._cfg.get("event_hit_probability", 0.4))
+        except (TypeError, ValueError):
+            hit_prob = 0.4
+        if not math.isfinite(hit_prob) or hit_prob < 0.0:
+            hit_prob = 0.4
+        hit_prob = min(1.0, hit_prob)
         max_occ = int(self._cfg.get("event_max_occurrences", 2))
         picked: dict[str, int] = {}
         hits = []
@@ -460,14 +467,19 @@ class EventEngine:
     def _num(n) -> str:
         return {1: "①", 2: "②", 3: "③", 4: "④"}.get(int(n), f"{n}.")
 
-    def _roll_option(self, opt: dict) -> dict:
-        """按选项结果的权重掷骰选一条 outcome。"""
+    def _roll_option(self, opt: dict) -> dict | None:
+        """按选项结果的权重掷骰选一条 outcome；选项无结果时返回 None。"""
         outcomes = opt.get("outcomes") or []
+        if not outcomes:
+            return None
         weights = [max(1, int(o.get("w", 1))) for o in outcomes]
         return random.choices(outcomes, weights=weights, k=1)[0]
 
-    def _worst_option(self, options: list) -> tuple[dict, dict]:
-        """全部选项所有结果里净额最小（money−maintenance）的一条，确定性平局取低序号。"""
+    def _worst_option(self, options: list) -> tuple[dict | None, dict | None]:
+        """全部选项所有结果里净额最小（money−maintenance）的一条，确定性平局取低序号。
+
+        无结果的选项不参与；所有选项均无结果时返回 (None, None)。
+        """
         best = None
         for i, opt in enumerate(options):
             for j, out in enumerate(opt.get("outcomes") or []):
@@ -476,6 +488,8 @@ class EventEngine:
                 key = (net, opt.get("no", i + 1), j)
                 if best is None or key < best[0]:
                     best = (key, opt, out)
+        if best is None:
+            return None, None
         return best[1], best[2]
 
     async def _decorate(self, hits: list[dict]) -> None:
@@ -569,12 +583,22 @@ class EventEngine:
             auto = opt is None  # 选项号无效同样按最差兜底
         if auto:
             opt, outcome = self._worst_option(options)
+            if opt is None:
+                # 全部选项均无结果：与无选项同样跳过，不中断整批结算
+                name = event["name"] if event else c["event_id"]
+                await self._dao.mark_choice_resolved(c["id"], '{"skipped": true}')
+                await self._dao.update_event_log_text(
+                    c["team_name"], c["event_id"], f"「{name}」选项均无结果，跳过")
+                return {"team": c["team_name"], "event": name,
+                        "auto": True, "skipped": True, "notes": []}
         else:
             outcome = self._roll_option(opt)
-        effects = outcome.get("effects") or {}
+        effects = (outcome or {}).get("effects") or {}
         notes = await self._apply_effects(c["team_name"], season, window_seq,
                                           effects, f"{event['name']}·{opt['name']}",
                                           tx_ids, apply_state=apply_state)
+        if outcome is None:
+            notes.append("选项无结果配置，按无效果结算")
         if auto:
             how = "自动最差（选项号无效）" if c["choice_no"] is not None else "自动最差（未收到选择）"
         else:
@@ -635,7 +659,8 @@ class EventEngine:
             fields = raw.strip().split()
             if len(fields) < 3:
                 continue
-            team, ev_name, opt_raw = fields[0], fields[1], fields[2]
+            # 末位 token 为选项号，中间归事件名——事件名可含空格
+            team, ev_name, opt_raw = fields[0], " ".join(fields[1:-1]), fields[-1]
             try:
                 choice_no = parse_choice_no(opt_raw)
             except ValueError:
