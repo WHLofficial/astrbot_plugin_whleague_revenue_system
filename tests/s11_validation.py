@@ -53,3 +53,11 @@ async def test_build_attribute_rows_rejects_nonfinite_cells():
     records, errors = build_attribute_rows(rows)
     assert len(errors) == 2, errors
     assert records == [("队C", 95.0, 12000, 1)], records
+
+
+async def test_sanitize_text_max_length_param():
+    from astrbot_plugin_whleague_revenue_system.utils.security import sanitize_text
+    assert sanitize_text("a\x00b\nc") == "abc"
+    assert sanitize_text("x" * 100, 10) == "x" * 10
+    assert sanitize_text("") == ""
+    assert sanitize_text("  ok  ") == "ok"

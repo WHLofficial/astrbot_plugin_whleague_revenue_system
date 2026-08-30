@@ -987,5 +987,8 @@ class AdminHandler:
         except ValueError as e:
             yield event.plain_result(str(e))
             return
+        if await self._plugin.dao.is_admin(qq) and await self._plugin.dao.count_admins() <= 1:
+            yield event.plain_result("⚠️ 至少需要保留一名管理员")
+            return
         await self._plugin.dao.remove_admin(qq)
         yield event.plain_result(f"✅ 已删除管理 {qq}")

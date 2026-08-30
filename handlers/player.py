@@ -62,6 +62,9 @@ class PlayerHandler:
     async def my_stadium(self, event) -> AsyncGenerator[MessageEventResult, None]:
         parts = event.get_message_str().split(maxsplit=1)
         if len(parts) >= 2:
+            if not event.is_admin():
+                yield event.plain_result("指定队名查看仅限管理员，发送 /主场 查看自己的球队")
+                return
             team = parts[1].strip()
         else:
             try:

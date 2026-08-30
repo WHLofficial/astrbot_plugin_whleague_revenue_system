@@ -203,12 +203,12 @@ class StadiumService:
 
     async def _record_build_cost(self, team_name: str, season: int, window_seq: int,
                                  cost: float, note: str) -> None:
-        """记录建设支出：建设券抵扣 + 支出入账 + 25% 返还建设券（可配）。"""
+        """记录建设支出：消耗建设券（只扣不抵）+ 支出全额入账 + 25% 返还建设券（可配）。"""
         if cost <= 0:
             return
         await self._dao.ensure_balance(team_name, float(self._cfg.get("start_funds", 50.0)))
         used = await self._dao.deduct_build_credit(team_name, cost)
-        paid_note = note if not used else f"{note}（建设券抵扣 {used:.1f}M）"
+        paid_note = note if not used else f"{note}（消耗建设券 {used:.1f}M）"
         entries = [("expand" if "扩建" in note else "upgrade", -cost, paid_note, None)]
         credit_amount = 0.0
         if self._cfg.get("build_credit_enabled", True):

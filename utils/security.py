@@ -5,11 +5,11 @@ _MAX_TEXT_LENGTH = 50
 _CTRL_RE = re.compile(r"[\x00-\x1f\x7f]")
 
 
-def sanitize_text(text: str) -> str:
+def sanitize_text(text: str, max_length: int = _MAX_TEXT_LENGTH) -> str:
     """剥离控制字符并截断，防止构造多行伪造消息。"""
     if not text:
         return ""
-    return _CTRL_RE.sub("", str(text)).strip()[:_MAX_TEXT_LENGTH]
+    return _CTRL_RE.sub("", str(text)).strip()[:max_length]
 
 
 def parse_int(raw: str, min_val: int | None = None, max_val: int | None = None) -> int:

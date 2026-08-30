@@ -15,7 +15,6 @@ from .config.defaults import (
 from .db.connection import DatabaseManager
 from .db.dao import StadiumDAO
 from .db.schema import init_schema
-from .utils.rate_limiter import RateLimiter
 
 
 @register(
@@ -52,7 +51,6 @@ class StadiumPlugin(Star):
         await init_schema(self.db)
 
         self.config_cache = await self._load_config_cache()
-        self.rate_limiter = RateLimiter()
 
         from .services.backfill_service import BackfillService
         from .services.backup_service import BackupService

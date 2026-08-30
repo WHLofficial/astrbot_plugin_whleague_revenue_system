@@ -40,6 +40,10 @@ class StadiumDAO:
     async def remove_admin(self, qq: str) -> None:
         await self._db.execute("DELETE FROM admins WHERE qq=?", (str(qq),))
 
+    async def count_admins(self) -> int:
+        row = await self._db.fetchone("SELECT COUNT(*) AS n FROM admins")
+        return int(row["n"]) if row else 0
+
     # ─── 赛季状态 ─────────────────────────────────────────
 
     async def get_league_state(self):

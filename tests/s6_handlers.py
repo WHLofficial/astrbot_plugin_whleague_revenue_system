@@ -478,7 +478,7 @@ async def test_v2_consolidation_admin():
 
 
 async def test_v2_player_home_arg_and_help():
-    """v2.0：/主场 带参查任意队；/主场帮助 分级；轮次统计玩家可用。"""
+    """v2.0：/主场 带参查队（v2.9.10 起仅管理员）；/主场帮助 分级；轮次统计玩家可用。"""
     env = await TestEnv().setup()
     try:
         await env.fixture_service.import_fixtures("1 利物浦 巴塞罗那")
@@ -495,10 +495,13 @@ async def test_v2_player_home_arg_and_help():
             "bridge": env.bridge,
         })())
 
-        # /主场 <队名> 直接查任意队（无需绑定）；卡片与轮次统计头展示赛季名
+        # /主场 <队名> 管理员可查任意队；卡片与轮次统计头展示赛季名
         await env.dao.set_season_name(1, "测试赛季", "tester")
-        out = [r async for r in ph.my_stadium(_FakeEvent("/主场 利物浦", sender="99999"))]
+        out = [r async for r in ph.my_stadium(_FakeEvent("/主场 利物浦", sender="admin", is_admin=True))]
         assert out and "利物浦" in out[0] and "测试赛季" in out[0], out
+        # 非管理员带队名 → 拒绝
+        out = [r async for r in ph.my_stadium(_FakeEvent("/主场 利物浦", sender="99999"))]
+        assert out and "仅限管理员" in out[0], out
 
         # /主场帮助：玩家只见玩家段，管理员追加管理段
         out = [r async for r in ph.help(_FakeEvent("/主场帮助", sender="10001"))]
@@ -606,7 +609,7 @@ async def test_booking_handler_flow():
 
 
 async def test_player_parse_and_error_rendering():
-    """玩家命令解析容错：财务窗口号陷阱字符不崩、查他人球场错误渲染为文案。"""
+    """玩家命令解析容错：财务窗口号陷阱字符不崩、带队名查球场仅限管理员。"""
     from astrbot_plugin_whleague_revenue_system.handlers.player import PlayerHandler
 
     env = await TestEnv().setup()
@@ -623,10 +626,10 @@ async def test_player_parse_and_error_rendering():
         e1 = _FakeEvent("/主场财务 ²", sender="10001")
         r1 = [r async for r in ph.my_finance(e1)]
         assert r1 and ("暂无流水" in r1[0] or "财务" in r1[0]), r1
-        # 任意队名查看未建球场 → 文案而非 {'error': ...} repr
+        # 带队名查看仅限管理员（v2.9.10 收口；错误 dict 渲染为文案见 test_my_stadium_team_arg_admin_only）
         e2 = _FakeEvent("/主场 不存在的队", sender="10001")
         r2 = [r async for r in ph.my_stadium(e2)]
-        assert r2 and "{'error'" not in r2[0] and "还没有球场" in r2[0], r2
+        assert r2 and "仅限管理员" in r2[0], r2
     finally:
         await env.teardown()
 
@@ -679,5 +682,61 @@ async def test_set_config_persist_first():
         assert results2 and "已更新" in results2[0], results2
         assert ah2._plugin.config_cache["start_funds"] == 77.0
         assert persisted.get("start_funds") == 77.0
+    finally:
+        await env.teardown()
+
+
+async def test_my_stadium_team_arg_admin_only():
+    """/主场 <队名> 指定队名查看仅管理员可用（任意队名看余额收口）。"""
+    env = await TestEnv().setup()
+    try:
+        from astrbot_plugin_whleague_revenue_system.handlers.player import PlayerHandler
+
+        ph = PlayerHandler(type("P", (), {
+            "dao": env.dao,
+            "config_cache": env.cfg,
+            "fixture_service": env.fixture_service,
+            "stadium_service": env.stadium_service,
+            "brand_service": env.brand_service,
+            "bridge": env.bridge,
+        })())
+        out = [r async for r in ph.my_stadium(_FakeEvent("/主场 巴塞罗那", sender="10001"))]
+        assert "仅限管理员" in out[0], out
+        await env.stadium_service.import_attributes("利物浦")
+        out2 = [r async for r in ph.my_stadium(_FakeEvent("/主场", sender="10001"))]
+        assert "利物浦" in out2[0], out2
+        out3 = [r async for r in ph.my_stadium(_FakeEvent("/主场 巴塞罗那", sender="admin", is_admin=True))]
+        assert "还没有球场" in out3[0], out3
+    finally:
+        await env.teardown()
+
+
+async def test_remove_admin_last_admin_guard():
+    """最后一个管理员不可删除。"""
+    env = await TestEnv().setup()
+    try:
+        from astrbot_plugin_whleague_revenue_system.handlers.admin import AdminHandler
+
+        handler = AdminHandler(type("P", (), {
+            "dao": env.dao,
+            "config_cache": env.cfg,
+            "fixture_service": env.fixture_service,
+            "stadium_service": env.stadium_service,
+            "event_engine": env.event_engine,
+            "brand_service": env.brand_service,
+            "window_service": env.window_service,
+            "bridge": env.bridge,
+            "_persist_config": lambda k, v: None,
+        })())
+        await env.dao.add_admin("20002", "seed")
+        out = [r async for r in handler.remove_admin(
+            _FakeEvent("/主场删除管理 20002", sender="admin", is_admin=True))]
+        assert "保留一名管理员" in out[0], out
+        assert await env.dao.is_admin("20002")
+        await env.dao.add_admin("30003", "20002")
+        out2 = [r async for r in handler.remove_admin(
+            _FakeEvent("/主场删除管理 30003", sender="admin", is_admin=True))]
+        assert "已删除" in out2[0], out2
+        assert not await env.dao.is_admin("30003")
     finally:
         await env.teardown()

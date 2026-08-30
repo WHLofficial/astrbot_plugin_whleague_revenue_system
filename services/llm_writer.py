@@ -10,6 +10,8 @@ import re
 
 from astrbot.api import logger
 
+from ..utils.security import sanitize_text
+
 _JSON_BLOCK_RE = re.compile(r"```(?:json)?\s*(.*?)```", re.S)
 
 
@@ -282,7 +284,7 @@ def _clamp_effects(effects, money_clamp: float, fans_clamp: float, maintenance_c
 
 def _clamp_choice_event(d, money_clamp: float, fans_clamp: float, maintenance_clamp: float) -> dict:
     """校验并钳制选择型事件：2~4 个选项、每选项≥2条概率结果、概率归一、正负路径保障。"""
-    name = str(d.get("name", "")).strip()
+    name = sanitize_text(str(d.get("name", "")))
     if not name:
         raise ValueError("事件缺少名称")
     raw_options = d.get("options")
@@ -290,7 +292,7 @@ def _clamp_choice_event(d, money_clamp: float, fans_clamp: float, maintenance_cl
         raise ValueError(f"选择事件「{name}」需要 2~4 个选项")
     options = []
     for i, opt in enumerate(raw_options, start=1):
-        opt_name = str(opt.get("name", "")).strip()
+        opt_name = sanitize_text(str(opt.get("name", "")))
         if not opt_name:
             raise ValueError(f"事件「{name}」选项缺名称")
         outs = opt.get("outcomes")
@@ -314,16 +316,16 @@ def _clamp_choice_event(d, money_clamp: float, fans_clamp: float, maintenance_cl
         elif max(nets) < 0:
             outcomes[-1]["effects"]["money"] = round(min(1.0, max(0.5, money_clamp * 0.1)), 3)
         options.append({"no": i, "name": opt_name,
-                        "desc": str(opt.get("desc", "")).strip()[:40], "outcomes": outcomes})
+                        "desc": sanitize_text(str(opt.get("desc", "")), 40), "outcomes": outcomes})
     return {"name": name, "event_type": "choice",
             "options": options,
-            "category": str(d.get("category", "自定义")).strip()[:10] or "自定义",
+            "category": sanitize_text(str(d.get("category", "自定义")), 10) or "自定义",
             "weight": max(1, min(100, int(d.get("weight", 10)))),
-            "template": (str(d.get("template", "")).strip() or f"{name}：{{team}} 的球场发生了趣事。")[:200]}
+            "template": sanitize_text(str(d.get("template", "")), 200) or f"{name}：{{team}} 的球场发生了趣事。"}
 
 
 def _clamp_event(d, money_clamp: float, fans_clamp: float, maintenance_clamp: float) -> dict:
-    name = str(d.get("name", "")).strip()
+    name = sanitize_text(str(d.get("name", "")))
     if not name:
         raise ValueError("事件缺少名称")
     event_type = str(d.get("event_type", "instant")).strip().lower()
@@ -332,16 +334,16 @@ def _clamp_event(d, money_clamp: float, fans_clamp: float, maintenance_clamp: fl
     effects = _clamp_effects(d.get("effects") or {}, money_clamp, fans_clamp, maintenance_clamp)
     return {
         "name": name,
-        "category": str(d.get("category", "自定义")).strip()[:10] or "自定义",
+        "category": sanitize_text(str(d.get("category", "自定义")), 10) or "自定义",
         "weight": max(1, min(100, int(d.get("weight", 10)))),
         "event_type": "instant",
         "effects": effects,
-        "template": (str(d.get("template", "")).strip() or f"{name}：{{team}} 的球场发生了趣事。")[:200],
+        "template": sanitize_text(str(d.get("template", "")), 200) or f"{name}：{{team}} 的球场发生了趣事。",
     }
 
 
 def _clamp_brand(d) -> dict:
-    brand = str(d.get("brand", "")).strip()
+    brand = sanitize_text(str(d.get("brand", "")))
     if not brand or len(brand) > 20:
         raise ValueError("品牌名需为 1-20 字")
     heat = max(0.5, min(1.5, float(d.get("heat", 1.0))))

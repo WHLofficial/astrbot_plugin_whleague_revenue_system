@@ -44,12 +44,12 @@ async def test_import_attributes_and_costs():
         upgrades = [t for t in txs if t["kind"] == "upgrade"]
         assert abs(upgrades[0]["amount"] + 6.0) < 1e-6
 
-        # 建设券抵扣：升级到 3 级费用 10M，支出备注应体现建设券抵扣
+        # 建设券只扣不抵：升级到 3 级费用 10M，支出全额入账，备注体现消耗建设券
         await env.stadium_service.import_attributes("利物浦", tier=3)
         txs = await env.dao.list_transactions("利物浦", season=1, window_seq=1)
         upgrades = [t for t in txs if t["kind"] == "upgrade"]
-        assert "建设券抵扣" in upgrades[0]["note"], upgrades[0]["note"]
-        # 抵扣用掉的券由本次支出的 25% 返还补上（2.5M）
+        assert "消耗建设券" in upgrades[0]["note"] and "抵扣" not in upgrades[0]["note"], upgrades[0]["note"]
+        # 消耗掉的券由本次支出的 25% 返还补上（2.5M）
         balance = await env.dao.get_balance("利物浦")
         assert abs(balance["build_credit"] - 2.5) < 1e-6, balance["build_credit"]
     finally:

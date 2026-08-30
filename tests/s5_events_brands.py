@@ -1178,3 +1178,25 @@ async def test_import_choices_spaced_event_name():
         assert r2[0]["ok"] is False and "选项号需在" in r2[0]["error"], r2
     finally:
         await env.teardown()
+
+
+async def test_llm_design_sanitizes_text_fields():
+    """LLM 文本字段经 sanitize_text 清洗：控制字符剥离、超长截断（事件+品牌）。"""
+    env = await TestEnv().setup()
+    try:
+        env.provider.set_response(
+            '[{"name":"爆\\n炸事件","category":"天\\u0000气衍生","weight":30,'
+            '"effects":{"money":1},"template":"' + "长" * 250 + '"}]'
+        )
+        drafts = await env.event_engine.generate_drafts(1)
+        assert len(drafts) == 1, drafts
+        assert drafts[0]["name"] == "爆炸事件", drafts[0]["name"]
+        # category/template 不在 generate_drafts 返回值里，查 pending 行
+        row = (await env.dao.list_events("pending"))[0]
+        assert "\n" not in row["name"] and "\x00" not in row["category"], row
+        assert len(row["template"]) <= 200, len(row["template"])
+        env.provider.set_response('[{"brand":"冠\\n名品牌","heat":5}]')
+        bd = await env.brand_service.generate_drafts(1)
+        assert len(bd) == 1 and bd[0]["brand"] == "冠名品牌", bd
+    finally:
+        await env.teardown()
