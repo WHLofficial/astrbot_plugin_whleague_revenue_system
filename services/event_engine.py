@@ -485,10 +485,10 @@ class EventEngine:
                 "type": "choice", "broadcast": broadcast, "options": options}
 
     async def _build_broadcast(self, event, team_name: str, stadium_name: str, options: list) -> str:
-        """生成面向球员的广播：LLM 叙述段 + 确定性选项列表（不显示概率）。
+        """生成面向球员的广播：LLM 叙述段 + 确定性选项与概率表。
 
-        叙述只讲氛围（失败回退模板），选项由数据生成保证编号/说明准确，
-        玩家按「队名 事件名 选项号」回复。
+        叙述只讲氛围（失败回退模板），选项与概率由数据生成保证准确
+        （w 归一化后即百分数），玩家按「队名 事件名 选项号」回复。
         """
         if self._llm is None:
             narrative = _fill_template(event["template"] or event["name"], team_name, stadium_name)
@@ -500,14 +500,40 @@ class EventEngine:
             "请在窗口结算前任选一项操作（回复：队名 事件名 选项号）：",
         ]
         for opt in options:
+            odds = " / ".join(f"{float(o.get('w', 1)):g}% {self._outcome_desc(o.get('effects') or {})}"
+                              for o in opt.get("outcomes", []))
             desc = opt.get("desc") or ""
             lines.append(f"{self._num(opt['no'])} {opt['name']}"
-                         + (f"（{desc}）" if desc else ""))
+                         + (f"（{desc}）" if desc else "") + (f"：{odds}" if odds else ""))
         return "\n".join(lines)
 
     @staticmethod
     def _num(n) -> str:
         return {1: "①", 2: "②", 3: "③", 4: "④"}.get(int(n), f"{n}.")
+
+    @staticmethod
+    def _outcome_desc(effects: dict) -> str:
+        """结果效果的人类可读描述，与结算备注口径一致（用于选项概率表）。"""
+        parts = []
+        money = float(effects.get("money", 0.0))
+        maintenance = float(effects.get("maintenance", 0.0))
+        fans = float(effects.get("fans_pct", 0.0))
+        mod = float(effects.get("attendance_mod", 1.0))
+        if money:
+            parts.append(f"资金{money:+.1f}M")
+        if maintenance:
+            parts.append(f"维护−{maintenance:.1f}M")
+        if fans:
+            parts.append(f"死忠{fans * 100:+.1f}%")
+        if mod != 1.0:
+            parts.append(f"上座×{mod:.2f}")
+        satisfaction = float(effects.get("satisfaction", 0.0))
+        brand_heat = float(effects.get("brand_heat", 0.0))
+        if satisfaction:
+            parts.append(f"品牌满意度{satisfaction:+.2f}")
+        if brand_heat:
+            parts.append(f"品牌热度{brand_heat:+.2f}")
+        return "、".join(parts) if parts else "无变化"
 
     def _roll_option(self, opt: dict) -> dict | None:
         """按选项结果的权重掷骰选一条 outcome；选项无结果时返回 None。"""

@@ -132,12 +132,14 @@ async def test_choice_trigger_pending_and_broadcast():
         # 选择型不立即记账（无事件流水）
         txs = await env.dao.list_transactions("利物浦", season=1, window_seq=1)
         assert not [t for t in txs if t["kind"] == "event"], txs
-        # 广播 = LLM 叙述 + 选项列表（不含概率）
+        # 广播 = LLM 叙述 + 选项列表（含概率与效果金额）
         text = hit["broadcast"]
         assert "周边爆款" in text and "利物浦" in text
         assert "围巾印到一半" in text  # LLM 叙述被采用
         assert "①" in text and "②" in text
-        assert "60%" not in text and "资金" not in text  # 概率/金额不出现在广播
+        assert "60%" in text and "40%" in text and "50%" in text  # 概率表恢复显示
+        assert "资金+5.0M" in text and "维护−3.0M" in text  # 效果金额照实列出
+        assert "死忠+2.0%" in text and "死忠-2.0%" in text  # 负号走 ASCII（:+.1f 格式化）
         # 待定选择记录（未定）
         c = await env.dao.get_event_choice("利物浦", 1, 1, "merch_hit")
         assert c is not None and c["choice_no"] is None and c["resolved"] == 0
