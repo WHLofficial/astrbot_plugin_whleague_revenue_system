@@ -90,4 +90,6 @@
 条件不满足不剔除，改按 `weight × event_soft_condition_factor`（默认 0.25）衰减参与抽取。
 新增接线：配置键注册 `_conf_schema.json` + `config/defaults.py` 范围；LLM 白名单
 `llm_writer._clamp_conditions`（design_events 与即发/选择两钳制共用）；`generate_drafts`
-持久化 conditions/soft_conditions；`admin.add_custom` 手写事件可带 conditions 与软开关。
+持久化 conditions/soft_conditions；`event_engine.add_custom` 手写通道经
+`conditions_text`/`soft_conditions` 参数可带条件与软开关（经 `_clamp_conditions`
+白名单钳制；管理命令文本接口暂未暴露参数位，编程调用/测试可用）。

@@ -1687,6 +1687,42 @@ async def test_choice_event_conditions_persist():
         assert pending[0]["soft_conditions"] == 1
     finally:
         await env.teardown()
+
+
+async def test_add_custom_conditions():
+    """code review 修复：手写通道 conditions_text/soft_conditions 钳制并持久化。"""
+    env = await TestEnv().setup()
+    try:
+        await env.event_engine.add_custom(
+            "豪门前夜", "条件", 20, '{"money": 2}',
+            conditions_text='{"min_tier": 2.7, "max_tier": -1, "hacker": 1,'
+                            '"facility_min": {"pitch": 2, "youth": 9}}',
+            soft_conditions=True)
+        row = next(r for r in await env.dao.list_events("adopted")
+                   if r["name"] == "豪门前夜")
+        assert json.loads(row["conditions_json"]) == {
+            "min_tier": 2, "facility_min": {"pitch": 2}}, row["conditions_json"]
+        assert row["soft_conditions"] == 1
+        # 选择事件同样携带
+        opts = ('[{"name":"a","desc":"x","outcomes":[{"w":3,"effects":{"money":1}},'
+                '{"w":1,"effects":{"money":-1}}]},{"name":"b","desc":"y","outcomes":'
+                '[{"w":3,"effects":{"money":-1}},{"w":1,"effects":{"money":2}}]}]')
+        await env.event_engine.add_custom(
+            "条件选择", "条件", 10, "{}", event_type="choice", options_text=opts,
+            conditions_text='{"weather_is": "雨"}')
+        row2 = next(r for r in await env.dao.list_events("adopted")
+                    if r["name"] == "条件选择")
+        assert json.loads(row2["conditions_json"]) == {"weather_is": "雨"}
+        assert row2["soft_conditions"] == 0
+        # 非法 conditions 文本拒绝
+        try:
+            await env.event_engine.add_custom(
+                "坏条件", "条件", 5, '{"money": 1}', conditions_text="not json")
+            assert False, "应当拒绝"
+        except Exception as e:
+            assert "conditions 需为 JSON" in str(e), e
+    finally:
+        await env.teardown()
 async def test_offer_spawn_apply_cancel():
     """v2.11.4 offer_spawn：未签约品牌按热度上门递价（稳健套餐）、取消撤销 pending 报价。"""
     from astrbot_plugin_whleague_revenue_system.services import formula

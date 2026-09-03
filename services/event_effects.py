@@ -351,7 +351,12 @@ async def _apply_offer_spawn(ctx: ApplyContext, value) -> None:
         int(rounds[-1]["id"]), int(brand["id"]), ctx.team, int(package["pkg_no"]),
         float(package["amount"]), int(package["windows"]),
         json.dumps(_snapshot(package), ensure_ascii=False), _offer_expire_at(ctx.cfg))
-    ctx.enrich("offer_spawn", {"offer_id": int(offer_id or 0)})
+    if not offer_id:
+        # INSERT OR IGNORE 撞 (round, brand, team) 唯一键：该队本轮已有该品牌的
+        # 待处理报价，本次上门不重复建价（撤销也无状态可回退，不 enrich）
+        ctx.notes.append(f"品牌「{brand['brand']}」已有待处理的上门报价，本次落空")
+        return
+    ctx.enrich("offer_spawn", {"offer_id": int(offer_id)})
     ctx.notes.append(f"品牌「{brand['brand']}」上门递价：{float(package['amount']):g}M/窗 × "
                      f"{package['windows']} 窗（{package['pkg_name']}，/主场签约 可签）")
 

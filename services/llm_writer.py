@@ -207,7 +207,7 @@ class LlmWriter:
             "结构类效果（可选，直接改动球队设施/档期/天气/招商）："
             f"facility 设施升降级（dict {{\"key\":设施键,\"delta\":±1}}，设施键："
             + "、".join(f"{k}={fac_names.get(k, k)}" for k in fac_names) + "）；"
-            f"booking_cancel 档期取消（1~{cancel_c:g}，取消该队本窗已订活动中档位最高的那条）；"
+            f"booking_cancel 档期取消（1~{cancel_c:g}，从高到低取消该队本窗已订活动）；"
             "booking_gift 档期赠送（活动类型串，赠一档填本窗最低空档位，活动类型："
             + "、".join(str(k) for k in act_names) + "）；"
             "weather_set 天气设定（该队下一场未赛主场天气，取值："

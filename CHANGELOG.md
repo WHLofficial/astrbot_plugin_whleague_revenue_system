@@ -3,6 +3,24 @@
 本文件记录本项目的显著变更，格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [2.11.6] - 2026-09-03
+
+### Fixed
+
+- **code review 批次**（v2.11.0–v2.11.5 全量审查）：`event_engine.add_custom` 手写通道补 `conditions_text`/`soft_conditions` 参数（即发与选择两分支均持久化，经 `_clamp_conditions` 白名单钳制，非法 JSON 拒绝）——修复 EVENT_KEYS.md 声称与实现不符；`offer_spawn` 撞 `(round, brand, team)` 唯一键（INSERT OR IGNORE 返回 0）时改为「已有待处理报价，本次落空」备注且不落撤销状态，不再谎报递价成功；LLM prompt booking_cancel 措辞与多条取消语义对齐。测试 254→255。
+
+## [2.11.5] - 2026-09-03
+
+### Added
+
+- **反向条件键 + 软条件动态权重**（事件×功能交互⑥，schema v12）：条件键扩展 `min_fans`/`max_fans`（死忠球迷数）、`min_balance`/`max_balance`（资金余额，无行按 0）、`facility_min`（结构化 `{"key": 等级}` 逐项判定，非法等级值忽略）、`weather_is`（下一场未赛主场天气，无场次不满足）、`last_result`（最近一场已完赛主场赛果 win/draw/loss，归一映射）。`event_pool` 新列 `soft_conditions`（默认 0 硬门控）：置 1 时条件不满足按 `weight × event_soft_condition_factor`（默认 0.25）衰减参与抽取而非剔除；`trigger_team` 指定事件不做条件判定。LLM 通道 `_clamp_conditions` 白名单（数值取整≥0、枚举域外剔除、facility_min 逐项 1~档上限）+ prompt 条件语义段；`generate_drafts` 持久化 conditions/soft_conditions。config 键 `event_soft_condition_factor`。顺手修 v2.11.0 潜在回归：`_clamp_choice_event` 选项全正/全负路径 `money_clamp` NameError。EVENT_KEYS.md 条件键登记小节。测试 249→254。
+
+## [2.11.4] - 2026-09-03
+
+### Added
+
+- **结构类效果键**（事件×功能交互⑤）：effects 新增 5 键——`facility`（设施升降级 ±1，dict 键+delta，实际 delta 回写支持落空反演）、`booking_cancel`（取消本窗已订档期，从高档位起 N 条，默认钳 2）、`booking_gift`（赠一档活动档期，最低空档位，booked_by=事件）、`weather_set`（改下一场未赛主场天气，后动覆盖原则与预报掷骰一致）、`offer_spawn`（未签约品牌按热度上门递价，复用稳健套餐与行业系数，挂最新开放招商轮，TTL 同市场报价）。核心机制 `ApplyContext.raw`+`enrich`：apply 期发现状态（取消明细/原天气/报价号/实际 delta）原位写回 effects 源 dict，随 effect_json 落盘，取消按发现状态精确反演；redo 不增补。dao 新增 `get_match`/`delete_market_offer`/`delete_booking`；config 键 `event_booking_cancel_clamp`；`/主场事件写` 帮助文本列全 14 键。测试 243→249。
+
 ## [2.11.3] - 2026-09-03
 
 ### Added

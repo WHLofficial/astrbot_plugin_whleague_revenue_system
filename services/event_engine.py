@@ -1026,13 +1026,16 @@ class EventEngine:
 
     async def add_custom(self, name: str, category: str, weight: int,
                          effects_text: str, event_type: str = "instant",
-                         options_text: str = "") -> None:
+                         options_text: str = "", conditions_text: str = "",
+                         soft_conditions: int = 0) -> None:
         """手写自定义事件。
 
         即发型：effects_text 为 JSON 文本（效果键见 EVENT_KEYS.md，支持 14 键全量）；
         选择型：options_text 为选项 JSON 数组文本（结构同 LLM 草稿，效果自动钳制）。
+        conditions_text 为触发条件 JSON 文本（键见 EVENT_KEYS.md，白名单钳制）；
+        soft_conditions 置真时条件不满足按权重衰减参与抽取而非硬剔除。
         """
-        from .llm_writer import _clamp_effects, _clamp_event
+        from .llm_writer import _clamp_conditions, _clamp_effects, _clamp_event
 
         name = str(name or "").strip()
         # 重名防护：与已采纳事件同名即拒绝（流水 note 与选择录入都按名匹配，
@@ -1053,6 +1056,18 @@ class EventEngine:
         clamps["facility_keys"] = set(formula.facility_effects(self._cfg))
         clamps["activity_keys"] = set(formula.activity_names(self._cfg))
         clamps["weather_keys"] = set(formula.weather_probabilities(self._cfg))
+        clamps["facility_max_level"] = len(formula.facility_upgrade_costs(self._cfg))
+        if conditions_text:
+            try:
+                raw_conditions = json.loads(conditions_text)
+            except (ValueError, TypeError):
+                raise EventError("conditions 需为 JSON 对象文本，如 {\"min_tier\": 3}")
+            if not isinstance(raw_conditions, dict):
+                raise EventError("conditions 需为 JSON 对象文本，如 {\"min_tier\": 3}")
+            conds = _clamp_conditions(raw_conditions, clamps)
+        else:
+            conds = {}
+        soft = 1 if soft_conditions else 0
         event_id = f"custom_{await self._dao.next_event_counter()}"
         if event_type.lower() == "choice":
             try:
@@ -1069,8 +1084,10 @@ class EventEngine:
                 raise EventError(str(e))
             await self._dao.upsert_event(
                 event_id, d["name"], d["category"], d["weight"],
-                "{}", "{}", d["template"], source="custom", status="adopted",
+                json.dumps(conds, ensure_ascii=False), "{}", d["template"],
+                source="custom", status="adopted",
                 event_type="choice", options_json=json.dumps(d["options"], ensure_ascii=False),
+                soft_conditions=soft,
             )
             return
         import json as _json
@@ -1089,6 +1106,7 @@ class EventEngine:
             raise EventError(f"effects 含非法数值（money/fans_pct/maintenance/attendance_mod/satisfaction/brand_heat/build_credit/influence 需为数字）: {e}")
         await self._dao.upsert_event(
             event_id, name.strip(), category.strip() or "自定义", weight,
-            "{}", _json.dumps(effects, ensure_ascii=False), name.strip(),
-            source="custom", status="adopted",
+            _json.dumps(conds, ensure_ascii=False),
+            _json.dumps(effects, ensure_ascii=False), name.strip(),
+            source="custom", status="adopted", soft_conditions=soft,
         )
