@@ -161,20 +161,29 @@ class LlmWriter:
     async def design_events(self, count: int, topic: str = "") -> list[dict]:
         if not self.enabled(flavor=False):
             raise RuntimeError("LLM 事件设计未启用（llm_design_enabled）")
-        money_clamp = float(self._cfg.get("event_money_clamp", 8.0))
-        fans_clamp = float(self._cfg.get("event_fans_clamp", 0.05))
-        maintenance_clamp = float(self._cfg.get("event_maintenance_clamp", 5.0))
+        clamps = {
+            "money": float(self._cfg.get("event_money_clamp", 8.0)),
+            "fans": float(self._cfg.get("event_fans_clamp", 0.05)),
+            "maintenance": float(self._cfg.get("event_maintenance_clamp", 5.0)),
+            "satisfaction": float(self._cfg.get("event_satisfaction_clamp", 0.5)),
+            "brand_heat": float(self._cfg.get("event_brand_heat_clamp", 0.3)),
+        }
+        sat_c, heat_c = clamps["satisfaction"], clamps["brand_heat"]
         prompt = (
             "为足球联赛主场随机事件系统设计新事件。\n"
             f"任务：设计 {count} 个事件，主题：{topic or '不限'}。\n"
             "数值边界（越界会被系统自动钳制）："
-            f"金额绝对值 ≤ {money_clamp}M；死忠比例变化绝对值 ≤ {fans_clamp}"
+            f"金额绝对值 ≤ {clamps['money']}M；死忠比例变化绝对值 ≤ {clamps['fans']}"
             "（小数，0.03 即 3%）；"
-            f"维护支出 0 ~ {maintenance_clamp}M。\n"
+            f"维护支出 0 ~ {clamps['maintenance']}M；"
+            f"品牌满意度变化绝对值 ≤ {sat_c}（正=合作愉快提升评估，负=损害合作关系），"
+            f"品牌热度变化绝对值 ≤ {heat_c}（直接调整品牌行情热度）；"
+            "这两项仅当球队当前有冠名品牌时实际生效。\n"
             "输出 JSON 数组，只输出数组本身，不要任何解释或多余文字。每个元素为以下两类之一：\n"
             "一、即发事件：{\"event_type\":\"instant\",\"name\":\"事件名(≤20字)\","
             "\"category\":\"分类(≤10字)\",\"weight\":权重整数1~100,"
-            "\"effects\":{\"money\":金额M,\"fans_pct\":死忠比例小数,\"maintenance\":维护额外支出M},"
+            "\"effects\":{\"money\":金额M,\"fans_pct\":死忠比例小数,\"maintenance\":维护额外支出M,"
+            "\"satisfaction\":品牌满意度变化(可选),\"brand_heat\":品牌热度变化(可选)},"
             "\"template\":\"≤200字播报文案，必须包含{team}和{stadium}占位符\"}\n"
             "   例：{\"event_type\":\"instant\",\"name\":\"草坪闯入者\",\"category\":\"场务\","
             "\"weight\":30,\"effects\":{\"money\":-2.0,\"fans_pct\":0.01,\"maintenance\":1.5},"
@@ -205,7 +214,7 @@ class LlmWriter:
             if not isinstance(d, dict):
                 continue
             try:
-                drafts.append(_clamp_event(d, money_clamp, fans_clamp, maintenance_clamp))
+                drafts.append(_clamp_event(d, clamps))
             except (ValueError, TypeError, AttributeError):
                 continue
         if not drafts:
@@ -318,13 +327,13 @@ def _extract_json(text: str):
     return None
 
 
-def _clamp_effects(effects, money_clamp: float, fans_clamp: float, maintenance_clamp: float) -> dict:
+def _clamp_effects(effects, clamps: dict) -> dict:
     """对单条效果钳制（逐键委托效果键注册表；clamp 返回 None 即剔除该键）。
 
     money/fans_pct/maintenance 恒在输出（缺键按 0 收敛），attendance_mod 仅在
-    ≠1 时输出，其余键由各 Spec 自行决定放行或剔除。clamps 键名即注册表钳幅维度。
+    ≠1 时输出，satisfaction/brand_heat 仅在 ≠0 时输出（量纲见 EVENT_KEYS.md）。
+    clamps 键名即注册表钳幅维度：money/fans/maintenance/satisfaction/brand_heat。
     """
-    clamps = {"money": money_clamp, "fans": fans_clamp, "maintenance": maintenance_clamp}
     out = {}
     for spec in EFFECT_SPECS:
         value = spec.clamp(effects.get(spec.key, spec.default), clamps)
@@ -333,7 +342,7 @@ def _clamp_effects(effects, money_clamp: float, fans_clamp: float, maintenance_c
     return out
 
 
-def _clamp_choice_event(d, money_clamp: float, fans_clamp: float, maintenance_clamp: float) -> dict:
+def _clamp_choice_event(d, clamps: dict) -> dict:
     """校验并钳制选择型事件：2~4 个选项、每选项≥2条概率结果、概率归一、正负路径保障。"""
     name = sanitize_text(str(d.get("name", "")))
     if not name:
@@ -355,8 +364,7 @@ def _clamp_choice_event(d, money_clamp: float, fans_clamp: float, maintenance_cl
             if w <= 0:
                 w = 1.0
             outcomes.append({"w": round(w, 1),
-                             "effects": _clamp_effects(o.get("effects") or {},
-                                                       money_clamp, fans_clamp, maintenance_clamp)})
+                             "effects": _clamp_effects(o.get("effects") or {}, clamps)})
         total = sum(x["w"] for x in outcomes)
         for x in outcomes:
             x["w"] = round(x["w"] / total * 100, 1)
@@ -375,14 +383,14 @@ def _clamp_choice_event(d, money_clamp: float, fans_clamp: float, maintenance_cl
             "template": sanitize_text(str(d.get("template", "")), 200) or f"{name}：{{team}} 的球场发生了趣事。"}
 
 
-def _clamp_event(d, money_clamp: float, fans_clamp: float, maintenance_clamp: float) -> dict:
+def _clamp_event(d, clamps: dict) -> dict:
     name = sanitize_text(str(d.get("name", "")))
     if not name:
         raise ValueError("事件缺少名称")
     event_type = str(d.get("event_type", "instant")).strip().lower()
     if event_type == "choice":
-        return _clamp_choice_event(d, money_clamp, fans_clamp, maintenance_clamp)
-    effects = _clamp_effects(d.get("effects") or {}, money_clamp, fans_clamp, maintenance_clamp)
+        return _clamp_choice_event(d, clamps)
+    effects = _clamp_effects(d.get("effects") or {}, clamps)
     return {
         "name": name,
         "category": sanitize_text(str(d.get("category", "自定义")), 10) or "自定义",

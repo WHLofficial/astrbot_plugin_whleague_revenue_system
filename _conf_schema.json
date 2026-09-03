@@ -227,6 +227,18 @@
     "type": "float",
     "default": 5.0
   },
+  "event_satisfaction_clamp": {
+    "description": "事件品牌满意度钳制",
+    "hint": "LLM 设计/手写事件时品牌满意度变化绝对值上限（仅冠名球队生效，计入品牌行情评估）。",
+    "type": "float",
+    "default": 0.5
+  },
+  "event_brand_heat_clamp": {
+    "description": "事件品牌热度钳制",
+    "hint": "LLM 设计/手写事件时品牌热度单次变化绝对值上限（实际还受行情热度上下限约束）。",
+    "type": "float",
+    "default": 0.3
+  },
   "activity_slots": {
     "description": "档期数量",
     "hint": "每窗口非比赛日档期数量。",

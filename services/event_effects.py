@@ -258,9 +258,21 @@ def _clamp_attendance(v, clamps: dict):
     return round(max(0.5, min(2.0, v)), 3)
 
 
-def _clamp_dropped(v, clamps: dict):
-    """历史行为：这两个键在钳制层被静默剔除（v2.11.1 起放行）。"""
-    return None
+def _clamp_signed(v, clamps: dict, name: str, default: float):
+    """对称区间钳制，round 2（与满意度/热度 {:+.2f} 展示口径一致）；0 视为无效果不落键。"""
+    c = float(clamps.get(name, default))
+    v = round(max(-c, min(c, float(v))), 2)
+    return v if v else None
+
+
+def _clamp_satisfaction(v, clamps: dict):
+    # 实际生效仍以球队有冠名品牌为前提（apply 阶段判命名()），钳制只限强度
+    return _clamp_signed(v, clamps, "satisfaction", 0.5)
+
+
+def _clamp_brand_heat(v, clamps: dict):
+    # apply 阶段另有 market_heat_config clamp_low/high 终钳，此处限单次变化幅度
+    return _clamp_signed(v, clamps, "brand_heat", 0.3)
 
 
 EFFECT_SPECS: tuple[EffectSpec, ...] = (
@@ -273,7 +285,7 @@ EFFECT_SPECS: tuple[EffectSpec, ...] = (
     EffectSpec(key="attendance_mod", apply=_apply_attendance, undo=_undo_attendance,
                describe=_desc_attendance, clamp=_clamp_attendance, default=1.0),
     EffectSpec(key="satisfaction", apply=_apply_satisfaction, undo=_undo_noop,
-               describe=_desc_satisfaction, clamp=_clamp_dropped),
+               describe=_desc_satisfaction, clamp=_clamp_satisfaction),
     EffectSpec(key="brand_heat", apply=_apply_brand_heat, undo=_undo_noop,
-               describe=_desc_brand_heat, clamp=_clamp_dropped),
+               describe=_desc_brand_heat, clamp=_clamp_brand_heat),
 )

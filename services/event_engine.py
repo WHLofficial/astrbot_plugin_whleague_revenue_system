@@ -981,7 +981,7 @@ class EventEngine:
                          options_text: str = "") -> None:
         """手写自定义事件。
 
-        即发型：effects_text 为 JSON 文本（money/fans_pct/maintenance/attendance_mod）；
+        即发型：effects_text 为 JSON 文本（money/fans_pct/maintenance/attendance_mod/satisfaction/brand_heat）；
         选择型：options_text 为选项 JSON 数组文本（结构同 LLM 草稿，效果自动钳制）。
         """
         from .llm_writer import _clamp_effects, _clamp_event
@@ -991,9 +991,13 @@ class EventEngine:
         # 同名不同 id 会造成歧义/误删；手写直接入池，故对标已采纳集合）
         if any(r["name"] == name for r in await self._dao.list_events("adopted")):
             raise EventError(f"事件名「{name}」已存在（与已采纳事件重名会导致按名匹配歧义），请换名")
-        money_clamp = float(self._cfg.get("event_money_clamp", 8.0))
-        fans_clamp = float(self._cfg.get("event_fans_clamp", 0.05))
-        maintenance_clamp = float(self._cfg.get("event_maintenance_clamp", 5.0))
+        clamps = {
+            "money": float(self._cfg.get("event_money_clamp", 8.0)),
+            "fans": float(self._cfg.get("event_fans_clamp", 0.05)),
+            "maintenance": float(self._cfg.get("event_maintenance_clamp", 5.0)),
+            "satisfaction": float(self._cfg.get("event_satisfaction_clamp", 0.5)),
+            "brand_heat": float(self._cfg.get("event_brand_heat_clamp", 0.3)),
+        }
         event_id = f"custom_{await self._dao.next_event_counter()}"
         if event_type.lower() == "choice":
             try:
@@ -1004,7 +1008,7 @@ class EventEngine:
                 d = _clamp_event(
                     {"event_type": "choice", "name": name, "category": category,
                      "weight": weight, "template": name, "options": raw_options},
-                    money_clamp, fans_clamp, maintenance_clamp,
+                    clamps,
                 )
             except ValueError as e:
                 raise EventError(str(e))
@@ -1025,9 +1029,9 @@ class EventEngine:
         # 即发效果与 LLM 草稿同强度钳制：越界取边界、非数值直接拒绝，
         # 防止触发时 float() 中断整个分配且无流水可撤销
         try:
-            effects = _clamp_effects(effects, money_clamp, fans_clamp, maintenance_clamp)
+            effects = _clamp_effects(effects, clamps)
         except (ValueError, TypeError) as e:
-            raise EventError(f"effects 含非法数值（money/fans_pct/maintenance/attendance_mod 需为数字）: {e}")
+            raise EventError(f"effects 含非法数值（money/fans_pct/maintenance/attendance_mod/satisfaction/brand_heat 需为数字）: {e}")
         await self._dao.upsert_event(
             event_id, name.strip(), category.strip() or "自定义", weight,
             "{}", _json.dumps(effects, ensure_ascii=False), name.strip(),

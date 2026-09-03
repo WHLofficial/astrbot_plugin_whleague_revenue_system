@@ -1115,6 +1115,37 @@ async def test_add_custom_instant_effects_clamped():
         await env.teardown()
 
 
+async def test_clamp_passes_satisfaction_brand_heat():
+    """v2.11.1 放行：钳制层不再丢弃 satisfaction/brand_heat，越界取边界、0 剔除。"""
+    from astrbot_plugin_whleague_revenue_system.services.llm_writer import _clamp_effects
+
+    clamps = {"money": 8.0, "fans": 0.05, "maintenance": 5.0,
+              "satisfaction": 0.5, "brand_heat": 0.3}
+    out = _clamp_effects({"money": 1.0, "satisfaction": 0.9, "brand_heat": -0.5}, clamps)
+    assert out["satisfaction"] == 0.5 and out["brand_heat"] == -0.3, out
+    # 0 视为无效果不落键（同 attendance_mod=1.0 的条件保留口径）
+    out2 = _clamp_effects({"satisfaction": 0.0, "brand_heat": 0.0}, clamps)
+    assert "satisfaction" not in out2 and "brand_heat" not in out2, out2
+    # config 未配置钳幅时按注册表默认放行
+    out3 = _clamp_effects({"satisfaction": 0.4},
+                          {"money": 8.0, "fans": 0.05, "maintenance": 5.0})
+    assert out3["satisfaction"] == 0.4, out3
+
+
+async def test_add_custom_brand_keys_survive():
+    """手写事件 satisfaction/brand_heat 入库（v2.11.1 前被钳制层静默丢弃）。"""
+    env = await TestEnv().setup()
+    try:
+        await env.event_engine.add_custom(
+            "赞助商答谢夜", "商业", 10,
+            '{"money": 2.0, "satisfaction": 0.9, "brand_heat": -0.8}')
+        rows = {r["name"]: r for r in await env.dao.list_events("adopted")}
+        effects = json.loads(rows["赞助商答谢夜"]["effects_json"])
+        assert effects["satisfaction"] == 0.5 and effects["brand_heat"] == -0.3, effects
+    finally:
+        await env.teardown()
+
+
 async def test_hit_prob_config_defensive():
     """hit_prob 防御：NaN 不再等价于全员命中；非法/负值回退默认；>1 钳为必中。"""
     from unittest.mock import patch

@@ -3,6 +3,12 @@
 本文件记录本项目的显著变更，格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [2.11.1] - 2026-09-03
+
+### Fixed
+
+- **品牌效果键放行**（事件×功能交互②）：`satisfaction`/`brand_heat` 对 LLM 设计与手写事件不再被钳制层静默丢弃——新增 config 键 `event_satisfaction_clamp`（默认 ±0.5）/`event_brand_heat_clamp`（默认 ±0.3）对称钳幅，0 值不落键；实际生效仍以球队有生效冠名为前提，热度另受行情上下限终钳。`/主场事件写` 帮助文本与 design_events prompt 同步（数值边界+字段说明+语义）；`_clamp_effects`/`_clamp_event`/`_clamp_choice_event` 签名收敛为 clamps 字典。新增文档 EVENT_KEYS.md（效果键登记表+新键接入指南）。测试 238→240。
+
 ## [2.11.0] - 2026-08-31
 
 ### Changed
