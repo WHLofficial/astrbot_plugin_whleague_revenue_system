@@ -11,7 +11,7 @@ import re
 from astrbot.api import logger
 
 from ..utils.security import sanitize_text
-from .event_effects import EFFECT_SPECS
+from .event_effects import EFFECT_SPECS, signal_clamp_config
 
 _JSON_BLOCK_RE = re.compile(r"```(?:json)?\s*(.*?)```", re.S)
 _TRAILING_COMMA_RE = re.compile(r",\s*([}\]])")
@@ -170,8 +170,10 @@ class LlmWriter:
             "build_credit": float(self._cfg.get("event_build_credit_clamp", 5.0)),
             "influence": float(self._cfg.get("event_influence_clamp", 10.0)),
         }
+        clamps["signals"] = signal_clamp_config(self._cfg)
         sat_c, heat_c = clamps["satisfaction"], clamps["brand_heat"]
         bc_c, inf_c = clamps["build_credit"], clamps["influence"]
+        sig_c = clamps["signals"]
         prompt = (
             "为足球联赛主场随机事件系统设计新事件。\n"
             f"任务：设计 {count} 个事件，主题：{topic or '不限'}。\n"
@@ -183,13 +185,21 @@ class LlmWriter:
             f"品牌热度变化绝对值 ≤ {heat_c}（直接调整品牌行情热度）；"
             "这两项仅当球队当前有冠名品牌时实际生效；"
             f"建设券变化绝对值 ≤ {bc_c}M（影响建设信用余额），"
-            f"影响力变化绝对值 ≤ {inf_c}（球队影响力基准值，量纲 0~200）。\n"
+            f"影响力变化绝对值 ≤ {inf_c}（球队影响力基准值，量纲 0~200）；"
+            "信号 signals 可选（dict，信号名→数值）："
+            f"fan_mood 粉丝情绪步进 ±{sig_c.get('fan_mood_clamp', 2.0)} 百分点"
+            f"（影响死忠演化）、upkeep 维护负担乘数 {sig_c.get('upkeep_low', 0.5)}~"
+            f"{sig_c.get('upkeep_high', 2.0)}（乘本队维护费）、"
+            f"fee_mod 冠名费乘数 {sig_c.get('fee_mod_low', 0.5)}~"
+            f"{sig_c.get('fee_mod_high', 2.0)}（乘本队冠名费，仅冠名队实际生效）；"
+            "未知名会被剔除。\n"
             "输出 JSON 数组，只输出数组本身，不要任何解释或多余文字。每个元素为以下两类之一：\n"
             "一、即发事件：{\"event_type\":\"instant\",\"name\":\"事件名(≤20字)\","
             "\"category\":\"分类(≤10字)\",\"weight\":权重整数1~100,"
             "\"effects\":{\"money\":金额M,\"fans_pct\":死忠比例小数,\"maintenance\":维护额外支出M,"
             "\"satisfaction\":品牌满意度变化(可选),\"brand_heat\":品牌热度变化(可选),"
-            "\"build_credit\":建设券变化M(可选),\"influence\":影响力变化(可选)},"
+            "\"build_credit\":建设券变化M(可选),\"influence\":影响力变化(可选),"
+            "\"signals\":{信号名:数值}(可选)},"
             "\"template\":\"≤200字播报文案，必须包含{team}和{stadium}占位符\"}\n"
             "   例：{\"event_type\":\"instant\",\"name\":\"草坪闯入者\",\"category\":\"场务\","
             "\"weight\":30,\"effects\":{\"money\":-2.0,\"fans_pct\":0.01,\"maintenance\":1.5},"

@@ -1189,6 +1189,64 @@ async def test_build_credit_influence_apply_cancel():
         await env.teardown()
 
 
+async def test_signals_clamp_apply_collect():
+    """v2.11.3 信号总线：钳制（未知名剔除/步进对称/乘数区间/0 剔除）、
+    备注不落状态（无重算跳过标记，同 satisfaction 先例）、采集聚合双来源。"""
+    from astrbot_plugin_whleague_revenue_system.services.llm_writer import _clamp_effects
+    from astrbot_plugin_whleague_revenue_system.services.event_effects import (
+        collect_window_signals, mult_factor, step_value)
+
+    sig_clamps = {"fan_mood_clamp": 2.0, "upkeep_low": 0.5, "upkeep_high": 2.0,
+                  "fee_mod_low": 0.5, "fee_mod_high": 2.0}
+    clamps = {"money": 8.0, "fans": 0.05, "maintenance": 5.0,
+              "satisfaction": 0.5, "brand_heat": 0.3,
+              "build_credit": 5.0, "influence": 10.0, "signals": sig_clamps}
+    out = _clamp_effects(
+        {"signals": {"fan_mood": 3.0, "upkeep": 0.4, "fee_mod": 0.8, "unknown": 5.0}},
+        clamps)
+    assert out["signals"] == {"fan_mood": 2.0, "upkeep": 0.5, "fee_mod": 0.8}, out
+    assert "signals" not in _clamp_effects({"signals": {"fan_mood": 0.0}}, clamps)
+    assert "signals" not in _clamp_effects({"signals": "垃圾"}, clamps)
+
+    env = await TestEnv().setup()
+    try:
+        await env.stadium_service.import_attributes("利物浦", influence=150.0)
+        await env.event_engine.add_custom(
+            "更衣室风波", "氛围", 10,
+            '{"signals": {"fan_mood": 0.3, "fee_mod": 0.8, "unknown": 9.9}}')
+        rows = {r["name"]: r for r in await env.dao.list_events("adopted")}
+        effects = json.loads(rows["更衣室风波"]["effects_json"])
+        assert effects["signals"] == {"fan_mood": 0.3, "fee_mod": 0.8}, effects
+        r = await env.event_engine.trigger_team(
+            "利物浦", 1, 1, event_id=rows["更衣室风波"]["event_id"])
+        notes = r["hits"][0]["notes"]
+        assert any("粉丝情绪 +0.3" in n for n in notes), notes
+        assert any("冠名费 ×0.8" in n for n in notes), notes
+        # 只出备注不落状态：apply_state=False 备注相同（无「重算跳过」标记）
+        notes2 = await env.event_engine._apply_effects(
+            "利物浦", 1, 1, {"signals": {"fan_mood": -0.5}}, "复核", apply_state=False)
+        assert any("粉丝情绪 -0.5" in n for n in notes2), notes2
+        assert not any("重算跳过" in n for n in notes2), notes2
+        # 采集：events_log（触发已写）+ 选择结算 outcome 双来源；乘数 Π、步进 Σ
+        choice = await env.dao.get_event_choice("利物浦", 1, 1, "evt_x")
+        if choice is None:
+            await env.dao.add_event_choice("利物浦", 1, 1, "evt_x")
+            await env.dao.set_event_choice("利物浦", 1, 1, "evt_x", 1)
+            choice = await env.dao.get_event_choice("利物浦", 1, 1, "evt_x")
+        await env.dao.mark_choice_resolved(
+            choice["id"],
+            json.dumps({"option": "办", "effects": {"signals": {"fee_mod": 0.9}}}))
+        sig = await collect_window_signals(env.dao, 1, 1)
+        assert sig["fan_mood"]["利物浦"] == [0.3], sig
+        assert sorted(sig["fee_mod"]["利物浦"]) == [0.8, 0.9], sig
+        assert step_value(sig, "fan_mood", "利物浦") == 0.3
+        assert abs(mult_factor(sig, "fee_mod", "利物浦", 0.5, 2.0) - 0.72) < 1e-9
+        assert mult_factor(sig, "upkeep", "利物浦", 0.5, 2.0) == 1.0
+        assert mult_factor(sig, "fee_mod", "巴塞罗那", 0.5, 2.0) == 1.0
+    finally:
+        await env.teardown()
+
+
 async def test_hit_prob_config_defensive():
     """hit_prob 防御：NaN 不再等价于全员命中；非法/负值回退默认；>1 钳为必中。"""
     from unittest.mock import patch

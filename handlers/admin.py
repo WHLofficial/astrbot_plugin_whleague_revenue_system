@@ -725,7 +725,7 @@ class AdminHandler:
             return
         parts = event.get_message_str().split(maxsplit=6)
         if len(parts) < 5:
-            yield event.plain_result("用法: /主场事件写 <名称> <类别> <权重> <effectsJSON> [模板文案]\n或 /主场事件写 <名称> <类别> <权重> choice <选项JSON>\n效果键：money/fans_pct/maintenance/attendance_mod/satisfaction/brand_heat（强度受 event_*_clamp 配置钳制）\n选项JSON：{\"name\":\"操作\",\"desc\":\"…\",\"outcomes\":[{\"w\":60,\"effects\":{\"money\":1}},{\"w\":40,\"effects\":{\"money\":-1}}]}（2~4 个操作）")
+            yield event.plain_result("用法: /主场事件写 <名称> <类别> <权重> <effectsJSON> [模板文案]\n或 /主场事件写 <名称> <类别> <权重> choice <选项JSON>\n效果键：money/fans_pct/maintenance/attendance_mod/satisfaction/brand_heat/build_credit/influence/signals（强度受 event_*_clamp 配置钳制）\n选项JSON：{\"name\":\"操作\",\"desc\":\"…\",\"outcomes\":[{\"w\":60,\"effects\":{\"money\":1}},{\"w\":40,\"effects\":{\"money\":-1}}]}（2~4 个操作）")
             return
         try:
             weight = parse_int(parts[3], min_val=1, max_val=100)

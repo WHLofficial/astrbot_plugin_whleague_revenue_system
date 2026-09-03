@@ -3,6 +3,12 @@
 本文件记录本项目的显著变更，格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [2.11.3] - 2026-09-03
+
+### Added
+
+- **信号总线 `signals` 效果键**（事件×功能交互③续）：effects 新增 `signals`（dict，信号名→数值），事件只出备注不落状态，数值由消费方结算时从事件日志重读——首结与重算同源。三内置信号：`fan_mood`（步进型百分点，消费=死忠演化结果×(1+Σ/100)，随演化 redo 跳过）、`upkeep`（乘数型，Π(事件值) 终钳后乘本队维护费）、`fee_mod`（乘数型，同法乘本队冠名费）。未知名写入侧剔除、消费侧跳过；钳幅 config 键 `event_signal_config`（JSON：fan_mood_clamp/upkeep_low/high/fee_mod_low/high）。`collect_window_signals` 双来源采集（events_log + 选择结算 outcome）。LLM prompt/`/主场事件写` 帮助文本/EVENT_KEYS.md 同步。测试 241→243。
+
 ## [2.11.2] - 2026-09-03
 
 ### Added

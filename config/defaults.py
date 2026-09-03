@@ -144,6 +144,7 @@ _JSON_STRING_KEYS = (
     "market_heat_config",
     "market_industry_templates",
     "market_tier_profiles",
+    "event_signal_config",
 )
 
 

@@ -304,3 +304,54 @@ async def test_settle_mounts_evolution_and_redo_skips():
         assert float(row["satisfaction"]) == pytest.approx(1.025, abs=1e-9)
     finally:
         await env.teardown()
+
+
+async def test_signal_bus_consumers():
+    """v2.11.3 信号总线消费：upkeep 乘维护费、fee_mod 乘冠名费、fan_mood 并入死忠演化；
+    重算同源重应用（乘数型）、演化仍跳过（步进型）。"""
+    from astrbot_plugin_whleague_revenue_system.services import formula as F
+
+    env = await TestEnv(cfg_override={"max_open_tier": 4}).setup()
+    try:
+        await _seed_fields(env)
+        await _add_custom_brand(env, "风行体育")
+        await env.dao.add_naming("利物浦", "风行体育", 1.0, 2.0, 6, 1, 1)
+        await env.event_engine.add_custom(
+            "球迷庆典", "氛围", 10,
+            '{"signals": {"upkeep": 0.8, "fee_mod": 1.2, "fan_mood": 1.5}}')
+        rows = {r["name"]: r for r in await env.dao.list_events("adopted")}
+        await env.event_engine.trigger_team(
+            "利物浦", 1, 1, event_id=rows["球迷庆典"]["event_id"])
+
+        result = await env.window_service.settle()
+        joined = "\n".join(result["lines"])
+        txs = await env.dao.list_transactions("利物浦", season=1, window_seq=1)
+        by_kind = {t["kind"]: t for t in txs}
+        # tier4 基础维护 14.0（0 场）× 0.8 = 11.2；冠名费 2.0 × 1.2 = 2.4
+        assert by_kind["maintenance"]["amount"] == pytest.approx(-11.2, abs=1e-6), by_kind
+        assert by_kind["naming"]["amount"] == pytest.approx(2.4, abs=1e-6), by_kind
+        # 死忠演化并入 mood：公式结果 ×(1+1.5/100)
+        s1 = await env.dao.get_stadium("利物浦")
+        target = F.diehard_target(env.cfg, float(s1["influence"]))
+        base = F.evolve_fans(env.cfg, fans=8000.0, target=target,
+                             attend_rate=1.0, youth_level=0, form_pts_value=4)
+        # 冠名档位性格 fans_buff 先乘增长额（口碑 +0.5%），mood 再乘整体
+        buff = float((await env.window_service._tier_profile("利物浦"))
+                     .get("fans_buff", 0.0) or 0.0)
+        buffed = 8000.0 + (base - 8000.0) * (1.0 + buff)
+        expected = min(max(buffed * 1.015, 0.0), float(env.cfg.get("fans_cap", 10000)))
+        log = await env.dao.get_window_fans_log(1, 1, "利物浦")
+        assert log is not None, joined
+        assert float(log["fans_after"]) == pytest.approx(expected, abs=1e-6), (log, expected)
+
+        # 重算：乘数型同源重应用（金额复现），演化仍跳过（快照不被覆盖）
+        await env.window_service.settle(force=True)
+        txs = await env.dao.list_transactions("利物浦", season=1, window_seq=1)
+        by_kind = {t["kind"]: t for t in txs}
+        assert by_kind["maintenance"]["amount"] == pytest.approx(-11.2, abs=1e-6), by_kind
+        assert by_kind["naming"]["amount"] == pytest.approx(2.4, abs=1e-6), by_kind
+        log2 = await env.dao.get_window_fans_log(1, 1, "利物浦")
+        assert float(log2["fans_after"]) == pytest.approx(expected, abs=1e-6)
+    finally:
+        await env.teardown()
+

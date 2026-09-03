@@ -14,6 +14,7 @@ import json
 from astrbot.api import logger
 
 from . import formula
+from .event_effects import collect_window_signals, mult_factor, step_value
 
 
 class SettleError(Exception):
@@ -98,27 +99,43 @@ class WindowService:
         await self._event_engine.settle_choices(season, window_seq,
                                                 apply_state=not redo,
                                                 tx_sink=created_ids, on_batch=_persist_tx_ids)
+
+        # 事件信号（signals 键）：乘数型消费维护费/冠名费，步进型随死忠演化消费（redo 跳过）。
+        # 只读事件日志不落状态——首结与重算同源，重算的乘数自动重新应用
+        signals = await collect_window_signals(self._dao, season, window_seq)
+        sig_cfg = formula.parse_json_object(self._cfg.get("event_signal_config", "{}"))
         lines = []
 
         # 死忠演化每窗口仅执行一轮（一次调用作用于全部球队），重算时跳过；
         # 冠名死忠加成随演化应用，状态类随重算一起跳过
         fans_buffs = {}
+        mood_by_team = {}
         if not redo:
             for s0 in stadiums:
-                buff = float((await self._tier_profile(s0["team_name"])).get("fans_buff", 0.0) or 0.0)
+                team0 = s0["team_name"]
+                buff = float((await self._tier_profile(team0)).get("fans_buff", 0.0) or 0.0)
                 if buff:
-                    fans_buffs[s0["team_name"]] = buff
+                    fans_buffs[team0] = buff
+                mood = step_value(signals, "fan_mood", team0)
+                if mood:
+                    mood_by_team[team0] = mood
         fans_details = [] if redo else await self._fans_service.evolve(
-            season, window_seq, fans_buffs=fans_buffs)
+            season, window_seq, fans_buffs=fans_buffs, mood_by_team=mood_by_team or None)
         fans_by_team = {fd["team"]: fd for fd in fans_details}
         for s in stadiums:
             team = s["team_name"]
             await self._dao.ensure_balance(team, float(self._cfg.get("start_funds", 50.0)))
             parts = []
 
-            # 1) 维护费（按容量收，S9 公式；场次 = 窗口内安排的主场场次）
+            # 1) 维护费（按容量收，S9 公式；场次 = 窗口内安排的主场场次；
+            #    upkeep 信号乘数消费：Π(事件值) 终钳，重算同源重应用）
             home_matches = await self._dao.get_home_matches_window(team, season, window_seq)
             maintenance = formula.tier_maintenance(self._cfg, s["tier"], s["capacity"], len(home_matches))
+            upkeep_f = mult_factor(signals, "upkeep", team,
+                                   float(sig_cfg.get("upkeep_low", 0.5)),
+                                   float(sig_cfg.get("upkeep_high", 2.0)))
+            if upkeep_f != 1.0:
+                maintenance = round(maintenance * upkeep_f, 3)
             if maintenance > 0:
                 await _record_tx(team, "maintenance", -maintenance,
                                  note=f"半赛季维护（{len(home_matches)} 场）")
@@ -148,7 +165,12 @@ class WindowService:
             # 3) 冠名费 + 到期 + 对赌奖金（重算时不重复扣窗口数；奖金为纯流水可重算）
             naming = await self._dao.get_active_naming(team)
             if naming:
-                fee = naming["fee_per_window"]
+                fee = float(naming["fee_per_window"])
+                fee_f = mult_factor(signals, "fee_mod", team,
+                                    float(sig_cfg.get("fee_mod_low", 0.5)),
+                                    float(sig_cfg.get("fee_mod_high", 2.0)))
+                if fee_f != 1.0:
+                    fee = round(fee * fee_f, 3)
                 await _record_tx(team, "naming", fee, note=f"{naming['brand']} 冠名费")
                 parts.append(f"冠名 +{fee:.2f}M")
                 if not redo:

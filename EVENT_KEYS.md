@@ -6,7 +6,7 @@
 
 设计背景见 `EVENT_INTERACTION_BRAINSTORM.md`；本文档随新键落地持续更新。
 
-## 登记表（v2.11.2 时点）
+## 登记表（v2.11.3 时点）
 
 | 键 | 量纲 | apply 落点 | 钳制（默认 / config 键） | 撤销语义 | describe 文案 | 消费者 |
 |---|---|---|---|---|---|---|
@@ -18,6 +18,7 @@
 | `brand_heat` | 小数，± | `brand_pool.heat` +v，终钳 `market_heat_config` clamp_low/high | ±0.3 / `event_brand_heat_clamp` | 无（同上） | `品牌热度+0.20` | 品牌 heat → 报价/排名 |
 | `build_credit` | M，± | `club_balance.build_credit` 列直改（沿建设券通道，不带余额流水） | ±5.0 / `event_build_credit_clamp` | 反向加减（可透支为负，`deduct_build_credit` 只扣不抵） | `建设券+3.0M` | 设施建造/扩建消耗 |
 | `influence` | 点，±（基准值量纲 0~200） | `stadium.influence` 基准值直改，下钳 0 | ±10.0 / `event_influence_clamp` | 反向加减，触 0 下界记 warning | `影响力+5.0` | 死忠目标/上座等读 live 值自动跟随 |
+| `signals` | dict，信号名→数值 | 不落库，仅出备注；窗口结算时按信号名分发给订阅者 | fan_mood ±2.0、upkeep/fee_mod [0.5,2.0] / `event_signal_config` | 无（同 satisfaction） | `粉丝情绪+0.3 / 冠名费×0.8` | 见下方信号总线 |
 
 补充语义：
 
@@ -30,6 +31,10 @@
 - redo（强制重算）时状态类键跳过并备注「（重算跳过）」；资金/维护流水由 tx_ids 撤销重算。
 - `cancel_team_event` 反演只处理资金类（`named_tx`）流水；品牌键从不像资金键那样回滚
   （历史行为，保持不变）。
+- **信号总线（`signals`）**：值必须是 dict，已知信号 `fan_mood`（步进型，百分点，
+  消费=死忠演化结果×(1+Σ/100)，随 evolve 在 redo 跳过）、`upkeep` / `fee_mod`
+  （乘数型，值即乘数，消费=Π(事件值) 终钳后乘本队维护费/冠名费，首结与重算同源
+  重应用）。未知名写入侧剔除、消费侧跳过；只读事件日志不落状态（`collect_window_signals`）。
 - `_worst_option` 未定选项兜底只按 `money − maintenance` 净额比较——**非资金键不参与**，
   这是刻意保留的口径（净额概念只对资金键有意义）。
 

@@ -178,6 +178,22 @@ async def _apply_influence(ctx: ApplyContext, value: float) -> None:
         ctx.notes.append(f"影响力 {value:+.1f}（重算跳过）")
 
 
+async def _apply_signals(ctx: ApplyContext, value: dict) -> None:
+    # 信号只出备注、不落状态：实际数值由消费方结算时从事件日志重读（同 satisfaction 先例），
+    # 因此无需 apply_state 区分，重算天然同源
+    if not isinstance(value, dict):
+        return
+    for name, v in value.items():
+        spec = SIGNAL_DEFAULTS.get(str(name))
+        if spec is None:
+            continue
+        v = float(v)
+        if spec["type"] == SIGNAL_MULT:
+            ctx.notes.append(f"{spec['label']} ×{v:g}")
+        else:
+            ctx.notes.append(f"{spec['label']} {'+' if v > 0 else ''}{v:g}")
+
+
 # ─── undo（取消事件反演；幂等，动不了的记 warning） ─────────
 
 
@@ -291,6 +307,22 @@ def _desc_influence(v: float) -> str:
     return f"影响力{v:+.1f}" if v else ""
 
 
+def _desc_signals(value) -> str:
+    if not isinstance(value, dict) or not value:
+        return ""
+    parts = []
+    for name, v in value.items():
+        spec = SIGNAL_DEFAULTS.get(str(name))
+        if spec is None:
+            continue
+        v = float(v)
+        if spec["type"] == SIGNAL_MULT:
+            parts.append(f"{spec['label']}×{v:g}")
+        else:
+            parts.append(f"{spec['label']}{'+' if v > 0 else ''}{v:g}")
+    return " / ".join(parts)
+
+
 # ─── clamp（LLM/手写钳制；raw 值来自 JSON，非数值抛错拒绝） ──
 
 
@@ -339,6 +371,103 @@ def _clamp_influence(v, clamps: dict):
     return _clamp_signed(v, clamps, "influence", 10.0)
 
 
+def _clamp_signals(v, clamps: dict):
+    """信号字典钳制：未知名剔除、步进型对称钳、乘数型区间钳、0 值剔除。
+
+    边界读 clamps["signals"]（event_signal_config 解析结果），缺省用 SIGNAL_DEFAULTS 内置值。
+    """
+    if not isinstance(v, dict) or not v:
+        return None
+    scfg = clamps.get("signals") or {}
+    out = {}
+    for name, raw in v.items():
+        spec = SIGNAL_DEFAULTS.get(str(name))
+        if spec is None:
+            continue
+        try:
+            x = float(raw)
+        except (TypeError, ValueError):
+            continue
+        if spec["type"] == SIGNAL_STEP:
+            c = float(scfg.get("fan_mood_clamp", spec["clamp"]))
+            x = round(max(-c, min(c, x)), 2)
+        else:
+            low = float(scfg.get(f"{name}_low", spec["clamp"][0]))
+            high = float(scfg.get(f"{name}_high", spec["clamp"][1]))
+            x = round(max(low, min(high, x)), 3)
+        if x:
+            out[str(name)] = x
+    return out or None
+
+
+# ─── 信号总线（signals 键的运行时支撑：采集/聚合，供结算侧消费） ──
+
+SIGNAL_STEP = "step"    # 步进型：消费侧按队 Σ（值即百分点步进）
+SIGNAL_MULT = "mult"    # 乘数型：消费侧按队 Π(值) 后终钳（值本身即乘数，0.8=×0.8）
+
+SIGNAL_DEFAULTS: dict = {
+    "fan_mood": {"label": "粉丝情绪", "type": SIGNAL_STEP, "clamp": 2.0},
+    "upkeep": {"label": "维护负担", "type": SIGNAL_MULT, "clamp": (0.5, 2.0)},
+    "fee_mod": {"label": "冠名费", "type": SIGNAL_MULT, "clamp": (0.5, 2.0)},
+}
+
+
+def signal_clamp_config(cfg: dict) -> dict:
+    """event_signal_config 解析为钳幅字典（非法/缺省回 {}，钳制走内置值）。"""
+    return formula.parse_json_object(cfg.get("event_signal_config", "{}"))
+
+
+def _coerce_signals(v):
+    return v if isinstance(v, dict) else {}
+
+
+async def collect_window_signals(dao, season: int, window_seq: int) -> dict:
+    """汇总本窗口事件信号：{信号名: {队名: [值, ...]}}。
+
+    来源=即发事件 effect_json.signals（全队）+ 选择结算 outcome.effects.signals（按队）。
+    只读事件日志，不落状态——首结与重算同源；未知名/非法值静默跳过。
+    """
+    collected: dict = {}
+
+    def _feed(team: str, signals) -> None:
+        if not isinstance(signals, dict):
+            return
+        for name, raw in signals.items():
+            name = str(name)
+            if name not in SIGNAL_DEFAULTS:
+                continue
+            try:
+                collected.setdefault(name, {}).setdefault(team, []).append(float(raw))
+            except (TypeError, ValueError):
+                continue
+
+    for row in await dao.get_window_events_all(season, window_seq):
+        effects = formula.parse_json_object(row["effect_json"])
+        _feed(row["team_name"], effects.get("signals"))
+    for s in await dao.list_stadiums():
+        for ch in await dao.get_window_choice_outcomes(s["team_name"], season, window_seq):
+            outcome = formula.parse_json_object(ch["outcome"])
+            effects = outcome.get("effects") if isinstance(outcome.get("effects"), dict) else {}
+            _feed(s["team_name"], effects.get("signals"))
+    return collected
+
+
+def step_value(signals: dict, name: str, team: str) -> float:
+    """步进型聚合：某队某信号 Σ；无信号返回 0.0。"""
+    return round(sum((signals.get(name) or {}).get(team) or []), 4)
+
+
+def mult_factor(signals: dict, name: str, team: str, low: float, high: float) -> float:
+    """乘数型聚合：某队某信号 Π(值) 后终钳 [low, high]；无信号返回 1.0。"""
+    values = (signals.get(name) or {}).get(team) or []
+    if not values:
+        return 1.0
+    factor = 1.0
+    for v in values:
+        factor *= float(v)
+    return round(min(max(factor, low), high), 4)
+
+
 EFFECT_SPECS: tuple[EffectSpec, ...] = (
     EffectSpec(key="money", apply=_apply_money, undo=_undo_money,
                describe=_desc_money, clamp=_clamp_money, named_tx=True),
@@ -356,4 +485,6 @@ EFFECT_SPECS: tuple[EffectSpec, ...] = (
                describe=_desc_build_credit, clamp=_clamp_build_credit),
     EffectSpec(key="influence", apply=_apply_influence, undo=_undo_influence,
                describe=_desc_influence, clamp=_clamp_influence),
+    EffectSpec(key="signals", apply=_apply_signals, undo=_undo_noop,
+               describe=_desc_signals, clamp=_clamp_signals, default={}, coerce=_coerce_signals),
 )

@@ -10,7 +10,7 @@ import math
 import random
 from datetime import datetime, timedelta
 
-from .event_effects import EFFECT_SPECS, ApplyContext, CancelContext
+from .event_effects import EFFECT_SPECS, ApplyContext, CancelContext, signal_clamp_config
 from .llm_writer import _fill_template
 from ..utils.security import parse_choice_no
 
@@ -1000,6 +1000,7 @@ class EventEngine:
             "build_credit": float(self._cfg.get("event_build_credit_clamp", 5.0)),
             "influence": float(self._cfg.get("event_influence_clamp", 10.0)),
         }
+        clamps["signals"] = signal_clamp_config(self._cfg)
         event_id = f"custom_{await self._dao.next_event_counter()}"
         if event_type.lower() == "choice":
             try:
