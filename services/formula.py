@@ -16,6 +16,15 @@ FACILITY_PITCH = "pitch"
 FACILITY_YOUTH = "youth"
 FACILITY_MEDICAL = "medical"
 
+# 子设施展示名（键→中文；stadium_service 与效果键 describe 共用）
+FACILITY_NAMES = {
+    FACILITY_COMMERCIAL: "商业区",
+    FACILITY_BROADCAST: "灯光转播",
+    FACILITY_PITCH: "草皮",
+    FACILITY_YOUTH: "青训中心",
+    FACILITY_MEDICAL: "医疗中心",
+}
+
 # 天气键（对应 weather_ranges / weather_probabilities）
 WX_SUNNY = "晴"
 WX_CLOUDY = "多云"

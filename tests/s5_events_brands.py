@@ -1353,3 +1353,220 @@ async def test_llm_design_sanitizes_text_fields():
         assert len(bd) == 1 and bd[0]["brand"] == "冠名品牌", bd
     finally:
         await env.teardown()
+
+
+async def test_structural_keys_clamped():
+    """v2.11.4 结构键钳制：取值域外剔除、delta 收敛 ±1、计数钳上限、标量归一。"""
+    from astrbot_plugin_whleague_revenue_system.services.llm_writer import _clamp_effects
+
+    clamps = {"money": 8.0, "fans": 0.05, "maintenance": 5.0,
+              "satisfaction": 0.5, "brand_heat": 0.3, "booking_cancel": 2.0,
+              "facility_keys": {"pitch", "broadcast"},
+              "activity_keys": {"concert", "open_day"},
+              "weather_keys": {"雨", "雪"}}
+    out = _clamp_effects(
+        {"facility": {"key": "pitch", "delta": 9}, "booking_cancel": {"count": 99},
+         "booking_gift": "open_day", "weather_set": "雨", "offer_spawn": 1}, clamps)
+    assert out["facility"] == {"key": "pitch", "delta": 1}, out
+    assert out["booking_cancel"] == {"count": 2}, out
+    # 标量形态按 ±1 收敛（LLM 无量纲意图），dict 才能表达具体条数
+    assert _clamp_effects({"booking_cancel": 99}, clamps)["booking_cancel"] == {
+        "count": 1}
+    assert out["booking_gift"] == {"type": "open_day"}, out
+    assert out["weather_set"] == {"weather": "雨"}, out
+    assert out["offer_spawn"] == {"count": 1}, out
+    # 域外/零值/负 delta 落空剔除
+    out2 = _clamp_effects(
+        {"facility": {"key": "nope", "delta": 1}, "booking_cancel": 0,
+         "booking_gift": "karaoke", "weather_set": "台风", "offer_spawn": 0}, clamps)
+    assert not ({"facility", "booking_cancel", "booking_gift", "weather_set",
+                 "offer_spawn"} & set(out2)), out2
+    # 键域缺省（None）时不校验取值（手写通道直用场景）
+    out3 = _clamp_effects({"facility": {"key": "youth", "delta": -4},
+                           "weather_set": "晴"}, {"money": 8.0, "fans": 0.05,
+                                                  "maintenance": 5.0})
+    assert out3["facility"] == {"key": "youth", "delta": -1}, out3
+    assert out3["weather_set"] == {"weather": "晴"}, out3
+
+
+async def test_facility_apply_cancel():
+    """v2.11.4 facility：升降级沿建造通道、边界落空回写实际 delta、取消对称反演。"""
+    env = await TestEnv().setup()
+    try:
+        await env.stadium_service.import_attributes("利物浦", influence=150.0)
+        await env.event_engine.add_custom("球场翻新", "基建", 10,
+                                          '{"facility": {"key": "pitch", "delta": 1}}')
+        row = next(r for r in await env.dao.list_events("adopted")
+                   if r["name"] == "球场翻新")
+        r = await env.event_engine.trigger_team("利物浦", 1, 1, event_id=row["event_id"])
+        assert any("设施 草皮 0→1 级" in n for n in r["hits"][0]["notes"]), r["hits"]
+        assert await env.dao.get_facility_level("利物浦", "pitch") == 1
+        log = (await env.dao.get_window_events("利物浦", 1, 1))[0]
+        assert json.loads(log["effect_json"])["facility"] == {"key": "pitch", "delta": 1}
+        c = await env.event_engine.cancel_team_event("利物浦", "球场翻新", 1, 1)
+        assert any("设施 草皮 已回退" in n for n in c["notes"]), c["notes"]
+        assert await env.dao.get_facility_level("利物浦", "pitch") == 0
+        # 下界落空：0 级再降 → 备注落空、实际 delta=0 回写，取消不动等级
+        await env.event_engine.add_custom("草皮降级", "事故", 10,
+                                          '{"facility": {"key": "pitch", "delta": -1}}')
+        row2 = next(r for r in await env.dao.list_events("adopted")
+                    if r["name"] == "草皮降级")
+        r2 = await env.event_engine.trigger_team("利物浦", 1, 1, event_id=row2["event_id"])
+        assert any("最低档" in n for n in r2["hits"][0]["notes"]), r2["hits"]
+        assert await env.dao.get_facility_level("利物浦", "pitch") == 0
+        log2 = [lg for lg in await env.dao.get_window_events("利物浦", 1, 1)
+                if lg["event_id"] == row2["event_id"]][0]
+        assert json.loads(log2["effect_json"])["facility"] == {"key": "pitch", "delta": 0}
+        c2 = await env.event_engine.cancel_team_event("利物浦", "草皮降级", 1, 1)
+        assert not any("已回退" in n for n in c2["notes"]), c2["notes"]
+        assert await env.dao.get_facility_level("利物浦", "pitch") == 0
+        # 重算跳过：状态不动
+        notes = await env.event_engine._apply_effects(
+            "利物浦", 1, 1, {"facility": {"key": "pitch", "delta": -1}}, "复核",
+            apply_state=False)
+        assert any("重算跳过" in n for n in notes), notes
+        assert await env.dao.get_facility_level("利物浦", "pitch") == 0
+    finally:
+        await env.teardown()
+
+
+async def test_booking_cancel_apply_restore():
+    """v2.11.4 booking_cancel：取消本窗最高档位、enrich 明细落盘、取消按明细恢复。"""
+    env = await TestEnv().setup()
+    try:
+        await env.stadium_service.import_attributes("利物浦", influence=150.0)
+        await env.dao.add_booking("利物浦", 1, 1, 1, "concert", "张三")
+        await env.dao.add_booking("利物浦", 1, 1, 2, "esports", "李四")
+        await env.event_engine.add_custom("档期冲突", "事故", 10, '{"booking_cancel": 1}')
+        row = next(r for r in await env.dao.list_events("adopted")
+                   if r["name"] == "档期冲突")
+        r = await env.event_engine.trigger_team("利物浦", 1, 1, event_id=row["event_id"])
+        assert any("档期取消×1（档2 电竞赛事）" in n for n in r["hits"][0]["notes"]), r["hits"]
+        left = await env.dao.get_bookings("利物浦", 1, 1)
+        assert [int(b["slot_no"]) for b in left] == [1], left
+        log = (await env.dao.get_window_events("利物浦", 1, 1))[0]
+        enriched = json.loads(log["effect_json"])["booking_cancel"]
+        assert enriched == {"count": 1, "cancelled": [
+            {"slot_no": 2, "activity_type": "esports", "booked_by": "李四"}]}, enriched
+        # 取消事件：按明细恢复原档位/活动/预订人
+        c = await env.event_engine.cancel_team_event("利物浦", "档期冲突", 1, 1)
+        assert any("已恢复被取消的档期×1" in n for n in c["notes"]), c["notes"]
+        back = {int(b["slot_no"]): b for b in await env.dao.get_bookings("利物浦", 1, 1)}
+        assert back[2]["activity_type"] == "esports" and back[2]["booked_by"] == "李四", back
+        # 恢复后再取消：档2 先被取消、又被他人重占 → warning、档1 不受影响
+        await env.event_engine.trigger_team("利物浦", 1, 1, event_id=row["event_id"])
+        await env.dao.add_booking("利物浦", 1, 1, 2, "concert", "王五")
+        c2 = await env.event_engine.cancel_team_event("利物浦", "档期冲突", 1, 1)
+        assert any("已被重新占用" in w for w in c2["warnings"]), c2["warnings"]
+        slots = sorted(int(b["slot_no"]) for b in await env.dao.get_bookings("利物浦", 1, 1))
+        assert slots == [1, 2], slots
+    finally:
+        await env.teardown()
+
+
+async def test_booking_gift_and_cancel():
+    """v2.11.4 booking_gift：赠最低空档位（booked_by=事件）、满则落空、撤销仅删事件赠送。"""
+    env = await TestEnv().setup()
+    try:
+        await env.stadium_service.import_attributes("利物浦", influence=150.0)
+        await env.event_engine.add_custom("粉丝福利", "运营", 10, '{"booking_gift": "open_day"}')
+        row = next(r for r in await env.dao.list_events("adopted")
+                   if r["name"] == "粉丝福利")
+        r = await env.event_engine.trigger_team("利物浦", 1, 1, event_id=row["event_id"])
+        assert any("档期赠送：球迷开放日（档1）" in n for n in r["hits"][0]["notes"]), r["hits"]
+        b = (await env.dao.get_bookings("利物浦", 1, 1))[0]
+        assert int(b["slot_no"]) == 1 and b["activity_type"] == "open_day" \
+            and b["booked_by"] == "事件", b
+        log = (await env.dao.get_window_events("利物浦", 1, 1))[0]
+        assert json.loads(log["effect_json"])["booking_gift"] == {
+            "type": "open_day", "slot_no": 1}
+        # 撤销：仅该档为事件赠送才删
+        c = await env.event_engine.cancel_team_event("利物浦", "粉丝福利", 1, 1)
+        assert any("赠送档期已撤销" in n for n in c["notes"]), c["notes"]
+        assert await env.dao.get_bookings("利物浦", 1, 1) == []
+        # 满则落空（两档都被占用）：无 slot_no enrich，取消静默不崩
+        await env.dao.add_booking("利物浦", 1, 1, 1, "concert", "运营组")
+        await env.dao.add_booking("利物浦", 1, 1, 2, "concert", "运营组")
+        r2 = await env.event_engine.trigger_team("利物浦", 1, 1, event_id=row["event_id"])
+        assert any("已满" in n for n in r2["hits"][0]["notes"]), r2["hits"]
+        c2 = await env.event_engine.cancel_team_event("利物浦", "粉丝福利", 1, 1)
+        assert not any("赠送档期已撤销" in n for n in c2["notes"]), c2["notes"]
+        assert len(await env.dao.get_bookings("利物浦", 1, 1)) == 2
+    finally:
+        await env.teardown()
+
+
+async def test_weather_set_apply_cancel():
+    """v2.11.4 weather_set：改下一场未赛主场天气、取消恢复原值、已录赛果不回退。"""
+    env = await TestEnv().setup()
+    try:
+        await env.stadium_service.import_attributes("利物浦", influence=150.0)
+        await env.dao.add_match(1, 1, 1, "利物浦", "曼联")
+        await env.event_engine.add_custom("人工降雨", "天气", 10, '{"weather_set": "雨"}')
+        row = next(r for r in await env.dao.list_events("adopted")
+                   if r["name"] == "人工降雨")
+        r = await env.event_engine.trigger_team("利物浦", 1, 1, event_id=row["event_id"])
+        assert any("主场天气改为「雨」" in n for n in r["hits"][0]["notes"]), r["hits"]
+        m = await env.dao.get_match(1)
+        assert m["weather"] == "雨", dict(m)
+        log = (await env.dao.get_window_events("利物浦", 1, 1))[0]
+        assert json.loads(log["effect_json"])["weather_set"] == {
+            "weather": "雨", "match_id": 1, "old": None}
+        c = await env.event_engine.cancel_team_event("利物浦", "人工降雨", 1, 1)
+        assert any("已回退" in n for n in c["notes"]), c["notes"]
+        m = await env.dao.get_match(1)
+        assert m["weather"] is None, dict(m)
+        # 已录赛果：可触发但不回退（warning）
+        await env.event_engine.trigger_team("利物浦", 1, 1, event_id=row["event_id"])
+        await env.dao.set_match_result(1, "已赛", 30000, 1.0, 0.5, 0.3)
+        c2 = await env.event_engine.cancel_team_event("利物浦", "人工降雨", 1, 1)
+        assert any("已录赛果" in w for w in c2["warnings"]), c2["warnings"]
+        m = await env.dao.get_match(1)
+        assert m["weather"] == "雨", dict(m)
+    finally:
+        await env.teardown()
+
+
+async def test_offer_spawn_apply_cancel():
+    """v2.11.4 offer_spawn：未签约品牌按热度上门递价（稳健套餐）、取消撤销 pending 报价。"""
+    from astrbot_plugin_whleague_revenue_system.services import formula
+
+    env = await TestEnv().setup()
+    try:
+        await env.stadium_service.import_attributes("利物浦", influence=150.0)
+        await env.dao.open_market_round(1, 1, "明标", "test")
+        await env.db.execute("DELETE FROM brand_pool")
+        await env.dao.add_brand("星际冷却液", 1.2, "llm", industry="科技")
+        await env.event_engine.add_custom("品牌上门", "招商", 10, '{"offer_spawn": 1}')
+        row = next(r for r in await env.dao.list_events("adopted")
+                   if r["name"] == "品牌上门")
+        r = await env.event_engine.trigger_team("利物浦", 1, 1, event_id=row["event_id"])
+        notes = r["hits"][0]["notes"]
+        assert any("上门递价" in n and "/主场签约 可签" in n for n in notes), notes
+        offers = await env.dao.list_pending_offers_for_team("利物浦")
+        assert len(offers) == 1, offers
+        offer = offers[0]
+        assert offer["status"] == "pending" and offer["windows"] >= 1, dict(offer)
+        assert offer["amount"] > 0, dict(offer)
+        # 报价金额 = naming_fee × industry_factor（稳健套餐口径）
+        s = await env.dao.get_stadium("利物浦")
+        brand = await env.dao.get_brand_by_name("星际冷却液")
+        expect = round(formula.naming_fee(env.cfg, float(s["capacity"]),
+                                          float(s["fans_diehards"]), float(brand["heat"]))
+                       * formula.industry_factor(env.cfg, "科技"), 3)
+        pkg = formula.parse_json_object(offer["package_json"])
+        assert abs(pkg["base_fee"] - expect) < 1e-6, (pkg, expect)
+        log = (await env.dao.get_window_events("利物浦", 1, 1))[0]
+        assert json.loads(log["effect_json"])["offer_spawn"] == {
+            "offer_id": int(offer["id"])}, log["effect_json"]
+        # 取消事件 → pending 报价被删
+        c = await env.event_engine.cancel_team_event("利物浦", "品牌上门", 1, 1)
+        assert any("上门报价已撤销" in n for n in c["notes"]), c["notes"]
+        assert await env.dao.list_pending_offers_for_team("利物浦") == []
+        # 无开放轮次：落空备注、不生成报价
+        await env.dao.settle_market_round(1)
+        r2 = await env.event_engine.trigger_team("利物浦", 1, 1, event_id=row["event_id"])
+        assert any("无开放招商轮次" in n for n in r2["hits"][0]["notes"]), r2["hits"]
+        assert await env.dao.list_pending_offers_for_team("利物浦") == []
+    finally:
+        await env.teardown()

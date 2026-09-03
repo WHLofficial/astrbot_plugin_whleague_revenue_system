@@ -477,6 +477,9 @@ class StadiumDAO:
     async def set_match_weather(self, match_id: int, weather: str) -> None:
         await self._db.execute("UPDATE matches SET weather=? WHERE id=?", (weather, match_id))
 
+    async def get_match(self, match_id: int):
+        return await self._db.fetchone("SELECT * FROM matches WHERE id=?", (match_id,))
+
     async def set_match_result(
         self, match_id: int, result: str, attendance: int,
         ticket_revenue: float, commercial: float, broadcast: float, score: str | None = None,
@@ -711,6 +714,16 @@ class StadiumDAO:
             (offer_id,),
         )
 
+    async def delete_market_offer(self, offer_id: int) -> int:
+        """删除仍处 pending 的报价行；已被签约/过期的不删，返回删除行数。"""
+        cur = await self._db.execute(
+            "DELETE FROM market_offers WHERE id=? AND status='pending'", (offer_id,),
+        )
+        try:
+            return int(cur.rowcount or 0)
+        finally:
+            await cur.close()
+
     async def list_pending_offers_for_team(self, team_name: str) -> list:
         """本队当前收到的报价（挂 open 轮；含已过期，展示层标注）。"""
         return await self._db.fetchall(
@@ -872,6 +885,18 @@ class StadiumDAO:
             "SELECT * FROM venue_bookings WHERE team_name=? AND season_number=? AND window_seq=? ORDER BY slot_no",
             (team_name, season, window_seq),
         )
+
+    async def delete_booking(self, team_name: str, season: int, window_seq: int,
+                             slot_no: int) -> int:
+        cur = await self._db.execute(
+            "DELETE FROM venue_bookings WHERE team_name=? AND season_number=? "
+            "AND window_seq=? AND slot_no=?",
+            (team_name, season, window_seq, slot_no),
+        )
+        try:
+            return int(cur.rowcount or 0)
+        finally:
+            await cur.close()
 
     async def clear_bookings(self, season: int, window_seq: int) -> None:
         await self._db.execute(

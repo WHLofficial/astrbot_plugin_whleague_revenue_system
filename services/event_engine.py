@@ -10,6 +10,7 @@ import math
 import random
 from datetime import datetime, timedelta
 
+from . import formula
 from .event_effects import EFFECT_SPECS, ApplyContext, CancelContext, signal_clamp_config
 from .llm_writer import _fill_template
 from ..utils.security import parse_choice_no
@@ -407,7 +408,8 @@ class EventEngine:
         await self._dao.ensure_balance(team_name, float(self._cfg.get("start_funds", 50.0)))
         ctx = ApplyContext(dao=self._dao, cfg=self._cfg, team=team_name, season=season,
                            window_seq=window_seq, label=label,
-                           apply_state=apply_state, created_ids=created_ids)
+                           apply_state=apply_state, created_ids=created_ids,
+                           raw=effects)
         for spec in EFFECT_SPECS:
             await spec.apply(ctx, spec.coerce(effects.get(spec.key, spec.default)))
         return ctx.notes
@@ -460,15 +462,14 @@ class EventEngine:
     def _num(n) -> str:
         return {1: "①", 2: "②", 3: "③", 4: "④"}.get(int(n), f"{n}.")
 
-    @staticmethod
-    def _outcome_desc(effects: dict) -> str:
+    def _outcome_desc(self, effects: dict) -> str:
         """结果效果的人类可读描述，与结算备注口径一致（用于选项概率表）。
 
         逐键取自效果注册表 describe（顺序 = 注册表顺序）。
         """
         parts = []
         for spec in EFFECT_SPECS:
-            desc = spec.describe(spec.coerce(effects.get(spec.key, spec.default)))
+            desc = spec.describe(spec.coerce(effects.get(spec.key, spec.default)), self._cfg)
             if desc:
                 parts.append(desc)
         return "、".join(parts) if parts else "无变化"
@@ -981,7 +982,7 @@ class EventEngine:
                          options_text: str = "") -> None:
         """手写自定义事件。
 
-        即发型：effects_text 为 JSON 文本（money/fans_pct/maintenance/attendance_mod/satisfaction/brand_heat/build_credit/influence）；
+        即发型：effects_text 为 JSON 文本（效果键见 EVENT_KEYS.md，支持 14 键全量）；
         选择型：options_text 为选项 JSON 数组文本（结构同 LLM 草稿，效果自动钳制）。
         """
         from .llm_writer import _clamp_effects, _clamp_event
@@ -1001,6 +1002,10 @@ class EventEngine:
             "influence": float(self._cfg.get("event_influence_clamp", 10.0)),
         }
         clamps["signals"] = signal_clamp_config(self._cfg)
+        clamps["booking_cancel"] = float(self._cfg.get("event_booking_cancel_clamp", 2.0))
+        clamps["facility_keys"] = set(formula.facility_effects(self._cfg))
+        clamps["activity_keys"] = set(formula.activity_names(self._cfg))
+        clamps["weather_keys"] = set(formula.weather_probabilities(self._cfg))
         event_id = f"custom_{await self._dao.next_event_counter()}"
         if event_type.lower() == "choice":
             try:

@@ -11,6 +11,7 @@ import re
 from astrbot.api import logger
 
 from ..utils.security import sanitize_text
+from . import formula
 from .event_effects import EFFECT_SPECS, signal_clamp_config
 
 _JSON_BLOCK_RE = re.compile(r"```(?:json)?\s*(.*?)```", re.S)
@@ -171,9 +172,18 @@ class LlmWriter:
             "influence": float(self._cfg.get("event_influence_clamp", 10.0)),
         }
         clamps["signals"] = signal_clamp_config(self._cfg)
+        clamps["booking_cancel"] = float(self._cfg.get("event_booking_cancel_clamp", 2.0))
+        # 结构键的合法取值域：设施/活动/天气键来自配置（缺省不校验）
+        clamps["facility_keys"] = set(formula.facility_effects(self._cfg))
+        clamps["activity_keys"] = set(formula.activity_names(self._cfg))
+        clamps["weather_keys"] = set(formula.weather_probabilities(self._cfg))
         sat_c, heat_c = clamps["satisfaction"], clamps["brand_heat"]
         bc_c, inf_c = clamps["build_credit"], clamps["influence"]
         sig_c = clamps["signals"]
+        fac_names = formula.FACILITY_NAMES
+        act_names = formula.activity_names(self._cfg)
+        wx_names = formula.weather_probabilities(self._cfg)
+        cancel_c = clamps["booking_cancel"]
         prompt = (
             "为足球联赛主场随机事件系统设计新事件。\n"
             f"任务：设计 {count} 个事件，主题：{topic or '不限'}。\n"
@@ -193,13 +203,24 @@ class LlmWriter:
             f"fee_mod 冠名费乘数 {sig_c.get('fee_mod_low', 0.5)}~"
             f"{sig_c.get('fee_mod_high', 2.0)}（乘本队冠名费，仅冠名队实际生效）；"
             "未知名会被剔除。\n"
+            "结构类效果（可选，直接改动球队设施/档期/天气/招商）："
+            f"facility 设施升降级（dict {{\"key\":设施键,\"delta\":±1}}，设施键："
+            + "、".join(f"{k}={fac_names.get(k, k)}" for k in fac_names) + "）；"
+            f"booking_cancel 档期取消（1~{cancel_c:g}，取消该队本窗已订活动中档位最高的那条）；"
+            "booking_gift 档期赠送（活动类型串，赠一档填本窗最低空档位，活动类型："
+            + "、".join(str(k) for k in act_names) + "）；"
+            "weather_set 天气设定（该队下一场未赛主场天气，取值："
+            + "、".join(str(k) for k in wx_names) + "）；"
+            "offer_spawn 品牌上门（1=一个未签约品牌按热度上门递价，挂当前招商轮）。\n"
             "输出 JSON 数组，只输出数组本身，不要任何解释或多余文字。每个元素为以下两类之一：\n"
             "一、即发事件：{\"event_type\":\"instant\",\"name\":\"事件名(≤20字)\","
             "\"category\":\"分类(≤10字)\",\"weight\":权重整数1~100,"
             "\"effects\":{\"money\":金额M,\"fans_pct\":死忠比例小数,\"maintenance\":维护额外支出M,"
             "\"satisfaction\":品牌满意度变化(可选),\"brand_heat\":品牌热度变化(可选),"
             "\"build_credit\":建设券变化M(可选),\"influence\":影响力变化(可选),"
-            "\"signals\":{信号名:数值}(可选)},"
+            "\"signals\":{信号名:数值}(可选),\"facility\":{设施效果}(可选),"
+            "\"booking_cancel\":取消档数(可选),\"booking_gift\":活动类型(可选),"
+            "\"weather_set\":天气(可选),\"offer_spawn\":1(可选)},"
             "\"template\":\"≤200字播报文案，必须包含{team}和{stadium}占位符\"}\n"
             "   例：{\"event_type\":\"instant\",\"name\":\"草坪闯入者\",\"category\":\"场务\","
             "\"weight\":30,\"effects\":{\"money\":-2.0,\"fans_pct\":0.01,\"maintenance\":1.5},"

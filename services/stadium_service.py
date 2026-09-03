@@ -28,13 +28,7 @@ _FACILITY_KEYS = (
     formula.FACILITY_MEDICAL,
 )
 
-_FACILITY_NAMES = {
-    formula.FACILITY_COMMERCIAL: "商业区",
-    formula.FACILITY_BROADCAST: "灯光转播",
-    formula.FACILITY_PITCH: "草皮",
-    formula.FACILITY_YOUTH: "青训中心",
-    formula.FACILITY_MEDICAL: "医疗中心",
-}
+_FACILITY_NAMES = formula.FACILITY_NAMES
 
 
 class StadiumService:

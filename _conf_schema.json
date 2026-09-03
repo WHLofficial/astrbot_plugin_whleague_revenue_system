@@ -251,6 +251,12 @@
     "type": "float",
     "default": 10.0
   },
+  "event_booking_cancel_clamp": {
+    "description": "事件档期取消钳制",
+    "hint": "LLM 设计/手写事件时 booking_cancel 档期取消条数上限。",
+    "type": "float",
+    "default": 2.0
+  },
   "event_signal_config": {
     "description": "事件信号参数",
     "hint": "内部参数，请勿修改。JSON：fan_mood_clamp 粉丝情绪步进钳幅（百分点）；upkeep_low/high、fee_mod_low/high 维护负担/冠名费乘数终钳。",

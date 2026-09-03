@@ -6,7 +6,7 @@
 
 设计背景见 `EVENT_INTERACTION_BRAINSTORM.md`；本文档随新键落地持续更新。
 
-## 登记表（v2.11.3 时点）
+## 登记表（v2.11.4 时点）
 
 | 键 | 量纲 | apply 落点 | 钳制（默认 / config 键） | 撤销语义 | describe 文案 | 消费者 |
 |---|---|---|---|---|---|---|
@@ -19,6 +19,11 @@
 | `build_credit` | M，± | `club_balance.build_credit` 列直改（沿建设券通道，不带余额流水） | ±5.0 / `event_build_credit_clamp` | 反向加减（可透支为负，`deduct_build_credit` 只扣不抵） | `建设券+3.0M` | 设施建造/扩建消耗 |
 | `influence` | 点，±（基准值量纲 0~200） | `stadium.influence` 基准值直改，下钳 0 | ±10.0 / `event_influence_clamp` | 反向加减，触 0 下界记 warning | `影响力+5.0` | 死忠目标/上座等读 live 值自动跟随 |
 | `signals` | dict，信号名→数值 | 不落库，仅出备注；窗口结算时按信号名分发给订阅者 | fan_mood ±2.0、upkeep/fee_mod [0.5,2.0] / `event_signal_config` | 无（同 satisfaction） | `粉丝情绪+0.3 / 冠名费×0.8` | 见下方信号总线 |
+| `facility` | dict `{"key":设施键,"delta":±1}` | `stadium_facilities.level` 沿建造通道升降，钳 [0, 配置最高档] | delta 收敛 ±1；key 须在 `facility_effects` 域内 | 反向 delta 再钳边界；已被手动调整记 warning | `设施草皮+1级` | 商业/转播收入、维护费公式 |
+| `booking_cancel` | 1~2（`event_booking_cancel_clamp`） | 删该队本窗档位最高已订档期；apply 时把取消明细 enrich 进 effects | [0, clamp] / `event_booking_cancel_clamp` | 按 enrich 明细逐条恢复占位（slot/activity/booked_by）；被重占记 warning | `档期取消×1` | 档期收入（本窗结算） |
+| `booking_gift` | 活动类型串 | 赠本窗最低空档位（`booked_by=事件`）；满则落空 | type 须在 `activity_config` 域内 | 仅当该档仍为同类型且 `booked_by=事件` 才删；被替换记 warning | `赠档期:球迷开放日` | 档期结算（正常出收益/损毁） |
+| `weather_set` | 天气串 | 该队下一场未赛主场 `matches.weather`；后动可再被 forecast 覆盖 | weather 须在 `weather_probabilities` 域内 | 三重校验后恢复原值（可能为 NULL）；已赛果/被覆盖记 warning | `天气→下雨` | 比赛收入/维护的天气系数 |
+| `offer_spawn` | 1 | 未签约品牌按 heat 加权上门递价（稳健套餐、行业系数、挂当前招商轮、TTL=`market_offer_ttl_hours`） | truthy→1 | 无报价→已过期清理记 warning；非 pending→已签约不撤销；pending→删除 | `品牌上门` | 市场签约流程 |
 
 补充语义：
 
@@ -37,6 +42,16 @@
   重应用）。未知名写入侧剔除、消费侧跳过；只读事件日志不落状态（`collect_window_signals`）。
 - `_worst_option` 未定选项兜底只按 `money − maintenance` 净额比较——**非资金键不参与**，
   这是刻意保留的口径（净额概念只对资金键有意义）。
+- **结构键的发现状态经 `ApplyContext.raw + enrich` 落盘**：apply 前不知道会取消哪条档期、
+  改哪场天气、生成哪个报价——apply 时把发现结果（取消明细/原天气/offer_id）原位写回
+  effects 源字典，引擎 apply 后才序列化落盘，取消反演由此取回精确状态。redo
+  （apply_state=False）不落状态也不增补，重算后持久化的仍是普通值。
+- **结构键落库时序**：`booking_gift` 走 `booked_by="事件"` 通道，档期结算照常出收益/
+  草皮损毁；`weather_set` 先于 forecast 掷骰生效（同一窗口内后动者优先覆盖）；
+  `offer_spawn` 复用市场稳健套餐口径（`naming_fee × industry_factor`、TTL 同
+  `market_offer_ttl_hours`），只挂当前开放的招商轮（无轮次落空）。
+- 结构键取值域（设施/活动/天气）在 llm_writer 与 add_custom 两处 clamps 里以
+  `facility_keys` / `activity_keys` / `weather_keys` 注入，域外值在钳制层剔除。
 
 ## 新键接入指南（注册表化后共 4 处）
 
