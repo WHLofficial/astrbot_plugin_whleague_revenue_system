@@ -177,6 +177,7 @@ class LlmWriter:
         clamps["facility_keys"] = set(formula.facility_effects(self._cfg))
         clamps["activity_keys"] = set(formula.activity_names(self._cfg))
         clamps["weather_keys"] = set(formula.weather_probabilities(self._cfg))
+        clamps["facility_max_level"] = len(formula.facility_upgrade_costs(self._cfg))
         sat_c, heat_c = clamps["satisfaction"], clamps["brand_heat"]
         bc_c, inf_c = clamps["build_credit"], clamps["influence"]
         sig_c = clamps["signals"]
@@ -212,9 +213,22 @@ class LlmWriter:
             "weather_set 天气设定（该队下一场未赛主场天气，取值："
             + "、".join(str(k) for k in wx_names) + "）；"
             "offer_spawn 品牌上门（1=一个未签约品牌按热度上门递价，挂当前招商轮）。\n"
+            "触发条件 conditions（可选，dict，全部条件同时满足才会自然触发）："
+            "min_tier/max_tier 球场档位下/上限（整数 1~5）、"
+            "min_capacity/max_capacity 容量下/上限（人）、"
+            "min_fans/max_fans 死忠球迷数下/上限（人）、"
+            "min_balance/max_balance 资金余额下/上限（M）、"
+            "facility_min 设施最低等级（dict {{\"key\":最低级}}，设施键同上）、"
+            "weather_is 下一场未赛主场天气（取值：" + "、".join(str(k) for k in wx_names) + "）、"
+            "last_result 最近一场已完赛主场赛果（win/draw/loss）；"
+            "requires_naming 仅当有冠名品牌（true）、"
+            "requires_activity 本窗已订某活动（活动类型同上）。\n"
+            "soft_conditions（可选）：置 1 时上述条件不满足不再硬性排除该事件，"
+            "而是按权重衰减后仍可能触发（适合低概率天灾类，让事件偶发于不满足条件的球队）。\n"
             "输出 JSON 数组，只输出数组本身，不要任何解释或多余文字。每个元素为以下两类之一：\n"
             "一、即发事件：{\"event_type\":\"instant\",\"name\":\"事件名(≤20字)\","
             "\"category\":\"分类(≤10字)\",\"weight\":权重整数1~100,"
+            "\"conditions\":{触发条件}(可选),\"soft_conditions\":0或1(可选),"
             "\"effects\":{\"money\":金额M,\"fans_pct\":死忠比例小数,\"maintenance\":维护额外支出M,"
             "\"satisfaction\":品牌满意度变化(可选),\"brand_heat\":品牌热度变化(可选),"
             "\"build_credit\":建设券变化M(可选),\"influence\":影响力变化(可选),"
@@ -227,6 +241,7 @@ class LlmWriter:
             "\"template\":\"一只训练海豚闯入{stadium}，{team}的工作人员手忙脚乱。\"}\n"
             "二、选择事件：{\"event_type\":\"choice\",\"name\":\"事件名(≤20字)\","
             "\"category\":\"分类(≤10字)\",\"weight\":权重整数1~100,"
+            "\"conditions\":{触发条件}(可选),\"soft_conditions\":0或1(可选),"
             "\"template\":\"≤200字广播文案，必须包含{team}和{stadium}占位符\","
             "\"options\":[{\"name\":\"操作名\",\"desc\":\"≤40字说明\","
             "\"outcomes\":[{\"w\":概率权重整数,\"effects\":{同上效果}},…]},…]}\n"
@@ -379,6 +394,66 @@ def _clamp_effects(effects, clamps: dict) -> dict:
     return out
 
 
+def _clamp_conditions(raw, clamps: dict) -> dict:
+    """条件键白名单钳制：数值键取整≥0、枚举键域外剔除、结构键逐项校验。"""
+    if not isinstance(raw, dict):
+        return {}
+
+    def _nonneg_int(v):
+        try:
+            n = int(float(v))
+        except (TypeError, ValueError):
+            return None
+        return n if n >= 0 else None
+
+    out: dict = {}
+    for key in ("min_tier", "max_tier", "min_capacity", "max_capacity",
+                "min_fans", "max_fans", "min_balance", "max_balance"):
+        if key in raw:
+            n = _nonneg_int(raw[key])
+            if n is not None:
+                out[key] = n
+    if raw.get("requires_naming") in (True, 1, "1", "true", "True"):
+        out["requires_naming"] = True
+    act = raw.get("requires_activity")
+    if act is not None:
+        act = str(act)
+        keys = clamps.get("activity_keys")
+        if not keys or act in keys:
+            out["requires_activity"] = act
+    fmin = raw.get("facility_min")
+    if isinstance(fmin, dict) and fmin:
+        max_lv = int(clamps.get("facility_max_level", 5))
+        keys = clamps.get("facility_keys")
+        cleaned = {}
+        for k, v in fmin.items():
+            n = _nonneg_int(v)
+            if n is None or not (1 <= n <= max_lv):
+                continue
+            if keys and str(k) not in keys:
+                continue
+            cleaned[str(k)] = n
+        if cleaned:
+            out["facility_min"] = cleaned
+    wx = raw.get("weather_is")
+    if wx is not None:
+        wx = str(wx)
+        keys = clamps.get("weather_keys")
+        if not keys or wx in keys:
+            out["weather_is"] = wx
+    last = raw.get("last_result")
+    if last is not None:
+        norm = {"win": "win", "w": "win", "draw": "draw", "d": "draw",
+                "loss": "loss", "l": "loss"}.get(str(last).strip().lower())
+        if norm:
+            out["last_result"] = norm
+    return out
+
+
+def _soft_flag(d) -> int:
+    return 1 if d.get("soft_conditions") in (1, True, "1", "true", "True") else 0
+
+
 def _clamp_choice_event(d, clamps: dict) -> dict:
     """校验并钳制选择型事件：2~4 个选项、每选项≥2条概率结果、概率归一、正负路径保障。"""
     name = sanitize_text(str(d.get("name", "")))
@@ -406,6 +481,7 @@ def _clamp_choice_event(d, clamps: dict) -> dict:
         for x in outcomes:
             x["w"] = round(x["w"] / total * 100, 1)
         # 保证每项选择带一条负面与一条正面路径（净额 = 资金 − 维护）
+        money_clamp = float(clamps.get("money", 8.0))
         nets = [x["effects"]["money"] - x["effects"]["maintenance"] for x in outcomes]
         if min(nets) >= 0:
             outcomes[-1]["effects"]["money"] = round(-min(1.0, max(0.5, money_clamp * 0.1)), 3)
@@ -417,6 +493,8 @@ def _clamp_choice_event(d, clamps: dict) -> dict:
             "options": options,
             "category": sanitize_text(str(d.get("category", "自定义")), 10) or "自定义",
             "weight": max(1, min(100, int(d.get("weight", 10)))),
+            "conditions": _clamp_conditions(d.get("conditions"), clamps),
+            "soft_conditions": _soft_flag(d),
             "template": sanitize_text(str(d.get("template", "")), 200) or f"{name}：{{team}} 的球场发生了趣事。"}
 
 
@@ -433,6 +511,8 @@ def _clamp_event(d, clamps: dict) -> dict:
         "category": sanitize_text(str(d.get("category", "自定义")), 10) or "自定义",
         "weight": max(1, min(100, int(d.get("weight", 10)))),
         "event_type": "instant",
+        "conditions": _clamp_conditions(d.get("conditions"), clamps),
+        "soft_conditions": _soft_flag(d),
         "effects": effects,
         "template": sanitize_text(str(d.get("template", "")), 200) or f"{name}：{{team}} 的球场发生了趣事。",
     }

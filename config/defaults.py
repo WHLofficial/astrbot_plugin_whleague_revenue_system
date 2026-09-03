@@ -79,6 +79,7 @@ _FLOAT_RANGES = {
     "event_build_credit_clamp": (0.0, 1000.0),
     "event_influence_clamp": (0.0, 200.0),
     "event_booking_cancel_clamp": (0.0, 10.0),
+    "event_soft_condition_factor": (0.0, 1.0),
     "start_funds": (0.0, 1e9),
     "build_credit_ratio": (0.0, 1.0),
     "llm_timeout_seconds": (1, 300),

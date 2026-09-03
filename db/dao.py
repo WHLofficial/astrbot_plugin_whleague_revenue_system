@@ -908,13 +908,21 @@ class StadiumDAO:
     async def upsert_event(self, event_id: str, name: str, category: str, weight: int,
                            conditions_json: str, effects_json: str, template: str,
                            source: str, status: str,
-                           event_type: str = "instant", options_json: str = "{}") -> None:
+                           event_type: str = "instant", options_json: str = "{}",
+                           soft_conditions: int = 0) -> None:
         await self._db.execute(
             "INSERT OR REPLACE INTO event_pool (event_id, name, category, weight, conditions_json, "
-            "effects_json, options_json, event_type, template, source, status) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "effects_json, options_json, soft_conditions, event_type, template, source, status) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (event_id, name, category, weight, conditions_json, effects_json,
-             options_json, event_type, template, source, status),
+             options_json, int(soft_conditions), event_type, template, source, status),
+        )
+
+    async def get_last_finished_home(self, team_name: str):
+        """最近一场已完赛（result 非空）主场；无则 None。"""
+        return await self._db.fetchone(
+            "SELECT * FROM matches WHERE home_team=? AND result IS NOT NULL "
+            "ORDER BY id DESC LIMIT 1", (team_name,)
         )
 
     async def list_events(self, status: str | None = None) -> list:

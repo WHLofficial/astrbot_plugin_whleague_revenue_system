@@ -1,6 +1,6 @@
 from astrbot.api import logger
 
-SCHEMA_VERSION = 11
+SCHEMA_VERSION = 12
 
 SQL_CREATE_TABLES = r"""
 
@@ -155,6 +155,7 @@ CREATE TABLE IF NOT EXISTS event_pool (
     conditions_json TEXT NOT NULL DEFAULT '{}',
     effects_json TEXT NOT NULL DEFAULT '{}',
     options_json TEXT NOT NULL DEFAULT '{}',
+    soft_conditions INTEGER NOT NULL DEFAULT 0,
     event_type TEXT NOT NULL DEFAULT 'instant',
     template TEXT NOT NULL DEFAULT '',
     source TEXT NOT NULL DEFAULT 'builtin',
@@ -634,3 +635,13 @@ async def _migrate(db, current_version: int):
         )
         await db.commit()
         logger.info("Migrated window_fans_log: per-team diehard snapshot per window.")
+
+    if current_version < 12:
+        # 事件池软条件开关：置 1 时条件不满足按权重衰减而非硬剔除（动态权重）
+        cols = await _table_columns(db, "event_pool")
+        if "soft_conditions" not in cols:
+            await db.execute(
+                "ALTER TABLE event_pool ADD COLUMN soft_conditions INTEGER NOT NULL DEFAULT 0"
+            )
+        await db.commit()
+        logger.info("Migrated event_pool: added soft_conditions column.")

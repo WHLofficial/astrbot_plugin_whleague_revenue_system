@@ -68,3 +68,26 @@
    若涉及结算/行情联动，另在 s4/s16 增消费者侧用例。
 
 帮助文本同步：`handlers/admin.py` `add_custom_event` 用法行的效果键清单。
+
+## 条件键登记（v2.11.5，`event_pool.conditions_json`）
+
+判定入口：`event_engine._condition_ok`（抽取时逐队评估；`trigger_team` 指定事件不做条件判定）。
+所有键为「与」关系，全部满足才自然触发。
+
+| 键 | 量纲 | 判定 |
+| --- | --- | --- |
+| min_tier / max_tier | 档位 1~5 | `stadium.tier` 下/上界 |
+| min_capacity / max_capacity | 人 | `stadium.capacity` 下/上界 |
+| min_fans / max_fans | 人 | `stadium.fans_diehards` 下/上界 |
+| min_balance / max_balance | M | `club_balance.balance`（无行按 0）下/上界 |
+| facility_min | `{"key": 等级}` | `stadium_facilities.level` 逐项 ≥；设施键取值域同 facility |
+| weather_is | 天气串 | 下一场未赛主场 `matches.weather` 相等；无未赛主场不满足 |
+| last_result | win/draw/loss | 最近一场已完赛主场赛果（`result_from_score(score)`）；无完赛主场不满足 |
+| requires_naming | true | 当前有生效冠名合同 |
+| requires_activity | 活动类型串 | 本窗已订该活动；取值域同 booking_gift |
+
+软条件动态权重：`event_pool.soft_conditions`（schema v12 新列，默认 0=硬门控）。置 1 时
+条件不满足不剔除，改按 `weight × event_soft_condition_factor`（默认 0.25）衰减参与抽取。
+新增接线：配置键注册 `_conf_schema.json` + `config/defaults.py` 范围；LLM 白名单
+`llm_writer._clamp_conditions`（design_events 与即发/选择两钳制共用）；`generate_drafts`
+持久化 conditions/soft_conditions；`admin.add_custom` 手写事件可带 conditions 与软开关。

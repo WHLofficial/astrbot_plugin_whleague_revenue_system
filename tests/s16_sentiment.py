@@ -224,7 +224,7 @@ async def test_new_builtin_events_seeded():
             assert len(json.loads(ev["options_json"])) == 2
         # 条件过滤：无冠名不符合，有冠名符合
         ev = pool["brand_cocreate"]
-        stadium = {"tier": 4, "capacity": 50000}
+        stadium = {"tier": 4, "capacity": 50000, "fans_diehards": 0.0}
         assert not await env.event_engine._condition_ok(ev, stadium, False, [])
         assert await env.event_engine._condition_ok(ev, stadium, True, [])
         # 有冠名可触发为选择型事件

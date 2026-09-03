@@ -1527,6 +1527,166 @@ async def test_weather_set_apply_cancel():
         await env.teardown()
 
 
+async def test_condition_keys_extended():
+    """v2.11.5 条件键直测：fans/balance/facility_min/weather_is/last_result。"""
+    env = await TestEnv().setup()
+    try:
+        await env.stadium_service.import_attributes("利物浦", influence=150.0)
+        dao, engine = env.dao, env.event_engine
+        st = await dao.get_stadium("利物浦")
+
+        async def ok(cond):
+            return await engine._condition_ok(
+                {"conditions_json": json.dumps(cond, ensure_ascii=False)}, st, False, [])
+
+        # fans_diehards 基线（import 后），先读实际值再设界
+        fans = float(st["fans_diehards"] or 0.0)
+        assert await ok({"min_fans": fans, "max_fans": fans})
+        assert not await ok({"min_fans": fans + 1})
+        assert not await ok({"max_fans": fans - 1})
+        # 资金：读实际余额定界，再看加钱后判定翻转
+        bal0 = float((await dao.get_balance("利物浦"))["balance"])
+        assert await ok({"min_balance": bal0, "max_balance": bal0})
+        assert not await ok({"min_balance": bal0 + 1})
+        await dao.apply_balance("利物浦", 5.0)
+        assert await ok({"min_balance": bal0 + 5})
+        assert not await ok({"max_balance": bal0 + 4})
+        # 设施：pitch 升到 2 级，min 2 满足 / min 3 不满足；等级值非法忽略、合法未知键判 False
+        await dao.upsert_facility("利物浦", "pitch", 2)
+        assert await ok({"facility_min": {"pitch": 2, "youth": "abc"}})
+        assert await ok({"facility_min": {"pitch": 2}})
+        assert not await ok({"facility_min": {"pitch": 3}})
+        assert not await ok({"facility_min": {"youth": 1}})
+        # 天气：无未赛主场不满足 → 加场次后相等满足
+        assert not await ok({"weather_is": "雨"})
+        await dao.add_match(1, 1, 1, "利物浦", "曼联")
+        assert not await ok({"weather_is": "雨"})
+        await dao.set_match_weather(1, "雨")
+        assert await ok({"weather_is": "雨"})
+        # last_result：无完赛主场不满足 → 录 2:1 胜后 win 满足 / loss 不满足
+        assert not await ok({"last_result": "win"})
+        await dao.set_match_result(1, "已赛", 30000, 1.0, 0.5, 0.3, score="2:1")
+        assert await ok({"last_result": "win"})
+        assert await ok({"last_result": "W"})  # 误写大写由归一映射兜底
+        assert not await ok({"last_result": "loss"})
+    finally:
+        await env.teardown()
+
+
+async def test_soft_condition_dynamic_weight():
+    """v2.11.5 软条件：不满足按 factor 衰减仍可抽中，硬条件事件被剔除。"""
+    env = await TestEnv().setup()
+    try:
+        await env.stadium_service.import_attributes("利物浦", influence=150.0)
+        # A：容量 999999 永不满足，soft=1，weight 40 → 衰减 10；B：无条件 weight 10
+        await env.dao.upsert_event("softA", "软A", "测试", 40,
+                                   '{"min_capacity": 999999}', "{}", "t{team}{stadium}",
+                                   "builtin", "adopted", soft_conditions=1)
+        await env.dao.upsert_event("hardB", "硬B", "测试", 10, "{}", "{}",
+                                   "t{team}{stadium}", "builtin", "adopted")
+        hits = {"softA": 0, "hardB": 0}
+        for _ in range(300):
+            r = await env.event_engine.trigger_team("利物浦", 1, 1)
+            name = r["hits"][0]["event"]
+            hits["软A" if name == "软A" else name] = hits.get(name, 0) + 1
+        assert hits["软A"] > 0, hits      # 软条件仍可中
+        assert hits["硬B"] > 0, hits      # 硬条件正常中
+        # 软衰减后 40×0.25=10 vs 10 → 软A约半数
+        ratio = hits["软A"] / (hits["软A"] + hits["硬B"])
+        assert 0.3 < ratio < 0.7, hits
+        # 指定触发不走条件判定：容量条件在也强制中
+        row = next(r for r in await env.dao.list_events("adopted") if r["name"] == "软A")
+        r = await env.event_engine.trigger_team("利物浦", 1, 1, event_id=row["event_id"])
+        assert r["hits"][0]["event"] == "软A"
+    finally:
+        await env.teardown()
+
+
+async def test_clamp_conditions_whitelist():
+    """v2.11.5 LLM 条件白名单：数值取整、枚举域外剔除、结构键逐项校验。"""
+    from astrbot_plugin_whleague_revenue_system.services.llm_writer import _clamp_conditions  # noqa: E402
+    clamps = {
+        "activity_keys": {"concert", "open_day"},
+        "weather_keys": {"晴", "雨"},
+        "facility_keys": {"pitch", "youth"},
+        "facility_max_level": 5,
+    }
+    out = _clamp_conditions({
+        "min_tier": 2.7, "max_tier": -1, "min_capacity": "12000", "min_fans": 8000,
+        "min_balance": 3, "max_balance": "x",
+        "requires_naming": "true", "requires_activity": "esports",
+        "facility_min": {"pitch": 2, "youth": 9, "pool": 1, "bad": 0},
+        "weather_is": "冰雹", "last_result": "WIN",
+        "hacker_key": 1,
+    }, clamps)
+    assert out == {
+        "min_tier": 2, "min_capacity": 12000, "min_fans": 8000,
+        "min_balance": 3,
+        "requires_naming": True,
+        "facility_min": {"pitch": 2},
+        "last_result": "win",
+    }, out
+    # 域内枚举放行；无域（缺省 clamps）不校验
+    out2 = _clamp_conditions({"requires_activity": "concert", "weather_is": "雨",
+                              "facility_min": {"youth": 3}}, clamps)
+    assert out2 == {"requires_activity": "concert", "weather_is": "雨",
+                    "facility_min": {"youth": 3}}, out2
+    out3 = _clamp_conditions({"requires_activity": "什么都行", "weather_is": "x"}, {})
+    assert out3 == {"requires_activity": "什么都行", "weather_is": "x"}, out3
+
+
+async def test_llm_drafts_persist_conditions():
+    """v2.11.5 generate_drafts 持久化 conditions/soft_conditions 两类事件。"""
+    env = await TestEnv().setup()
+    try:
+        env.provider.set_response(
+            '[{"name":"暴雨保卫战","category":"天气衍生","weight":30,'
+            '"conditions":{"weather_is":"雨","min_tier":2},"soft_conditions":true,'
+            '"effects":{"money":1},"template":"暴雨来袭，{team}严阵以待。"},'
+            '{"name":"连败反弹","category":"士气","weight":20,'
+            '"conditions":{"last_result":"loss","facility_min":{"youth":2}},'
+            '"effects":{"fans_pct":0.01},"template":"{team}连败后众志成城。"}]'
+        )
+        drafts = await env.event_engine.generate_drafts(2)
+        assert len(drafts) == 2
+        assert drafts[0]["conditions"] == {"weather_is": "雨", "min_tier": 2}
+        assert drafts[0]["soft_conditions"] == 1
+        pending = await env.dao.list_events("pending")
+        by_name = {p["name"]: p for p in pending}
+        assert json.loads(by_name["暴雨保卫战"]["conditions_json"]) == {
+            "weather_is": "雨", "min_tier": 2}
+        assert by_name["暴雨保卫战"]["soft_conditions"] == 1
+        assert json.loads(by_name["连败反弹"]["conditions_json"]) == {
+            "last_result": "loss", "facility_min": {"youth": 2}}
+        assert by_name["连败反弹"]["soft_conditions"] == 0
+    finally:
+        await env.teardown()
+
+
+async def test_choice_event_conditions_persist():
+    """v2.11.5 选择事件同样携带条件与软开关。"""
+    env = await TestEnv().setup()
+    try:
+        env.provider.set_response(
+            '[{"event_type":"choice","name":"球迷请愿","category":"球迷","weight":15,'
+            '"conditions":{"min_fans":5000},"soft_conditions":1,'
+            '"options":[{"name":"答应","desc":"答应请求","outcomes":['
+            '{"w":3,"effects":{"money":-2,"fans_pct":0.02}},'
+            '{"w":1,"effects":{"money":-1,"fans_pct":0.005}}]},'
+            '{"name":"拒绝","desc":"一口回绝","outcomes":['
+            '{"w":3,"effects":{"money":0,"fans_pct":-0.01}},'
+            '{"w":1,"effects":{"money":1,"fans_pct":-0.03}}]}],'
+            '"template":"{team}球迷在{stadium}外请愿。"}]'
+        )
+        drafts = await env.event_engine.generate_drafts(1)
+        assert drafts[0]["event_type"] == "choice"
+        assert drafts[0]["conditions"] == {"min_fans": 5000}
+        assert drafts[0]["soft_conditions"] == 1
+        pending = await env.dao.list_events("pending")
+        assert json.loads(pending[0]["conditions_json"]) == {"min_fans": 5000}
+        assert pending[0]["soft_conditions"] == 1
+    finally:
+        await env.teardown()
 async def test_offer_spawn_apply_cancel():
     """v2.11.4 offer_spawn：未签约品牌按热度上门递价（稳健套餐）、取消撤销 pending 报价。"""
     from astrbot_plugin_whleague_revenue_system.services import formula

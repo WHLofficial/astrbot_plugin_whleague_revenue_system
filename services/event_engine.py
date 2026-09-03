@@ -11,7 +11,8 @@ import random
 from datetime import datetime, timedelta
 
 from . import formula
-from .event_effects import EFFECT_SPECS, ApplyContext, CancelContext, signal_clamp_config
+from .event_effects import (EFFECT_SPECS, ApplyContext, CancelContext,
+                            _next_unplayed_home, signal_clamp_config)
 from .llm_writer import _fill_template
 from ..utils.security import parse_choice_no
 
@@ -345,11 +346,19 @@ class EventEngine:
         if excluded is None:
             excluded = set()
         has_naming = await self._dao.get_active_naming(stadium["team_name"]) is not None
-        eligible = [
-            e for e in events_pool
-            if e["event_id"] not in excluded
-            and await self._condition_ok(e, stadium, has_naming, bookings)
-        ]
+        factor = float(self._cfg.get("event_soft_condition_factor", 0.25))
+        eligible, weights = [], []
+        for e in events_pool:
+            if e["event_id"] in excluded:
+                continue
+            base = max(1, int(e["weight"]))
+            if await self._condition_ok(e, stadium, has_naming, bookings):
+                eligible.append(e)
+                weights.append(float(base))
+            elif int(e["soft_conditions"] or 0) == 1:
+                # 软条件：不满足按权重衰减参与抽取，而非硬剔除
+                eligible.append(e)
+                weights.append(float(base) * factor)
         if not eligible:
             if cap_out is not None and excluded:
                 cap_out["yes"] = any([
@@ -357,7 +366,6 @@ class EventEngine:
                     for e in events_pool
                 ])
             return None
-        weights = [max(1, int(e["weight"])) for e in eligible]
         return random.choices(eligible, weights=weights, k=1)[0]
 
     async def _condition_ok(self, event, stadium, has_naming: bool, bookings: list[str]) -> bool:
@@ -372,6 +380,41 @@ class EventEngine:
             return False
         if "min_capacity" in cond and stadium["capacity"] < int(cond["min_capacity"]):
             return False
+        fans = float(stadium["fans_diehards"] or 0.0)
+        if "min_fans" in cond and fans < float(cond["min_fans"]):
+            return False
+        if "max_fans" in cond and fans > float(cond["max_fans"]):
+            return False
+        if "min_balance" in cond or "max_balance" in cond:
+            bal_row = await self._dao.get_balance(stadium["team_name"])
+            balance = float(bal_row["balance"]) if bal_row else 0.0
+            if "min_balance" in cond and balance < float(cond["min_balance"]):
+                return False
+            if "max_balance" in cond and balance > float(cond["max_balance"]):
+                return False
+        facility_min = cond.get("facility_min")
+        if isinstance(facility_min, dict) and facility_min:
+            for key, need in facility_min.items():
+                try:
+                    need_i = int(need)
+                except (TypeError, ValueError):
+                    continue
+                if await self._dao.get_facility_level(stadium["team_name"], str(key)) < need_i:
+                    return False
+        weather_is = cond.get("weather_is")
+        if weather_is:
+            match = await _next_unplayed_home(self._dao, stadium["team_name"])
+            if match is None or (match["weather"] or "") != str(weather_is):
+                return False
+        last = cond.get("last_result")
+        if last:
+            want = {"win": "W", "w": "W", "draw": "D", "d": "D",
+                    "loss": "L", "l": "L"}.get(str(last).strip().lower())
+            match = await self._dao.get_last_finished_home(stadium["team_name"])
+            if want is None or match is None:
+                return False
+            if formula.result_from_score(match["score"]) != want:
+                return False
         if cond.get("requires_naming") is True and not has_naming:
             return False
         if cond.get("requires_activity"):
@@ -946,13 +989,17 @@ class EventEngine:
             event_id = f"llm_{await self._dao.next_event_counter()}"
             await self._dao.upsert_event(
                 event_id, d["name"], d["category"], d["weight"],
-                "{}", json.dumps(d.get("effects") or {}, ensure_ascii=False),
+                json.dumps(d.get("conditions") or {}, ensure_ascii=False),
+                json.dumps(d.get("effects") or {}, ensure_ascii=False),
                 d["template"], source="llm", status="pending",
                 event_type=d.get("event_type", "instant"),
                 options_json=json.dumps(d.get("options") or [], ensure_ascii=False),
+                soft_conditions=int(d.get("soft_conditions") or 0),
             )
             added.append({
                 "id": event_id, "name": d["name"], "event_type": d.get("event_type", "instant"),
+                "conditions": d.get("conditions") or {},
+                "soft_conditions": int(d.get("soft_conditions") or 0),
                 "effects": d.get("effects") or {}, "options": d.get("options") or [],
             })
         return added
