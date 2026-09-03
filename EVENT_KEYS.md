@@ -6,7 +6,7 @@
 
 设计背景见 `EVENT_INTERACTION_BRAINSTORM.md`；本文档随新键落地持续更新。
 
-## 登记表（v2.11.1 时点）
+## 登记表（v2.11.2 时点）
 
 | 键 | 量纲 | apply 落点 | 钳制（默认 / config 键） | 撤销语义 | describe 文案 | 消费者 |
 |---|---|---|---|---|---|---|
@@ -16,11 +16,17 @@
 | `attendance_mod` | 乘数（≠1 才落键） | `next_attendance_mod` ×v | [0.5, 2.0] 固定 | ÷v 反除；已随赛果消耗则跳过 | `上座×1.20` | `record_results` 消费后 reset |
 | `satisfaction` | 小数，± | 不落库，仅出备注；窗口结算时并入品牌满意度信号 | ±0.5 / `event_satisfaction_clamp` | 无（未结算删事件即消失；已结算不回滚） | `品牌满意度+0.30` | `brand_service.evolve_sentiment`（event_weight） |
 | `brand_heat` | 小数，± | `brand_pool.heat` +v，终钳 `market_heat_config` clamp_low/high | ±0.3 / `event_brand_heat_clamp` | 无（同上） | `品牌热度+0.20` | 品牌 heat → 报价/排名 |
+| `build_credit` | M，± | `club_balance.build_credit` 列直改（沿建设券通道，不带余额流水） | ±5.0 / `event_build_credit_clamp` | 反向加减（可透支为负，`deduct_build_credit` 只扣不抵） | `建设券+3.0M` | 设施建造/扩建消耗 |
+| `influence` | 点，±（基准值量纲 0~200） | `stadium.influence` 基准值直改，下钳 0 | ±10.0 / `event_influence_clamp` | 反向加减，触 0 下界记 warning | `影响力+5.0` | 死忠目标/上座等读 live 值自动跟随 |
 
 补充语义：
 
 - `satisfaction` / `brand_heat` 的 apply **仅在球队当前有生效冠名时产生效果/备注**
   （无冠名静默跳过）；钳制只限强度，是否生效由 apply 阶段判定。
+- `influence` 只钳下界 0、不设上界（导入通道允许 1~1000，钳 200 会把存量高位基准
+  反向拉低）；事件侧强度由 `event_influence_clamp` 限制。
+- `build_credit` 不写余额流水（`apply_balance(0, v)` 直改列），财务流水不含建设券事件；
+  取消事件反向加减后已花部分表现为负余额，`deduct_build_credit` 只扣不抵、不会透支建设。
 - redo（强制重算）时状态类键跳过并备注「（重算跳过）」；资金/维护流水由 tx_ids 撤销重算。
 - `cancel_team_event` 反演只处理资金类（`named_tx`）流水；品牌键从不像资金键那样回滚
   （历史行为，保持不变）。

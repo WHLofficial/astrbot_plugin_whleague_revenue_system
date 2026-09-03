@@ -3,6 +3,12 @@
 本文件记录本项目的显著变更，格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [2.11.2] - 2026-09-03
+
+### Added
+
+- **数值类状态键**（事件×功能交互③）：effects 新增 `build_credit`（建设信用，沿建设券通道直改 club_balance.build_credit 列，不带余额流水，默认钳 ±5.0M）与 `influence`（影响力基准值直改、下钳 0 不设上界，默认钳 ±10.0）——消费端读 live 值自动跟随，取消事件反向加减反演，redo 跳过。config 键 `event_build_credit_clamp`/`event_influence_clamp`；LLM prompt 字段与量纲同步；EVENT_KEYS.md 登记表更新。测试 240→241。
+
 ## [2.11.1] - 2026-09-03
 
 ### Fixed

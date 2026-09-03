@@ -1146,6 +1146,49 @@ async def test_add_custom_brand_keys_survive():
         await env.teardown()
 
 
+async def test_build_credit_influence_apply_cancel():
+    """v2.11.2 数值键：建设券/影响力钳制放行、触发生效、重算跳过、取消反演。"""
+    from astrbot_plugin_whleague_revenue_system.services.llm_writer import _clamp_effects
+
+    clamps = {"money": 8.0, "fans": 0.05, "maintenance": 5.0,
+              "satisfaction": 0.5, "brand_heat": 0.3,
+              "build_credit": 5.0, "influence": 10.0}
+    out = _clamp_effects({"build_credit": 99.0, "influence": -99.0}, clamps)
+    assert out["build_credit"] == 5.0 and out["influence"] == -10.0, out
+    assert "build_credit" not in _clamp_effects({"build_credit": 0.0}, clamps)
+
+    env = await TestEnv().setup()
+    try:
+        await env.stadium_service.import_attributes("利物浦", influence=150.0)
+        await env.event_engine.add_custom(
+            "市政拨款", "基建", 10, '{"build_credit": 3.0, "influence": 5.0}')
+        rows = {r["name"]: r for r in await env.dao.list_events("adopted")}
+        effects = json.loads(rows["市政拨款"]["effects_json"])
+        assert effects["build_credit"] == 3.0 and effects["influence"] == 5.0, effects
+        # 触发：建设券列直改、影响力基准直改
+        r = await env.event_engine.trigger_team(
+            "利物浦", 1, 1, event_id=rows["市政拨款"]["event_id"])
+        notes = r["hits"][0]["notes"]
+        assert any("建设券 +3.0M" in n for n in notes), notes
+        assert any("影响力 +5.0" in n for n in notes), notes
+        assert (await env.dao.get_balance("利物浦"))["build_credit"] == 3.0
+        assert (await env.dao.get_stadium("利物浦"))["influence"] == 155.0
+        # 重算跳过：状态不动，备注标注
+        notes = await env.event_engine._apply_effects(
+            "利物浦", 1, 1, {"build_credit": 1.0, "influence": 2.0}, "复核",
+            apply_state=False)
+        assert any("建设券 +1.0M（重算跳过）" in n for n in notes), notes
+        assert any("影响力 +2.0（重算跳过）" in n for n in notes), notes
+        assert (await env.dao.get_balance("利物浦"))["build_credit"] == 3.0
+        # 取消反演：反向加减
+        c = await env.event_engine.cancel_team_event("利物浦", "市政拨款", 1, 1)
+        assert any("建设券已反向调整" in n for n in c["notes"]), c["notes"]
+        assert (await env.dao.get_balance("利物浦"))["build_credit"] == 0.0
+        assert (await env.dao.get_stadium("利物浦"))["influence"] == 150.0
+    finally:
+        await env.teardown()
+
+
 async def test_hit_prob_config_defensive():
     """hit_prob 防御：NaN 不再等价于全员命中；非法/负值回退默认；>1 钳为必中。"""
     from unittest.mock import patch

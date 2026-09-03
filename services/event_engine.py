@@ -981,7 +981,7 @@ class EventEngine:
                          options_text: str = "") -> None:
         """手写自定义事件。
 
-        即发型：effects_text 为 JSON 文本（money/fans_pct/maintenance/attendance_mod/satisfaction/brand_heat）；
+        即发型：effects_text 为 JSON 文本（money/fans_pct/maintenance/attendance_mod/satisfaction/brand_heat/build_credit/influence）；
         选择型：options_text 为选项 JSON 数组文本（结构同 LLM 草稿，效果自动钳制）。
         """
         from .llm_writer import _clamp_effects, _clamp_event
@@ -997,6 +997,8 @@ class EventEngine:
             "maintenance": float(self._cfg.get("event_maintenance_clamp", 5.0)),
             "satisfaction": float(self._cfg.get("event_satisfaction_clamp", 0.5)),
             "brand_heat": float(self._cfg.get("event_brand_heat_clamp", 0.3)),
+            "build_credit": float(self._cfg.get("event_build_credit_clamp", 5.0)),
+            "influence": float(self._cfg.get("event_influence_clamp", 10.0)),
         }
         event_id = f"custom_{await self._dao.next_event_counter()}"
         if event_type.lower() == "choice":
@@ -1031,7 +1033,7 @@ class EventEngine:
         try:
             effects = _clamp_effects(effects, clamps)
         except (ValueError, TypeError) as e:
-            raise EventError(f"effects 含非法数值（money/fans_pct/maintenance/attendance_mod/satisfaction/brand_heat 需为数字）: {e}")
+            raise EventError(f"effects 含非法数值（money/fans_pct/maintenance/attendance_mod/satisfaction/brand_heat/build_credit/influence 需为数字）: {e}")
         await self._dao.upsert_event(
             event_id, name.strip(), category.strip() or "自定义", weight,
             "{}", _json.dumps(effects, ensure_ascii=False), name.strip(),

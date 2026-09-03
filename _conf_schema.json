@@ -239,6 +239,18 @@
     "type": "float",
     "default": 0.3
   },
+  "event_build_credit_clamp": {
+    "description": "事件建设券钳制",
+    "hint": "LLM 设计/手写事件时建设券（建设信用）变化绝对值上限（M）。",
+    "type": "float",
+    "default": 5.0
+  },
+  "event_influence_clamp": {
+    "description": "事件影响力钳制",
+    "hint": "LLM 设计/手写事件时影响力基准值变化绝对值上限。",
+    "type": "float",
+    "default": 10.0
+  },
   "activity_slots": {
     "description": "档期数量",
     "hint": "每窗口非比赛日档期数量。",

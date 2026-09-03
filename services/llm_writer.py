@@ -167,8 +167,11 @@ class LlmWriter:
             "maintenance": float(self._cfg.get("event_maintenance_clamp", 5.0)),
             "satisfaction": float(self._cfg.get("event_satisfaction_clamp", 0.5)),
             "brand_heat": float(self._cfg.get("event_brand_heat_clamp", 0.3)),
+            "build_credit": float(self._cfg.get("event_build_credit_clamp", 5.0)),
+            "influence": float(self._cfg.get("event_influence_clamp", 10.0)),
         }
         sat_c, heat_c = clamps["satisfaction"], clamps["brand_heat"]
+        bc_c, inf_c = clamps["build_credit"], clamps["influence"]
         prompt = (
             "为足球联赛主场随机事件系统设计新事件。\n"
             f"任务：设计 {count} 个事件，主题：{topic or '不限'}。\n"
@@ -178,12 +181,15 @@ class LlmWriter:
             f"维护支出 0 ~ {clamps['maintenance']}M；"
             f"品牌满意度变化绝对值 ≤ {sat_c}（正=合作愉快提升评估，负=损害合作关系），"
             f"品牌热度变化绝对值 ≤ {heat_c}（直接调整品牌行情热度）；"
-            "这两项仅当球队当前有冠名品牌时实际生效。\n"
+            "这两项仅当球队当前有冠名品牌时实际生效；"
+            f"建设券变化绝对值 ≤ {bc_c}M（影响建设信用余额），"
+            f"影响力变化绝对值 ≤ {inf_c}（球队影响力基准值，量纲 0~200）。\n"
             "输出 JSON 数组，只输出数组本身，不要任何解释或多余文字。每个元素为以下两类之一：\n"
             "一、即发事件：{\"event_type\":\"instant\",\"name\":\"事件名(≤20字)\","
             "\"category\":\"分类(≤10字)\",\"weight\":权重整数1~100,"
             "\"effects\":{\"money\":金额M,\"fans_pct\":死忠比例小数,\"maintenance\":维护额外支出M,"
-            "\"satisfaction\":品牌满意度变化(可选),\"brand_heat\":品牌热度变化(可选)},"
+            "\"satisfaction\":品牌满意度变化(可选),\"brand_heat\":品牌热度变化(可选),"
+            "\"build_credit\":建设券变化M(可选),\"influence\":影响力变化(可选)},"
             "\"template\":\"≤200字播报文案，必须包含{team}和{stadium}占位符\"}\n"
             "   例：{\"event_type\":\"instant\",\"name\":\"草坪闯入者\",\"category\":\"场务\","
             "\"weight\":30,\"effects\":{\"money\":-2.0,\"fans_pct\":0.01,\"maintenance\":1.5},"

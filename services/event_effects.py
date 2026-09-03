@@ -153,6 +153,31 @@ async def _apply_brand_heat(ctx: ApplyContext, value: float) -> None:
         ctx.notes.append(f"品牌热度 {'+' if value > 0 else ''}{value:.2f}（重算跳过）")
 
 
+async def _apply_build_credit(ctx: ApplyContext, value: float) -> None:
+    # 沿建设券通道直改 club_balance.build_credit 列（不带余额流水，与返还记账解耦）
+    if not value:
+        return
+    if ctx.apply_state:
+        await ctx.dao.apply_balance(ctx.team, 0.0, value)
+        ctx.notes.append(f"建设券 {'+' if value > 0 else ''}{value:.1f}M")
+    else:
+        ctx.notes.append(f"建设券 {value:+.1f}M（重算跳过）")
+
+
+async def _apply_influence(ctx: ApplyContext, value: float) -> None:
+    # 直改 influence 基准值（决策记录 3）：消费端读 live 值自动跟随，不另立修正列
+    if not value:
+        return
+    s = await ctx.stadium()
+    if not s:
+        return
+    if ctx.apply_state:
+        await ctx.dao.update_influence(ctx.team, max(0.0, float(s["influence"]) + value))
+        ctx.notes.append(f"影响力 {'+' if value > 0 else ''}{value:.1f}")
+    else:
+        ctx.notes.append(f"影响力 {value:+.1f}（重算跳过）")
+
+
 # ─── undo（取消事件反演；幂等，动不了的记 warning） ─────────
 
 
@@ -208,6 +233,29 @@ async def _undo_attendance(ctx: CancelContext, value: float) -> None:
         ctx.warnings.append("上座修正已随赛果消耗（或不存在），跳过回退")
 
 
+async def _undo_build_credit(ctx: CancelContext, value: float) -> None:
+    # 反向加减（行不存在时 apply_balance 为无操作）；已花掉的部分会透支为负，
+    # deduct_build_credit 只扣不抵，负余额不会透支建设
+    if not value:
+        return
+    await ctx.dao.apply_balance(ctx.team, 0.0, -value)
+    ctx.notes.append(f"建设券已反向调整（{value:+.1f}M）")
+
+
+async def _undo_influence(ctx: CancelContext, value: float) -> None:
+    if not value:
+        return
+    s = await ctx.stadium()
+    if s:
+        raw = float(s["influence"]) - value
+        await ctx.dao.update_influence(ctx.team, max(0.0, raw))
+        ctx.notes.append(f"影响力已回退（{value:+.1f}）")
+        if raw < 0:
+            ctx.warnings.append("影响力回退触及 0 下界，存在微小误差")
+    else:
+        ctx.warnings.append("球队无球场，跳过影响力回退")
+
+
 # ─── describe（概率表/结算描述，与备注口径一致但为独立文案） ─
 
 
@@ -233,6 +281,14 @@ def _desc_satisfaction(v: float) -> str:
 
 def _desc_brand_heat(v: float) -> str:
     return f"品牌热度{v:+.2f}" if v else ""
+
+
+def _desc_build_credit(v: float) -> str:
+    return f"建设券{v:+.1f}M" if v else ""
+
+
+def _desc_influence(v: float) -> str:
+    return f"影响力{v:+.1f}" if v else ""
 
 
 # ─── clamp（LLM/手写钳制；raw 值来自 JSON，非数值抛错拒绝） ──
@@ -275,6 +331,14 @@ def _clamp_brand_heat(v, clamps: dict):
     return _clamp_signed(v, clamps, "brand_heat", 0.3)
 
 
+def _clamp_build_credit(v, clamps: dict):
+    return _clamp_signed(v, clamps, "build_credit", 5.0)
+
+
+def _clamp_influence(v, clamps: dict):
+    return _clamp_signed(v, clamps, "influence", 10.0)
+
+
 EFFECT_SPECS: tuple[EffectSpec, ...] = (
     EffectSpec(key="money", apply=_apply_money, undo=_undo_money,
                describe=_desc_money, clamp=_clamp_money, named_tx=True),
@@ -288,4 +352,8 @@ EFFECT_SPECS: tuple[EffectSpec, ...] = (
                describe=_desc_satisfaction, clamp=_clamp_satisfaction),
     EffectSpec(key="brand_heat", apply=_apply_brand_heat, undo=_undo_noop,
                describe=_desc_brand_heat, clamp=_clamp_brand_heat),
+    EffectSpec(key="build_credit", apply=_apply_build_credit, undo=_undo_build_credit,
+               describe=_desc_build_credit, clamp=_clamp_build_credit),
+    EffectSpec(key="influence", apply=_apply_influence, undo=_undo_influence,
+               describe=_desc_influence, clamp=_clamp_influence),
 )
