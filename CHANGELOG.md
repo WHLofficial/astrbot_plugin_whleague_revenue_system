@@ -3,6 +3,12 @@
 本文件记录本项目的显著变更，格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [2.11.0] - 2026-08-31
+
+### Changed
+
+- **效果键注册表重构**（事件×功能交互 v2.11 系列①，行为中性）：新建 services/event_effects.py，`EFFECT_SPECS` 注册表以 EffectSpec（key/apply/undo/describe/clamp）统一描述资金、维护、死忠、上座、品牌满意度、品牌热度六键——键序即广播备注与概率表契约。event_engine 的 `_apply_effects`、`_outcome_desc` 与 `cancel_team_event` 逐键反演改为遍历注册表编排；llm_writer `_clamp_effects` 逐键钳制同样委托注册表（LLM 新键放行只需扩注册表+钳幅，不再散落多处 if）。brand_heat 钳制所用的 formula 依赖随键迁入注册表，event_engine 不再直接依赖 formula。238 项测试零断言改动全绿（行为中性证明）。
+
 ## [2.10.3] - 2026-08-30
 
 ### Changed

@@ -10,7 +10,7 @@ import math
 import random
 from datetime import datetime, timedelta
 
-from . import formula
+from .event_effects import EFFECT_SPECS, ApplyContext, CancelContext
 from .llm_writer import _fill_template
 from ..utils.security import parse_choice_no
 
@@ -396,72 +396,21 @@ class EventEngine:
                              effects: dict, label: str,
                              created_ids: list[int] | None = None,
                              apply_state: bool = True) -> list[str]:
-        """应用一组效果（资金/维护/死忠/上座修正），返回中文备注行。
+        """应用一组效果（遍历效果键注册表），返回中文备注行。
 
         资金与维护各计一条 event 流水；created_ids 非空时收集流水 ID，
         供结算把选择结果流水并入可撤销集合。
-        apply_state=False 时跳过死忠/上座等持久状态类效果（强制重算只重记账目，
+        apply_state=False 时跳过死忠/上座/品牌热度等持久状态类效果（强制重算只重记账目，
         与死忠演化「重算不重复状态」一致），备注标注「重算跳过」。
+        各键的落账、备注与撤销语义见 services/event_effects.py 注册表。
         """
-        stadium = await self._dao.get_stadium(team_name)
         await self._dao.ensure_balance(team_name, float(self._cfg.get("start_funds", 50.0)))
-        notes = []
-        money = float(effects.get("money", 0.0))
-        maintenance = float(effects.get("maintenance", 0.0))
-        fans_pct = float(effects.get("fans_pct", 0.0))
-        attendance_mod = float(effects.get("attendance_mod", 1.0))
-
-        if money:
-            (tx_id,) = await self._dao.record_entries(
-                team_name, season, window_seq, [("event", money, label, None)],
-            )
-            if created_ids is not None:
-                created_ids.append(tx_id)
-            notes.append(f"资金 {'+' if money > 0 else ''}{money:.1f}M")
-        if maintenance:
-            (tx_id,) = await self._dao.record_entries(
-                team_name, season, window_seq,
-                [("event", -maintenance, f"{label}（维护）", None)],
-            )
-            if created_ids is not None:
-                created_ids.append(tx_id)
-            notes.append(f"维护 −{maintenance:.1f}M")
-        if fans_pct:
-            if apply_state:
-                fans = min(max(stadium["fans_diehards"] * (1.0 + fans_pct), 0.0),
-                           float(self._cfg.get("fans_cap", 10000)))
-                await self._dao.update_fans(team_name, fans)
-                notes.append(f"死忠 {'+' if fans_pct > 0 else ''}{fans_pct * 100:.1f}%")
-            else:
-                notes.append(f"死忠 {fans_pct * 100:+.1f}%（重算跳过）")
-        if attendance_mod != 1.0:
-            if apply_state:
-                mod = stadium["next_attendance_mod"] * attendance_mod
-                await self._dao.update_attendance_mod(team_name, mod)
-                notes.append(f"下一场上座 {'+' if attendance_mod > 1 else ''}{attendance_mod * 100:.0f}%")
-            else:
-                notes.append(f"下一场上座 ×{attendance_mod:.2f}（重算跳过）")
-        # 品牌效果键：satisfaction 不在此处落库（由行情演化按权重并入满意度信号，
-        # 避免与上座/战绩信号双重计账）；brand_heat 直接改品牌热度（状态类）。
-        satisfaction = float(effects.get("satisfaction", 0.0))
-        brand_heat = float(effects.get("brand_heat", 0.0))
-        if satisfaction or brand_heat:
-            naming = await self._dao.get_active_naming(team_name)
-            if satisfaction and naming:
-                notes.append(f"品牌满意度 {'+' if satisfaction > 0 else ''}{satisfaction:.2f}（计入品牌评估）")
-            if brand_heat and naming:
-                if apply_state:
-                    rules = formula.parse_json_object(self._cfg.get("market_heat_config", "{}"))
-                    low = float(rules.get("clamp_low", 0.5))
-                    high = float(rules.get("clamp_high", 1.5))
-                    brand = await self._dao.get_brand_by_name(naming["brand"])
-                    if brand:
-                        heat = min(max(float(brand["heat"]) + brand_heat, low), high)
-                        await self._dao.update_brand_heat(int(brand["id"]), round(heat, 3))
-                    notes.append(f"品牌热度 {'+' if brand_heat > 0 else ''}{brand_heat:.2f}")
-                else:
-                    notes.append(f"品牌热度 {'+' if brand_heat > 0 else ''}{brand_heat:.2f}（重算跳过）")
-        return notes
+        ctx = ApplyContext(dao=self._dao, cfg=self._cfg, team=team_name, season=season,
+                           window_seq=window_seq, label=label,
+                           apply_state=apply_state, created_ids=created_ids)
+        for spec in EFFECT_SPECS:
+            await spec.apply(ctx, spec.coerce(effects.get(spec.key, spec.default)))
+        return ctx.notes
 
     async def _apply(self, event, team_name: str, season: int, window_seq: int) -> dict:
         """即发型：立即按 effects 记账并写日志。"""
@@ -513,26 +462,15 @@ class EventEngine:
 
     @staticmethod
     def _outcome_desc(effects: dict) -> str:
-        """结果效果的人类可读描述，与结算备注口径一致（用于选项概率表）。"""
+        """结果效果的人类可读描述，与结算备注口径一致（用于选项概率表）。
+
+        逐键取自效果注册表 describe（顺序 = 注册表顺序）。
+        """
         parts = []
-        money = float(effects.get("money", 0.0))
-        maintenance = float(effects.get("maintenance", 0.0))
-        fans = float(effects.get("fans_pct", 0.0))
-        mod = float(effects.get("attendance_mod", 1.0))
-        if money:
-            parts.append(f"资金{money:+.1f}M")
-        if maintenance:
-            parts.append(f"维护−{maintenance:.1f}M")
-        if fans:
-            parts.append(f"死忠{fans * 100:+.1f}%")
-        if mod != 1.0:
-            parts.append(f"上座×{mod:.2f}")
-        satisfaction = float(effects.get("satisfaction", 0.0))
-        brand_heat = float(effects.get("brand_heat", 0.0))
-        if satisfaction:
-            parts.append(f"品牌满意度{satisfaction:+.2f}")
-        if brand_heat:
-            parts.append(f"品牌热度{brand_heat:+.2f}")
+        for spec in EFFECT_SPECS:
+            desc = spec.describe(spec.coerce(effects.get(spec.key, spec.default)))
+            if desc:
+                parts.append(desc)
         return "、".join(parts) if parts else "无变化"
 
     def _roll_option(self, opt: dict) -> dict | None:
@@ -833,50 +771,25 @@ class EventEngine:
         if not isinstance(effects, dict):
             effects = {}
         notes, warnings = [], []
-        money = float(effects.get("money", 0.0) or 0.0)
-        maintenance = float(effects.get("maintenance", 0.0) or 0.0)
-        fans_pct = float(effects.get("fans_pct", 0.0) or 0.0)
-        attendance_mod = float(effects.get("attendance_mod", 1.0) or 1.0)
-
-        if (money or maintenance) and event is None:
+        ctx = CancelContext(dao=self._dao, cfg=self._cfg, team=team_name, season=season,
+                            window_seq=window_seq, event_name=name)
+        # null/缺键按缺省值兜底（与 float(x or 0.0) 历史口径一致）
+        values = {sp.key: sp.coerce(effects.get(sp.key, sp.default) or sp.default)
+                  for sp in EFFECT_SPECS}
+        tx_specs = [sp for sp in EFFECT_SPECS if sp.named_tx]
+        tx_active = any(values[sp.key] for sp in tx_specs)
+        if tx_active and event is None:
             warnings.append("事件已不在事件池，资金流水无法按名匹配，请手动核对账目")
         else:
-            if money:
-                if await self._dao.delete_latest_event_tx(team_name, season, window_seq, name):
-                    notes.append(f"资金流水已撤销（{money:+.1f}M）")
-                else:
-                    warnings.append("未找到对应资金流水（可能已被处理过），跳过")
-            if maintenance:
-                if await self._dao.delete_latest_event_tx(
-                        team_name, season, window_seq, f"{name}（维护）"):
-                    notes.append(f"维护流水已撤销（−{maintenance:.1f}M）")
-                else:
-                    warnings.append("未找到对应维护流水（可能已被处理过），跳过")
-            if money or maintenance:
+            for sp in tx_specs:
+                await sp.undo(ctx, values[sp.key])
+            if tx_active:
                 await self._dao.recompute_balance(team_name)
-
-        if fans_pct:
-            stadium = await self._dao.get_stadium(team_name)
-            factor = 1.0 + fans_pct
-            if stadium and factor > 0:
-                cap = float(self._cfg.get("fans_cap", 10000))
-                raw = stadium["fans_diehards"] / factor
-                fans = min(max(raw, 0.0), cap)
-                await self._dao.update_fans(team_name, fans)
-                notes.append(f"死忠已按原比例回退（{fans_pct * 100:+.1f}%）")
-                if abs(fans - raw) > 1e-9:
-                    warnings.append("死忠回退触及 0/上限边界，存在微小误差")
-            else:
-                warnings.append("死忠比例异常或球队无球场，跳过回退")
-
-        if attendance_mod != 1.0:
-            stadium = await self._dao.get_stadium(team_name)
-            if stadium and stadium["next_attendance_mod"] != 1.0:
-                await self._dao.update_attendance_mod(
-                    team_name, stadium["next_attendance_mod"] / attendance_mod)
-                notes.append(f"上座修正已回退（×{attendance_mod:.2f}）")
-            else:
-                warnings.append("上座修正已随赛果消耗（或不存在），跳过回退")
+        for sp in EFFECT_SPECS:
+            if sp.named_tx:
+                continue
+            await sp.undo(ctx, values[sp.key])
+        notes, warnings = ctx.notes, ctx.warnings
 
         await self._dao.delete_event_log_by_id(latest["id"])
         return {"kind": "instant", "event": name, "event_id": event_id,

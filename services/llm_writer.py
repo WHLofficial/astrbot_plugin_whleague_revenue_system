@@ -11,6 +11,7 @@ import re
 from astrbot.api import logger
 
 from ..utils.security import sanitize_text
+from .event_effects import EFFECT_SPECS
 
 _JSON_BLOCK_RE = re.compile(r"```(?:json)?\s*(.*?)```", re.S)
 _TRAILING_COMMA_RE = re.compile(r",\s*([}\]])")
@@ -318,16 +319,17 @@ def _extract_json(text: str):
 
 
 def _clamp_effects(effects, money_clamp: float, fans_clamp: float, maintenance_clamp: float) -> dict:
-    """对单条效果钳制：金额/money、死忠/fans_pct、维护/maintenance、上座/attendance_mod。"""
-    money = max(-money_clamp, min(money_clamp, float(effects.get("money", 0.0))))
-    fans_pct = max(-fans_clamp, min(fans_clamp, float(effects.get("fans_pct", 0.0))))
-    # 维护只允许支出（0 ~ 上限），不允许负维护退款
-    maintenance = max(0.0, min(maintenance_clamp, float(effects.get("maintenance", 0.0))))
-    out = {"money": round(money, 3), "fans_pct": round(fans_pct, 4),
-           "maintenance": round(maintenance, 3)}
-    attendance = float(effects.get("attendance_mod", 1.0))
-    if attendance != 1.0:
-        out["attendance_mod"] = round(max(0.5, min(2.0, attendance)), 3)
+    """对单条效果钳制（逐键委托效果键注册表；clamp 返回 None 即剔除该键）。
+
+    money/fans_pct/maintenance 恒在输出（缺键按 0 收敛），attendance_mod 仅在
+    ≠1 时输出，其余键由各 Spec 自行决定放行或剔除。clamps 键名即注册表钳幅维度。
+    """
+    clamps = {"money": money_clamp, "fans": fans_clamp, "maintenance": maintenance_clamp}
+    out = {}
+    for spec in EFFECT_SPECS:
+        value = spec.clamp(effects.get(spec.key, spec.default), clamps)
+        if value is not None:
+            out[spec.key] = value
     return out
 
 
