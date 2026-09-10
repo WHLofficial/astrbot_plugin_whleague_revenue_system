@@ -5,6 +5,7 @@
 """
 
 import asyncio
+import inspect
 import json
 import re
 
@@ -20,6 +21,7 @@ _TRAILING_COMMA_RE = re.compile(r",\s*([}\]])")
 
 class LlmWriter:
     def __init__(self, cfg: dict, get_provider=None):
+        """get_provider 可为同步或异步可调用对象，返回 provider 或 None。"""
         self._cfg = cfg
         self._get_provider = get_provider or (lambda: None)
 
@@ -35,6 +37,8 @@ class LlmWriter:
         """
         try:
             provider = self._get_provider()
+            if inspect.isawaitable(provider):
+                provider = await provider
             if provider is None:
                 if not quiet:
                     logger.warning(

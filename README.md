@@ -6,6 +6,10 @@
 **定位**：插件只负责本系统内的收支记账（收入/支出数字是联赛经济决策的参考项），不接球员工资、
 不闭环联赛经济。所有数值均可通过 `/主场设置` 调整，不依赖改代码。
 
+**环境要求与兼容性**：AstrBot `>=4,<5`（已在 **4.28.0** 验证；同步版 `get_using_provider()`、
+`@register` 等已废弃 API 均按 4.x 推荐写法迁移并保留旧版回退）；Python ≥3.12；依赖
+`aiosqlite`、`openpyxl`、`Pillow`（见 `requirements.txt`，随插件自动安装）；平台 `aiocqhttp`。
+
 ---
 
 ## 一、核心工作流（管理员按轮次操作）
@@ -234,7 +238,7 @@
 ## 十三、开发
 
 ```
-python tests/run_all.py    # 133 项零依赖测试（astrbot 桩 + 临时数据库 + LLM 桩）
+python tests/run_all.py    # 262 项零依赖测试（astrbot 桩 + 临时数据库 + LLM 桩）
 ```
 
 目录结构照搬谈判系统分层惯例：`main.py`（薄命令层）→ `handlers/` → `services/` →

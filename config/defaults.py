@@ -2,8 +2,8 @@ import json
 import math
 import os
 
-PLUGIN_VERSION = "2.6.0"
-"""插件版本号，与 metadata.yaml 保持一致。"""
+PLUGIN_VERSION = "2.11.7"
+"""插件版本号，与 metadata.yaml 保持一致（tests/s17_framework_compat 校验）。"""
 
 _SCHEMA_PATH = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "_conf_schema.json"

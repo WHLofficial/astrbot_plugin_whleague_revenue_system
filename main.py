@@ -4,12 +4,11 @@ from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, MessageChain, MessageEventResult, filter
 from astrbot.api.event.filter import EventMessageType
 from astrbot.api.message_components import File
-from astrbot.api.star import Context, Star, register
+from astrbot.api.star import Context, Star
 
 from .config.defaults import (
     _LIST_KEYS,
     DEFAULT_CONFIG,
-    PLUGIN_VERSION,
     parse_group_list,
 )
 from .db.connection import DatabaseManager
@@ -17,13 +16,12 @@ from .db.dao import StadiumDAO
 from .db.schema import init_schema
 
 
-@register(
-    "whleague_revenue_system",
-    "WHLofficial",
-    "球队主场系统：赛程导入、天气预报、赛果录入、上座/票房统计、球场建设、球迷演化、档期活动、冠名权、随机事件",
-    PLUGIN_VERSION,
-)
 class StadiumPlugin(Star):
+    """球队主场系统：赛程导入、天气预报、赛果录入、上座/票房统计、球场建设、球迷演化、档期活动、冠名权、随机事件。
+
+    插件名/作者/版本以 metadata.yaml 为准（AstrBot 4.x 由 Star.__init_subclass__ 自动登记）。
+    """
+
     def __init__(self, context: Context, config: dict | None = None):
         super().__init__(context)
         self.config = config
@@ -99,9 +97,16 @@ class StadiumPlugin(Star):
 
         logger.info("Stadium revenue system plugin initialized.")
 
-    def _get_provider(self):
-        """返回当前 AstrBot 正在使用的 LLM provider（可能为 None）。"""
+    async def _get_provider(self):
+        """返回当前 AstrBot 正在使用的 LLM provider（可能为 None）。
+
+        4.2x 推荐 ``get_using_provider_async()``（同步版已废弃），旧版仅有同步
+        ``get_using_provider()``；两者都探测以兼容 4.x 全系。
+        """
+        getter = getattr(self.context, "get_using_provider_async", None)
         try:
+            if getter is not None:
+                return await getter()
             return self.context.get_using_provider()
         except Exception:
             return None

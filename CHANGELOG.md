@@ -3,6 +3,23 @@
 本文件记录本项目的显著变更，格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [2.11.7] - 2026-09-10
+
+### Changed
+
+- **适配 AstrBot 4.28.0（全面加固）**：逐项核对插件触达的框架 API（logger / event / filter / message_components / Star / Context / cron_manager / astrbot_path / LLM provider / `_conf_schema.json` 类型 / 群消息钩子 / 异步生成器 handler），4.28.0 下全部存在且签名兼容，无阻断性不兼容。
+  - **`@register` 装饰器移除**：`register_star` 在 4.28.0 已发 `DeprecationWarning` 且声明未来移除；改由 `Star.__init_subclass__` 自动登记（4.x 起支持），插件名/作者/版本以 `metadata.yaml` 为准，描述移入类 docstring。
+  - **provider 取用异步化并保留回退**：`_get_provider` 改 async，优先 `context.get_using_provider_async()`（4.2x 推荐，同步版 `get_using_provider()` 已废弃），`getattr` 探测无异步接口时回退同步实现，兼容 4.x 全系；`LlmWriter` 用 `inspect.isawaitable` 兼容同步/异步 getter，调用方无需改动。
+
+### Fixed
+
+- **版本号漂移修正**：`config/defaults.py` 的 `PLUGIN_VERSION` 由 `"2.6.0"` 修正为 `2.11.7`（此前与 `metadata.yaml` 长期不符）；`metadata.yaml` 的 `version` 同步至 v2.11.7。
+- **元数据版本约束收紧**：`metadata.yaml` 的 `astrbot_version` 由 `">=4"` 改为 `">=4,<5"`（已在 4.28.0 验证，5.x 未验证故设上限），不影响任何 4.x 安装。
+
+### Tests
+
+- 新增 `tests/s17_framework_compat.py`（7 用例）：provider 取用三态（异步优先/同步回退/异常吞没）、`LlmWriter` 接受同步与异步 getter、`PLUGIN_VERSION` 与 `metadata.yaml` 一致性、`astrbot_version` 上限存在、`@register` 不被重新引入。测试 255→262。
+
 ## [2.11.6] - 2026-09-03
 
 ### Fixed
