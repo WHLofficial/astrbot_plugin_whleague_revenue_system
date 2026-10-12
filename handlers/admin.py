@@ -263,8 +263,14 @@ class AdminHandler:
                 push_txt = "推送旁路（未配置 club_sync_url/secret）"
             else:
                 push_txt = f"推送失败：{push.get('error', '')}"
+            pushed_season = r.get("push_season") or r.get("season")
+            season_note = (
+                f"（推平台 S{pushed_season}）"
+                if pushed_season and pushed_season != r.get("season")
+                else ""
+            )
             lines.append(
-                f"· {r['competition']} 第{r['round_no']}轮：{r['matches']} 场"
+                f"· {r['competition']} 第{r['round_no']}轮{season_note}：{r['matches']} 场"
                 f" | 补抽 {r['fixed']} | 订正 {len(r['corrected'])}"
                 f" | {push_txt}"
             )

@@ -237,12 +237,12 @@
 - 主要配置项：死忠系数、演化速率、上座倍数、票收基准、等级表、天气概率/区间、战绩系数表、
   冠名报价系数、赛事前缀映射（`competition_aliases`）、文件导入大小上限（`import_max_file_size_mb`）、
   LLM 开关（`llm_flavor_enabled`/`llm_design_enabled`）、图表字体路径（`chart_font_path`）、
-  运营平台同步（`club_sync_url`/`club_sync_secret`）等
+  运营平台同步（`club_sync_url`/`club_sync_secret`/`club_sync_season`）等
 
 ## 十三、开发
 
 ```
-python tests/run_all.py    # 279 项零依赖测试（astrbot 桩 + 临时数据库 + LLM 桩）
+python tests/run_all.py    # 281 项零依赖测试（astrbot 桩 + 临时数据库 + LLM 桩）
 ```
 
 目录结构照搬谈判系统分层惯例：`main.py`（薄命令层）→ `handlers/` → `services/` →
@@ -256,6 +256,9 @@ python tests/run_all.py    # 279 项零依赖测试（astrbot 桩 + 临时数据
 - **推送**：`POST /api/internal/weather-sync`，载荷 `{season, competition, roundNo, items:[{home,away,weather,coef}]}`；
   `x-sign` = HMAC-SHA256(secret, `POST|/api/internal/weather-sync|<ts>|<body>`)，`x-timestamp` = Unix 秒；
   body 为紧凑 JSON 且**签名与发送同一字节串**。密钥两侧一致（插件 `club_sync_secret` ↔ 平台 `WEATHER_SYNC_SECRET`）。
+- **赛季号**：插件赛季号与平台赛季号是**两套独立编号**（例：插件第 2 赛季 = 平台 S9）。
+  `club_sync_season` 填平台赛季号（填 0 = 直接用插件自身赛季号）；配错时平台以 `not_bound` 响亮拒收，
+  不会静默写错赛季。每个赛季推进后需同步更新该配置；回执里跨编号的轮次会标出「（推平台 S9）」。
 - **补抽**：旧库（v13 前）已预报但未落系数的场次，推送时按该场天气档位重抽并固化；
   未结算场次此后录入即按该系数结算。
 - **订正**：仅「系数未固化且已结算」的场次重算（这类场次当时用的是未落库的现抽系数，与推送口径不可证同），

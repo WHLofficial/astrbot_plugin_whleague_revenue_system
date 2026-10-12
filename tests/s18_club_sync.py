@@ -294,6 +294,7 @@ async def test_sync_weather_full_flow_and_idempotent():
         assert payload["roundNo"] == 1, payload
         assert payload["competition"] == result["rounds"][0]["competition"], payload
         assert payload["season"] == 1, payload
+        assert result["rounds"][0]["push_season"] == 1, result["rounds"][0]
         by_home = {i["home"]: i for i in payload["items"]}
         assert by_home["利物浦"]["coef"] == row["wx_coef"]
         assert by_home["纽卡斯尔联"]["coef"] == pending_row["wx_coef"]
@@ -304,6 +305,34 @@ async def test_sync_weather_full_flow_and_idempotent():
         assert again["totals"]["fixed"] == 0 and again["totals"]["corrected"] == 0, again["totals"]
         assert (await env.dao.get_balance("利物浦"))["balance"] == round(balance_before + delta, 4)
         assert len(await env.dao.list_transactions("利物浦", limit=50)) == txn_count
+    finally:
+        restore()
+        await env.teardown()
+
+
+async def test_sync_weather_season_override():
+    """插件赛季号与平台赛季号不同号：按 club_sync_season 换算推送。"""
+    calls, restore = install_fake_aiohttp([(200, '{"ok":true,"summary":{"pushed":2}}')])
+    env = await _sync_env({"club_sync_season": 9})
+    try:
+        result = await env.fixture_service.sync_weather()
+        assert result["rounds"][0]["season"] == 1, result["rounds"][0]
+        assert result["rounds"][0]["push_season"] == 9, result["rounds"][0]
+        payload = json.loads(calls[0]["data"].decode("utf-8"))
+        assert payload["season"] == 9, payload
+    finally:
+        restore()
+        await env.teardown()
+
+
+async def test_sync_weather_season_default_is_plugin_season():
+    """club_sync_season=0（默认）时推送插件自身赛季号。"""
+    calls, restore = install_fake_aiohttp([(200, '{"ok":true}')])
+    env = await _sync_env({"club_sync_season": 0})
+    try:
+        result = await env.fixture_service.sync_weather()
+        assert result["rounds"][0]["push_season"] == 1, result["rounds"][0]
+        assert json.loads(calls[0]["data"].decode("utf-8"))["season"] == 1
     finally:
         restore()
         await env.teardown()

@@ -501,11 +501,17 @@ class FixtureService:
         未落库的现抽系数，与推送口径不可证同；v13 起录入的场次系数即推送值，不重算。
         订正按当前球场状态重算（非结算时点快照），且上座扰动与满座余量会重新抽，
         差异含「系数差 + 扰动差」两部分。
+
+        推送用的赛季号取 club_sync_season（0 = 插件自身赛季号）：插件赛季号与平台赛季号
+        是两套独立编号，配错时平台以 not_bound 拒收，不会写错赛季。
         """
         rows = await self._dao.list_weathered_matches()
         if not rows:
             raise FixtureError("没有已预报天气的场次，先执行 /主场天气 <轮次>")
         client = ClubSyncClient(self._cfg)
+        # 插件赛季号与平台赛季号是两套编号（例：插件第 2 赛季 = 平台 S9），
+        # 推送时按 club_sync_season 换算；配 0 表示直接用插件赛季号。
+        target_season = int(self._cfg.get("club_sync_season") or 0) or None
         if not preview and not client.enabled:
             raise FixtureError(
                 "未配置 club_sync_url / club_sync_secret，无法推送平台（插件配置中填写后重试）"
@@ -581,10 +587,11 @@ class FixtureService:
                     # 守卫失败：并发已固化系数/改写该场，本次不重复记账
                     skipped.append(m["home_team"])
             push = {"status": "preview"} if preview else await client.push_round(
-                season, competition, round_no, items
+                target_season or season, competition, round_no, items
             )
             rounds.append({
-                "season": season, "competition": competition, "round_no": round_no,
+                "season": season, "push_season": target_season or season,
+                "competition": competition, "round_no": round_no,
                 "matches": len(matches), "fixed": fixed,
                 "corrected": corrected, "skipped": skipped, "push": push,
             })
