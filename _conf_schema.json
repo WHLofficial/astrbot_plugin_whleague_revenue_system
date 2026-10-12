@@ -11,6 +11,18 @@
     "type": "string",
     "default": ""
   },
+  "club_sync_url": {
+    "description": "运营平台地址（天气推送）",
+    "hint": "填平台根地址（如 https://whl-club.example.com），推送时自动补 /api/internal/weather-sync；留空则不推送。",
+    "type": "string",
+    "default": ""
+  },
+  "club_sync_secret": {
+    "description": "运营平台同步密钥（天气推送）",
+    "hint": "与平台 WEATHER_SYNC_SECRET 相同的 HMAC 密钥；留空则不推送。",
+    "type": "string",
+    "default": ""
+  },
   "tier_table": {
     "description": "球场等级表",
     "hint": "内部参数，请勿修改。JSON：等级→{名称,座位下限,座位上限,半赛季基础维护,每万座每场维护,上座系数,升级费}。",

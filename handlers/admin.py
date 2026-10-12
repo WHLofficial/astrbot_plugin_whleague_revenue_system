@@ -26,6 +26,9 @@ _FACILITY_ALIASES = {
     "医疗中心": "medical", "医疗": "medical", "medical": "medical",
 }
 
+# 平台 /api/internal/weather-sync 逐场 verdict 里算「已落库」的状态（其余为未落库，需要点名）
+_SYNC_LANDED_STATUSES = frozenset({"created", "replaced", "unchanged"})
+
 
 class AdminHandler:
     def __init__(self, plugin):
@@ -199,6 +202,85 @@ class AdminHandler:
         if result.get("skipped"):
             lines.append(f"⚠️ 已录入跳过：{'、'.join(result['skipped'])}（不重复记账）")
         yield event.plain_result("\n".join(lines))
+
+    async def weather_push(self, event) -> AsyncGenerator[MessageEventResult, None]:
+        deny = await self._guard(event)
+        if deny:
+            yield event.plain_result(deny)
+            return
+        parts = event.get_message_str().split()
+        preview = len(parts) >= 2 and parts[1] in ("预览", "preview")
+        if len(parts) >= 2 and not preview:
+            yield event.plain_result(
+                "用法: /主场天气推送 [预览]\n无参数=推送全部已预报轮次并订正旧账；预览=只算不写"
+            )
+            return
+        result = await self._run(event, self._plugin.fixture_service.sync_weather(preview))
+        if "error" in result:
+            yield event.plain_result(result["error"])
+            return
+        yield event.plain_result(self._format_sync(result))
+
+    @staticmethod
+    def _format_sync(result: dict) -> str:
+        totals = result["totals"]
+        head = "🔍 天气同步预览（只算不写）" if result["preview"] else "🔄 天气同步"
+        lines = [
+            f"{head}：{totals['rounds']} 轮 / {totals['matches']} 场",
+            f"系数补抽 {totals['fixed']} 场 | 旧账订正 {totals['corrected']} 场"
+            f"（净额 {totals['delta']:+.2f}M）"
+            f" | 推送成功 {totals['push_ok']} 轮 / 失败 {totals['push_error']} 轮",
+        ]
+        for r in result["rounds"]:
+            push = r["push"]
+            warns: list[str] = []
+            if push["status"] == "ok":
+                resp = push.get("response") or {}
+                verdicts = resp.get("verdicts") or []
+                summary = resp.get("summary") or {}
+                bad = [v for v in verdicts if v.get("status") not in _SYNC_LANDED_STATUSES]
+                landed = summary.get("pushed", len(verdicts) - len(bad))
+                push_txt = f"推送 ok（平台落库 {landed}/{len(verdicts)} 场"
+                if summary.get("settled"):
+                    push_txt += f"，其中 {summary['settled']} 场已结算（历史账待订正批收敛）"
+                push_txt += "）"
+                if bad:
+                    kinds: dict[str, int] = {}
+                    for v in bad:
+                        kinds[v.get("status", "?")] = kinds.get(v.get("status", "?"), 0) + 1
+                    push_txt += "，未落库：" + "、".join(f"{k}×{n}" for k, n in kinds.items())
+                    for v in bad[:3]:
+                        detail = v.get("detail") or ""
+                        warns.append(
+                            f"   ⚠️ {v.get('home', '?')} vs {v.get('away', '?')}："
+                            f"{v.get('status', '?')}{'——' + detail if detail else ''}"
+                        )
+                    if len(bad) > 3:
+                        warns.append(f"   ⚠️ 其余 {len(bad) - 3} 场未落库（同上原因）")
+            elif push["status"] == "preview":
+                push_txt = "推送（预览跳过）"
+            elif push["status"] == "bypass":
+                push_txt = "推送旁路（未配置 club_sync_url/secret）"
+            else:
+                push_txt = f"推送失败：{push.get('error', '')}"
+            lines.append(
+                f"· {r['competition']} 第{r['round_no']}轮：{r['matches']} 场"
+                f" | 补抽 {r['fixed']} | 订正 {len(r['corrected'])}"
+                f" | {push_txt}"
+            )
+            lines.extend(warns)
+            for c in r["corrected"][:5]:
+                old_att, new_att = c["attendance"]
+                lines.append(
+                    f"   ↳ {c['home']}：上座 {old_att:,}→{new_att:,}，净额 {c['delta']:+.2f}M"
+                )
+            if len(r["corrected"]) > 5:
+                lines.append(f"   ↳ 其余 {len(r['corrected']) - 5} 场见财务流水（备注含「天气订正」）")
+            if r["skipped"]:
+                lines.append(f"   ⚠️ 已跳过（并发/已订正）：{'、'.join(r['skipped'])}")
+        if result["preview"]:
+            lines.append("预览为模拟抽值，实际执行会重新抽定系数与上座扰动")
+        return "\n".join(lines)
 
     async def advance(self, event) -> AsyncGenerator[MessageEventResult, None]:
         deny = await self._guard(event)

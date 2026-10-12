@@ -328,6 +328,11 @@ class StadiumPlugin(Star):
         async for r in self._admin_cmd(event, self.admin_handler.weather_override):
             yield r
 
+    @filter.command("主场天气推送")
+    async def cmd_weather_push(self, event: AstrMessageEvent) -> AsyncGenerator[MessageEventResult, None]:
+        async for r in self._admin_cmd(event, self.admin_handler.weather_push):
+            yield r
+
     @filter.command("主场赛果录入", alias={"主场赛果"})
     async def cmd_record_results(self, event: AstrMessageEvent) -> AsyncGenerator[MessageEventResult, None]:
         async for r in self._admin_cmd(event, self.admin_handler.record_results):

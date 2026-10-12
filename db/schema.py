@@ -1,6 +1,6 @@
 from astrbot.api import logger
 
-SCHEMA_VERSION = 12
+SCHEMA_VERSION = 13
 
 SQL_CREATE_TABLES = r"""
 
@@ -54,6 +54,7 @@ CREATE TABLE IF NOT EXISTS matches (
     home_team TEXT NOT NULL,
     away_team TEXT NOT NULL,
     weather TEXT,
+    wx_coef REAL,
     result TEXT,
     score TEXT,
     week_no INTEGER,
@@ -645,3 +646,12 @@ async def _migrate(db, current_version: int):
             )
         await db.commit()
         logger.info("Migrated event_pool: added soft_conditions column.")
+
+    if current_version < 13:
+        # 天气系数固化：预报/覆盖时抽定的 wx_coef 落库，结算与平台推送按同系数走。
+        # NULL = v13 前的旧场次（系数未存过），结算回落现抽，推送时补抽落库。
+        cols = await _table_columns(db, "matches")
+        if "wx_coef" not in cols:
+            await db.execute("ALTER TABLE matches ADD COLUMN wx_coef REAL")
+        await db.commit()
+        logger.info("Migrated matches: added wx_coef column.")

@@ -474,8 +474,88 @@ class StadiumDAO:
             (team_name, season, window_seq),
         )
 
-    async def set_match_weather(self, match_id: int, weather: str) -> None:
-        await self._db.execute("UPDATE matches SET weather=? WHERE id=?", (weather, match_id))
+    async def set_match_weather(self, match_id: int, weather: str, wx_coef: float | None = None) -> None:
+        """写天气（覆盖/预报）。wx_coef 非空时一并固化；为空保留原系数（COALESCE）。"""
+        await self._db.execute(
+            "UPDATE matches SET weather=?, wx_coef=COALESCE(?, wx_coef) WHERE id=?",
+            (weather, wx_coef, match_id),
+        )
+
+    async def fill_wx_coef(self, match_id: int, coef: float) -> int:
+        """补抽落库：仅当 wx_coef 仍为 NULL 时写入，返回受影响行数（0=已有系数，幂等）。"""
+        cur = await self._db.execute(
+            "UPDATE matches SET wx_coef=? WHERE id=? AND wx_coef IS NULL", (coef, match_id)
+        )
+        try:
+            return cur.rowcount or 0
+        finally:
+            await cur.close()
+
+    async def list_weathered_matches(self) -> list:
+        """全部已预报天气的场次（按赛季/赛事/轮次排序），供天气推送逐轮遍历。"""
+        return await self._db.fetchall(
+            "SELECT * FROM matches WHERE weather IS NOT NULL AND weather<>'' "
+            "ORDER BY season_number, competition, round_no, id"
+        )
+
+    async def update_match_revenues(
+        self, match_id: int, attendance: int,
+        ticket_revenue: float, commercial: float, broadcast: float,
+    ) -> None:
+        """订正已结算场次的上座/收入（不动 result/score）。"""
+        await self._db.execute(
+            "UPDATE matches SET attendance=?, ticket_revenue=?, commercial=?, broadcast=? WHERE id=?",
+            (attendance, ticket_revenue, commercial, broadcast, match_id),
+        )
+
+    async def has_txn_note(self, note: str) -> bool:
+        """按流水备注查重（天气订正幂等锚：同一场只订正一次）。"""
+        row = await self._db.fetchone(
+            "SELECT 1 FROM revenue_transactions WHERE note=? LIMIT 1", (note,)
+        )
+        return row is not None
+
+    async def apply_weather_correction(
+        self, match_id: int, wx_coef: float, attendance: int,
+        ticket_revenue: float, commercial: float, broadcast: float,
+        team_name: str, season: int, window_seq: int,
+        entries: list, expect_attendance: int | None,
+    ) -> bool:
+        """天气订正单事务落盘：固化系数 + 改写该场上座收入 + 追加冲正流水 + 同步余额。
+
+        守卫 `wx_coef IS NULL AND attendance IS ?`：同一场只订正一次，
+        并发/重复调用返回 False 且不记账（调用方据此跳过）。
+        entries: [(kind, amount, note, round_no), ...]，amount 可为负（收回）。
+        """
+        async def work(conn):
+            cur = await conn.execute(
+                "UPDATE matches SET wx_coef=?, attendance=?, ticket_revenue=?, commercial=?, broadcast=? "
+                "WHERE id=? AND wx_coef IS NULL AND attendance IS ?",
+                (wx_coef, attendance, ticket_revenue, commercial, broadcast,
+                 match_id, expect_attendance),
+            )
+            try:
+                if (cur.rowcount or 0) == 0:
+                    return False
+            finally:
+                await cur.close()
+            delta = 0.0
+            for kind, amount, note, round_no in entries:
+                delta += amount
+                cur = await conn.execute(
+                    "INSERT INTO revenue_transactions (team_name, season_number, window_seq, round_no, kind, amount, note) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (team_name, season, window_seq, round_no, kind, amount, note),
+                )
+                await cur.close()
+            if delta:
+                await conn.execute(
+                    "UPDATE club_balance SET balance=balance+?, updated_at=datetime('now','localtime') WHERE team_name=?",
+                    (delta, team_name),
+                )
+            return True
+
+        return await self._db.execute_transaction(work)
 
     async def get_match(self, match_id: int):
         return await self._db.fetchone("SELECT * FROM matches WHERE id=?", (match_id,))

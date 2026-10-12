@@ -26,6 +26,7 @@ MODULES = [
     "tests.s15_market",
     "tests.s16_sentiment",
     "tests.s17_framework_compat",
+    "tests.s18_club_sync",
 ]
 
 

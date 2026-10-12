@@ -3,6 +3,27 @@
 本文件记录本项目的显著变更，格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [2.12.0] - 2026-10-11
+
+### Added
+
+- **天气推送运营平台（天气真源在本插件）**：新增管理命令 `/主场天气推送 [预览]`（无参=所有已预报天气的轮次；`预览`=只算不写）。逐轮执行三步——① 系数补抽并固化（`matches.wx_coef`，schema v13）② 推送平台 `POST /api/internal/weather-sync` ③ 订正旧账（见下）。
+  - **签名协议**：`x-sign` = HMAC-SHA256(secret, `POST|/api/internal/weather-sync|<ts>|<body>`) 十六进制，`x-timestamp` = Unix 秒；body 为紧凑 JSON（`ensure_ascii=False, separators=(",",":")`），**签名与发送使用同一字节串**；每次尝试重取时间戳。
+  - **推送三态**：未配置 `club_sync_url`/`club_sync_secret` ⇒ 旁路（不推送不报错，供纯本地运行）；缺 `aiohttp` ⇒ 明确报缺依赖；网络异常/5xx ⇒ 重试 3 次后报错，4xx（验签失败等确定性拒绝）不重试。单轮失败不中断其余轮次。
+  - **旧账订正（自家侧）**：只订正「`wx_coef IS NULL` 且已结算（非取消）」的场次——这些场次录入时用的是未落库的现抽系数，与推送口径不可证同。订正按当前球场状态重算上座与收入，逐档差额写入 `revenue_transactions`（`note=天气订正|match:<id>`）并同步余额；守卫 `wx_coef IS NULL AND attendance IS ?` 保证并发/重跑不重复记账（幂等）。
+  - **口径边界（重要）**：订正重算用的是**当前**球场状态（非结算时点快照），且上座扰动 ±3% 与满座余量会重新抽 ⇒ 差额含「系数差 + 扰动差」两部分；两侧扰动各自重抽，对账口径为「输入一致 + 量级一致」而非逐分相等。
+- **schema v13**：`matches` 新增 `wx_coef REAL`（该场天气系数，预报/覆盖时固化）。v13 起录入的赛果按落库系数结算，与推送值可证同；旧库启动自动迁移（`ALTER TABLE`，幂等）。
+- **配置项**：`club_sync_url`（运营平台地址，自动补 `/api/internal/weather-sync`）、`club_sync_secret`（同步密钥，与平台 `WEATHER_SYNC_SECRET` 一致）。默认空 = 旁路。
+- **依赖**：`aiohttp>=3.9.0,<4.0.0`（仅推送路径懒导入，未安装不影响其余功能）。
+
+### Changed
+
+- **天气系数计算固化**：`formula.roll_weather_with_coef(cfg)` 一次抽定「天气 + 系数（4 位小数）」；`attendance()` 新增 `wx_coef` 参数（显式传入即用，`None` 回落现抽，兼容旧调用）。`/主场天气 <轮次>` 与 `/主场天气覆盖` 现在同时落库天气与系数，命令回显含系数。
+
+### Tests
+
+- 新增 `tests/s18_club_sync.py`（17 用例）：签名金标准向量（与平台 `src/lib/hmac.ts` 同值，跨端互通锚）、端点拼接、旁路/缺依赖/200 载荷与请求头/5xx 重试 3 次/4xx 不重试、系数补抽幂等、订正事务原子幂等与余额守恒、全流程推送载荷一致 + 重跑幂等、取消场跳过、预览只读、无天气报错、handler 用法文案、系数区间与扰动幅度、**回执按平台 verdict 汇总（落库 N/M 场 / 已结算 M 场点名 / 未落库按状态计数带 detail / 旁路与预览文案）**。测试 262→279。
+
 ## [2.11.7] - 2026-09-10
 
 ### Changed

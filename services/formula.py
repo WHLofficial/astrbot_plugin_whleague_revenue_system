@@ -259,6 +259,15 @@ def weather_coef(cfg: dict, weather: str | None) -> float:
     return random.uniform(lo, hi)
 
 
+def roll_weather_with_coef(cfg: dict) -> tuple[str, float]:
+    """掷天气并抽定系数（v13 起一次抽定、落库固化，结算与平台推送同源）。
+
+    返回 (weather, coef)：coef 固定 round(.,4) 存储，跨端比对不因浮点尾数漂移。
+    """
+    weather = roll_weather(cfg)
+    return weather, round(weather_coef(cfg, weather), 4)
+
+
 def form_coef_table(cfg: dict) -> dict:
     return parse_json_object(cfg.get("form_coef_table", {}))
 
@@ -368,15 +377,17 @@ def attendance(
     home_influence: float,
     away_influence: float,
     next_attendance_mod: float = 1.0,
+    wx_coef: float | None = None,
 ) -> int:
     """计算实际上座 = min(容量, 死忠 × 上座倍数 × 等级系数 × 战绩 × 天气 × 对手 × 扰动)。
 
     扰动 ±3%，调用方可用 random 直接注入（本函数固定为确定性种子之外的随机）。
+    wx_coef 非空时直接用作天气系数（v13 落库值，结算与预报同源）；为空回落现抽（旧数据）。
     """
     multiplier = attendance_multiplier(cfg, tier)
     tier_coef = tier_attend_coef(cfg, tier)
     form = form_coef(cfg, form_pts_value)
-    wx = weather_coef(cfg, weather)
+    wx = wx_coef if wx_coef is not None else weather_coef(cfg, weather)
     opp = opponent_coef(home_influence, away_influence)
     perturbation = random.uniform(0.97, 1.03)
     demand = fans * multiplier * tier_coef * form * wx * opp * perturbation * next_attendance_mod

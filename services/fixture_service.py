@@ -9,6 +9,7 @@ import re
 from astrbot.api import logger
 
 from . import formula
+from .club_sync import ClubSyncClient
 from .file_import_service import (
     FileImportError,
     check_import_file,
@@ -312,8 +313,8 @@ class FixtureService:
             if m["weather"]:
                 results.append({"home": m["home_team"], "weather": m["weather"], "existing": True})
                 continue
-            weather = formula.roll_weather(self._cfg)
-            await self._dao.set_match_weather(m["id"], weather)
+            weather, coef = formula.roll_weather_with_coef(self._cfg)
+            await self._dao.set_match_weather(m["id"], weather, coef)
             results.append({"home": m["home_team"], "weather": weather, "existing": False})
         return {"round_no": round_no, "competition": competition or "联赛", "matches": results}
 
@@ -328,8 +329,10 @@ class FixtureService:
         )
         for m in matches:
             if m["home_team"] == home_team:
-                await self._dao.set_match_weather(m["id"], weather)
-                return {"home": home_team, "weather": weather}
+                # 覆盖天气即按新类型重抽系数固化（旧系数属于旧类型区间，不保留）
+                coef = round(formula.weather_coef(self._cfg, weather), 4)
+                await self._dao.set_match_weather(m["id"], weather, coef)
+                return {"home": home_team, "weather": weather, "coef": coef}
         raise FixtureError(f"第 {round_no} 轮({competition or '联赛'})无主队「{home_team}」的比赛")
 
     # ─── 赛果录入 ─────────────────────────────────────────
@@ -396,18 +399,22 @@ class FixtureService:
         path = check_import_file(self._db.db_path, name)
         return await self.record_results_file(round_no, path, competition)
 
-    async def _record_one(self, match, result: str, season: int, window_seq: int,
-                          score: str | None = None) -> dict:
-        home, away = match["home_team"], match["away_team"]
-        if result == "C":
-            # 比赛取消：无观众、无收益、不记任何流水
-            await self._dao.set_match_result(match["id"], "C", None, 0.0, 0.0, 0.0, score)
-            return {
-                "home": home, "away": away, "result": "C", "score": score,
-                "weather": match["weather"], "form_pts": 0, "attendance": None,
-                "ticket": 0.0, "commercial": 0.0, "broadcast": 0.0, "total": 0.0,
-            }
-        stadium = await self._stadium_service.ensure_stadium(home)
+    async def _settlement_inputs(self, home: str, away: str, weather: str | None,
+                                 wx_coef: float | None,
+                                 next_attendance_mod: float | None = None,
+                                 create_missing: bool = True) -> dict:
+        """单场结算输入（上座 + 三档收入 + 战绩分）：录入与天气订正共用同一口径。
+
+        next_attendance_mod=None 取球场当前值（录入路径，随后由调用方重置）；
+        订正路径显式传 1.0——该修正属于下一次结算，不该落在历史场次上。
+        create_missing=False 时缺球场记录直接报错，供只读预览使用（不建行）。
+        """
+        stadium = (
+            await self._stadium_service.ensure_stadium(home)
+            if create_missing else await self._dao.get_stadium(home)
+        )
+        if not stadium:
+            raise FixtureError(f"「{home}」没有球场记录，无法计算上座")
         away_stadium = await self._dao.get_stadium(away)
         away_influence = (
             away_stadium["influence"]
@@ -425,15 +432,41 @@ class FixtureService:
             fans=stadium["fans_diehards"],
             capacity=stadium["capacity"],
             tier=stadium["tier"],
-            weather=match["weather"],
+            weather=weather,
             form_pts_value=form_pts,
             home_influence=stadium["influence"],
             away_influence=away_influence,
-            next_attendance_mod=stadium["next_attendance_mod"],
+            next_attendance_mod=(
+                stadium["next_attendance_mod"]
+                if next_attendance_mod is None else next_attendance_mod
+            ),
+            wx_coef=wx_coef,
         )
         ticket, commercial, broadcast = formula.match_revenues(
             self._cfg, att, commercial_level, broadcast_level
         )
+        return {
+            "stadium": stadium, "form_pts": form_pts, "attendance": att,
+            "ticket": ticket, "commercial": commercial, "broadcast": broadcast,
+        }
+
+    async def _record_one(self, match, result: str, season: int, window_seq: int,
+                          score: str | None = None) -> dict:
+        home, away = match["home_team"], match["away_team"]
+        if result == "C":
+            # 比赛取消：无观众、无收益、不记任何流水
+            await self._dao.set_match_result(match["id"], "C", None, 0.0, 0.0, 0.0, score)
+            return {
+                "home": home, "away": away, "result": "C", "score": score,
+                "weather": match["weather"], "form_pts": 0, "attendance": None,
+                "ticket": 0.0, "commercial": 0.0, "broadcast": 0.0, "total": 0.0,
+            }
+        inputs = await self._settlement_inputs(
+            home, away, match["weather"], match["wx_coef"]
+        )
+        stadium = inputs["stadium"]
+        att, ticket = inputs["attendance"], inputs["ticket"]
+        commercial, broadcast = inputs["commercial"], inputs["broadcast"]
         claimed = await self._dao.claim_match_result(
             match["id"], result, att, ticket, commercial, broadcast, score
         )
@@ -455,8 +488,118 @@ class FixtureService:
         return {
             "home": home, "away": away, "result": result, "score": score,
             "weather": match["weather"],
-            "form_pts": form_pts, "attendance": att,
+            "form_pts": inputs["form_pts"], "attendance": att,
             "ticket": ticket, "commercial": commercial, "broadcast": broadcast, "total": round(total, 4),
+        }
+
+    # ─── 天气同步（平台推送 + 旧账订正） ───────────────────
+
+    async def sync_weather(self, preview: bool = False) -> dict:
+        """全量天气同步：逐轮 补抽系数 → 推送平台 → 订正旧账（preview 只算不写）。
+
+        只订正「系数未固化（wx_coef IS NULL）且已结算」的场次：这些场次录入时用的是
+        未落库的现抽系数，与推送口径不可证同；v13 起录入的场次系数即推送值，不重算。
+        订正按当前球场状态重算（非结算时点快照），且上座扰动与满座余量会重新抽，
+        差异含「系数差 + 扰动差」两部分。
+        """
+        rows = await self._dao.list_weathered_matches()
+        if not rows:
+            raise FixtureError("没有已预报天气的场次，先执行 /主场天气 <轮次>")
+        client = ClubSyncClient(self._cfg)
+        if not preview and not client.enabled:
+            raise FixtureError(
+                "未配置 club_sync_url / club_sync_secret，无法推送平台（插件配置中填写后重试）"
+            )
+        groups: dict[tuple, list] = {}
+        for m in rows:
+            key = (m["season_number"], m["competition"], m["round_no"])
+            groups.setdefault(key, []).append(m)
+
+        rounds = []
+        for (season, competition, round_no), matches in groups.items():
+            items = []
+            fixed = 0
+            corrected = []
+            skipped = []
+            for m in matches:
+                weather = m["weather"]
+                coef = m["wx_coef"]
+                drawn = coef is None
+                if drawn:
+                    coef = round(formula.weather_coef(self._cfg, weather), 4)
+                items.append({
+                    "home": m["home_team"], "away": m["away_team"],
+                    "weather": weather, "coef": coef,
+                })
+                if not drawn:
+                    continue
+                settled = bool(m["result"]) and m["result"] != "C"
+                if not settled:
+                    # 未结算/取消场次：只固化系数，下一次录入即按此系数结算
+                    if not preview:
+                        await self._dao.fill_wx_coef(m["id"], coef)
+                        fixed += 1
+                    continue
+                inputs = await self._settlement_inputs(
+                    m["home_team"], m["away_team"], weather, coef,
+                    next_attendance_mod=1.0, create_missing=not preview,
+                )
+                old = (
+                    m["attendance"] or 0, m["ticket_revenue"] or 0.0,
+                    m["commercial"] or 0.0, m["broadcast"] or 0.0,
+                )
+                entries = []
+                delta = 0.0
+                for kind, new_val, old_val in (
+                    ("ticket", inputs["ticket"], old[1]),
+                    ("commercial", inputs["commercial"], old[2]),
+                    ("broadcast", inputs["broadcast"], old[3]),
+                ):
+                    diff = round(new_val - old_val, 4)
+                    if diff:
+                        delta += diff
+                        entries.append((kind, diff, f"天气订正|match:{m['id']}", m["round_no"]))
+                delta = round(delta, 4)
+                if preview:
+                    corrected.append({
+                        "home": m["home_team"], "away": m["away_team"],
+                        "attendance": (old[0], inputs["attendance"]), "delta": delta,
+                    })
+                    continue
+                ok = await self._dao.apply_weather_correction(
+                    m["id"], coef, inputs["attendance"], inputs["ticket"],
+                    inputs["commercial"], inputs["broadcast"], m["home_team"],
+                    m["season_number"], m["window_seq"], entries, m["attendance"],
+                )
+                if ok:
+                    fixed += 1
+                    corrected.append({
+                        "home": m["home_team"], "away": m["away_team"],
+                        "attendance": (old[0], inputs["attendance"]), "delta": delta,
+                    })
+                else:
+                    # 守卫失败：并发已固化系数/改写该场，本次不重复记账
+                    skipped.append(m["home_team"])
+            push = {"status": "preview"} if preview else await client.push_round(
+                season, competition, round_no, items
+            )
+            rounds.append({
+                "season": season, "competition": competition, "round_no": round_no,
+                "matches": len(matches), "fixed": fixed,
+                "corrected": corrected, "skipped": skipped, "push": push,
+            })
+        return {
+            "preview": preview,
+            "rounds": rounds,
+            "totals": {
+                "rounds": len(rounds),
+                "matches": sum(r["matches"] for r in rounds),
+                "fixed": sum(r["fixed"] for r in rounds),
+                "corrected": sum(len(r["corrected"]) for r in rounds),
+                "delta": round(sum(c["delta"] for r in rounds for c in r["corrected"]), 4),
+                "push_ok": sum(1 for r in rounds if r["push"]["status"] == "ok"),
+                "push_error": sum(1 for r in rounds if r["push"]["status"] == "error"),
+            },
         }
 
     # ─── 统计 ─────────────────────────────────────────────
