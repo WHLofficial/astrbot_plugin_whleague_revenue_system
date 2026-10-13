@@ -24,6 +24,12 @@
 
 - 新增 `tests/s18_club_sync.py`（19 用例）：签名金标准向量（与平台 `src/lib/hmac.ts` 同值，跨端互通锚）、端点拼接、旁路/缺依赖/200 载荷与请求头/5xx 重试 3 次/4xx 不重试、系数补抽幂等、订正事务原子幂等与余额守恒、全流程推送载荷一致 + 重跑幂等、取消场跳过、预览只读、无天气报错、handler 用法文案、系数区间与扰动幅度、**回执按平台 verdict 汇总（落库 N/M 场 / 已结算 M 场点名 / 未落库按状态计数带 detail / 旁路与预览文案）**、**赛季号换算（`club_sync_season` 覆盖推送赛季与回执标注；填 0 回落插件赛季号）**。测试 262→281。
 
+### 部署与执行记录
+
+- **服务器部署（2026-10-12）**：v2.12.0 已部署到运行实例（宿主 bind mount 直改插件目录 11 个源文件、md5 逐一致 → 改托管配置 → `docker restart`）；启动日志 `Migrated matches: added wx_coef column` + `Database schema migrated 12 -> 13` ⇒ schema v13 生效；配置 `club_sync_url=https://club.whleague.win`、`club_sync_secret`（与平台 `WEATHER_SYNC_SECRET` 同值）、`club_sync_season=9`（插件赛季号 2 = 平台 S9）。
+- **全量推送执行（2026-10-12）**：`/主场天气推送`（无预览）回执 `{rounds:20, matches:116, fixed:116, corrected:23, delta:26.1945, push_ok:20, push_error:0}`——20 轮全部推成功、116 场系数固化、自家侧冲正 23 场、差额合计 **+26.1945**；平台 verdict `created 103 / skipped_no_stadium 13 / unmatched 0`（13 场为主队无球场的平台侧既有状态，不是推送错误）。
+- **平台侧订正批（2026-10-13T01:32Z）**：平台执行 `scripts/prod-20261011-s9-weather-recalc/sql/02-recalc.sql`——237/237 句提交（changes 237 / rows_written 471 / 失败批 0）、账本 78 笔合计 +0.63、守恒位 0.00、收敛 **81/81** 与推送存证逐场一致 ⇒ 两侧 S9 历史账至此收敛（对账口径：输入一致 + 量级一致，两侧扰动各自重抽）。
+
 ## [2.11.7] - 2026-09-10
 
 ### Changed
