@@ -1006,6 +1006,50 @@ class AdminHandler:
                 lines.append(f"· {key}: {val}")
         yield event.plain_result("\n".join(lines))
 
+    async def sync_fixture_times(self, event) -> AsyncGenerator[MessageEventResult, None]:
+        """从 tour 公开接口拉开球时刻（P3-C）。tour 是唯一真源，本地只存快照。"""
+        deny = await self._guard(event)
+        if deny:
+            yield event.plain_result(deny)
+            return
+        state = await self._plugin.fixture_service.get_state()
+        result = await self._plugin.tour_sync_service.sync(state["season_number"])
+        status = result.get("status")
+        if status == "bypass":
+            yield event.plain_result("未配置 tour_api_base，时刻同步未执行（配置后可再试）。")
+            return
+        if status == "error":
+            yield event.plain_result(f"⚠️ {result.get('error', '同步失败')}")
+            return
+
+        label = result.get("season_label") or f"第 {state['season_number']} 赛季"
+        lines = [
+            f"🕒 {label} 时刻同步：更新 {result['updated']} 场"
+            f"（未变 {result['unchanged']}，tour 共 {result['fetched']} 场）"
+        ]
+        for note, items in (
+            ("本地缺场次", result["missing_local"]),
+            ("tour 暂无此场", result["missing_tour"]),
+            ("冲突未覆盖", result["conflicts"]),
+        ):
+            if not items:
+                continue
+            shown = items[:5]
+            detail = "；".join(
+                f"{i.get('competition', '')}{i.get('round_no', '')} "
+                f"{i.get('home') or i.get('home_team')} vs {i.get('away') or i.get('away_team')}"
+                + (f"（{i['reason']}）" if i.get("reason") else "")
+                for i in shown
+            )
+            more = f" 等 {len(items)} 项" if len(items) > len(shown) else ""
+            lines.append(f"· {note}：{detail}{more}")
+        if result.get("skipped"):
+            detail = "、".join(f"{k} {v}" for k, v in result["skipped"].items())
+            lines.append(f"· 跳过：{detail}")
+        for line in lines[1:]:
+            logger.info(f"timesync {line}")
+        yield event.plain_result(chr(10).join(lines))
+
     async def form_backfill(self, event) -> AsyncGenerator[MessageEventResult, None]:
         """主场补差：战绩系数修正 + 满座微降 + 死忠重定基；默认预览只读，
         「确认」才落库（成分级幂等），「强制」重抽满座区间场次。"""

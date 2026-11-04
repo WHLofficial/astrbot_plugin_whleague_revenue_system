@@ -3,6 +3,22 @@
 本文件记录本项目的显著变更，格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [2.13.0] - 2026-11-04
+
+### Changed
+
+- **开球时刻真源移交 tour**：`/主场赛程导入` 仍解析 `[周] [天] [时间]`（老文件不报错）但**不再落库**，返回体新增 `ignored_times` 计数；时刻一律由新增的 `/主场赛程同步`（别名 `/主场时刻同步`）从 tour 公开接口只读拉取，写入 `week_no/day_no/match_time` + `tour_match_id` + `kickoff_source='tour'`。已完赛场次不覆盖、主客相反不猜（都记「冲突未覆盖」）、tour 未排期不写。
+
+### Added
+
+- **`services/tour_sync.py`**：拉 `/api/public/tournaments` + `/{id}`（stages）+ `/{id}/matches`；队名归一（去 `(CPU)`/`（CPU）` 与空白）；赛事识别（顶级联赛/次级联赛/冠军杯）；阶段偏移（次级决赛阶段叠加预赛轮次数，S9 = 14 ⇒ 插件 15–20 = tour 1–6；杯赛只同步小组赛，淘汰赛两回合同轮次号且插件无 `leg` 列，暂不同步）；同步计划纯函数（updates/unchanged/missing_local/missing_tour/conflicts）。配置 `tour_api_base`（默认 `https://tour.whleague.win`，留空旁路）、`tour_sync_season`（留空用插件赛季名）。
+- **schema v14**：`matches` 新增 `tour_match_id INTEGER`、`kickoff_source TEXT`（启动自动迁移，幂等）。
+- **dao**：`list_matches_by_season`、`set_match_kickoff`、`clear_match_kickoff`。
+
+### Tests
+
+- 新增 `tests/s19_tour_sync.py`（7 用例）：队名归一、赛事识别、阶段偏移、映射跳过（未排时刻/对手未定/淘汰赛）、同步计划（更新/未变/冲突/本地缺/tour 暂无）、假 aiohttp 全流程写库、错误旁路。`s2`/`s7` 改为断言「导入不存时刻 + `ignored_times`」，`s6` 命令清单加 `主场赛程同步`（43 个 = 管理 32 + 玩家 11）。全量 0 失败。
+
 ## [2.12.0] - 2026-10-11
 
 ### Added

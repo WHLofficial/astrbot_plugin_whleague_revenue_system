@@ -29,6 +29,18 @@
     "type": "int",
     "default": 0
   },
+  "tour_api_base": {
+    "description": "赛事系统地址（时刻同步）",
+    "hint": "填 tour 根地址（如 https://tour.whleague.win）；留空则不向 tour 拉取开球时刻。",
+    "type": "string",
+    "default": "https://tour.whleague.win"
+  },
+  "tour_sync_season": {
+    "description": "时刻同步的赛季标签",
+    "hint": "用于匹配 tour 赛事名里的赛季（如 S9）；留空则用插件当前赛季名。",
+    "type": "string",
+    "default": ""
+  },
   "tier_table": {
     "description": "球场等级表",
     "hint": "内部参数，请勿修改。JSON：等级→{名称,座位下限,座位上限,半赛季基础维护,每万座每场维护,上座系数,升级费}。",

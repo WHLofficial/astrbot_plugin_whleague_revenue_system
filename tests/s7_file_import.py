@@ -354,8 +354,9 @@ async def test_fixture_file_schedule_and_result_score():
             result = await env.fixture_service.import_fixtures_file(str(p))
             assert result["imported"] == 1, result
             assert result["file_errors"] == [], result
+            assert result["ignored_times"] == 1, result
             m = (await env.dao.get_round_matches(1, 1, 1))[0]
-            assert m["week_no"] == 12 and m["day_no"] == 6 and m["match_time"] == "15:00"
+            assert m["week_no"] is None and m["day_no"] is None and m["match_time"] is None, m
         finally:
             p.unlink(missing_ok=True)
 

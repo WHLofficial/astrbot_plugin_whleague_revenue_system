@@ -1,6 +1,6 @@
 from astrbot.api import logger
 
-SCHEMA_VERSION = 13
+SCHEMA_VERSION = 14
 
 SQL_CREATE_TABLES = r"""
 
@@ -60,6 +60,8 @@ CREATE TABLE IF NOT EXISTS matches (
     week_no INTEGER,
     day_no INTEGER,
     match_time TEXT,
+    tour_match_id INTEGER,
+    kickoff_source TEXT,
     attendance INTEGER,
     ticket_revenue REAL,
     commercial REAL,
@@ -655,3 +657,16 @@ async def _migrate(db, current_version: int):
             await db.execute("ALTER TABLE matches ADD COLUMN wx_coef REAL")
         await db.commit()
         logger.info("Migrated matches: added wx_coef column.")
+
+    if current_version < 14:
+        # 开球时刻改由 tour 公开接口提供（P3-C）：本地降级为快照。
+        # tour_match_id 是绑定锚点；kickoff_source 记来源（tour / 旧本地数据为空）。
+        cols = await _table_columns(db, "matches")
+        for col, ddl in (
+            ("tour_match_id", "ALTER TABLE matches ADD COLUMN tour_match_id INTEGER"),
+            ("kickoff_source", "ALTER TABLE matches ADD COLUMN kickoff_source TEXT"),
+        ):
+            if col not in cols:
+                await db.execute(ddl)
+        await db.commit()
+        logger.info("Migrated matches: added tour_match_id / kickoff_source columns.")

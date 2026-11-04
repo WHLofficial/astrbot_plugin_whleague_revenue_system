@@ -77,6 +77,7 @@ def parse_fixture_lines(text: str, cfg: dict) -> list[tuple]:
 
     轮次支持文字前缀识别赛事（formula.parse_round_token）。
     返回 (轮次, 赛事, 主队, 客队, 周, 天, 时间)。
+    时刻字段仍然解析以兼容老文件，但 import_fixtures 会丢弃（P3-C：真源在 tour）。
     """
     out = []
     for raw_line in str(text or "").splitlines():
@@ -204,21 +205,25 @@ class FixtureService:
 
         known = await self._stadium_service.list_known_teams()
         errors = []
-        imported, skipped = 0, 0
+        imported, skipped, ignored_times = 0, 0, 0
         for round_no, competition, home, away, week, day, match_time in rows:
             if home not in known or away not in known:
                 errors.append(f"第{round_no}轮({competition}) {home} vs {away}: 未知球队（先导入属性或已建队）")
                 skipped += 1
                 continue
+            # P3-C：时刻真源在 tour。这里仍解析周/天/时间（老文件不报错），但不再落库，
+            # 导入后跑一次 /主场赛程同步 从 tour 拉取。
+            if week is not None or day is not None or match_time is not None:
+                ignored_times += 1
             for team in (home, away):
                 await self._stadium_service.ensure_stadium(team)
             inserted = await self._dao.add_match(season, window_seq, round_no, home, away,
-                                                 competition, week_no=week, day_no=day,
-                                                 match_time=match_time)
+                                                 competition)
             imported += inserted
             if not inserted:
                 errors.append(f"第{round_no}轮({competition}) {home} vs {away}: 重复赛程，已忽略")
         return {"imported": imported, "skipped": skipped, "errors": errors[:10],
+                "ignored_times": ignored_times,
                 "season": season, "window_seq": window_seq}
 
     async def import_fixtures_file(self, path: str) -> dict:

@@ -326,6 +326,39 @@ class StadiumDAO:
         finally:
             await cur.close()
 
+    async def list_matches_by_season(self, season: int) -> list:
+        """取一季全部赛程行（含时刻快照与 tour 绑定），供时刻同步比对。"""
+        cur = await self._db.execute(
+            "SELECT id, round_no, competition, home_team, away_team, week_no, day_no, "
+            "match_time, tour_match_id, kickoff_source, result FROM matches "
+            "WHERE season_number=? ORDER BY round_no, id",
+            (season,),
+        )
+        try:
+            return await cur.fetchall()
+        finally:
+            await cur.close()
+
+    async def set_match_kickoff(
+        self, match_id: int, week_no: int | None, day_no: int | None,
+        match_time: str | None, tour_match_id: int | None = None,
+        source: str = "tour",
+    ) -> None:
+        """写入时刻快照（tour 为真源，本地只存副本）并记下绑定锚点。"""
+        await self._db.execute(
+            "UPDATE matches SET week_no=?, day_no=?, match_time=?, tour_match_id=?, "
+            "kickoff_source=? WHERE id=?",
+            (week_no, day_no, match_time, tour_match_id, source, match_id),
+        )
+
+    async def clear_match_kickoff(self, match_id: int) -> None:
+        """清空时刻快照（tour 侧未排期时调用），绑定关系保留。"""
+        await self._db.execute(
+            "UPDATE matches SET week_no=NULL, day_no=NULL, match_time=NULL, "
+            "kickoff_source='tour' WHERE id=?",
+            (match_id,),
+        )
+
     # ─── 命名轮次登记（同名即为同一轮，按（赛季,赛事）导入顺序定序） ──
 
     async def get_named_round(self, season: int, competition: str, token: str) -> int | None:

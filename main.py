@@ -61,6 +61,7 @@ class StadiumPlugin(Star):
         from .services.market_service import MarketService
         from .services.negotiation_bridge import NegotiationBridge
         from .services.stadium_service import StadiumService
+        from .services.tour_sync import TourSyncService
         from .services.window_service import WindowService
 
         self.bridge = NegotiationBridge(self.config_cache)
@@ -76,6 +77,7 @@ class StadiumPlugin(Star):
             self.db, self.dao, self.config_cache, self.stadium_service,
             state_listeners=self._state_listeners,
         )
+        self.tour_sync_service = TourSyncService(self.dao, self.config_cache)
         self.window_service = WindowService(
             self.db, self.dao, self.config_cache, self.fans_service, self.brand_service,
             self.event_engine,
@@ -311,6 +313,11 @@ class StadiumPlugin(Star):
     @filter.command("主场赛程导入")
     async def cmd_import_fixtures(self, event: AstrMessageEvent) -> AsyncGenerator[MessageEventResult, None]:
         async for r in self._admin_cmd(event, self.admin_handler.import_fixtures):
+            yield r
+
+    @filter.command("主场赛程同步", alias={"主场时刻同步"})
+    async def cmd_sync_tour_times(self, event: AstrMessageEvent) -> AsyncGenerator[MessageEventResult, None]:
+        async for r in self._admin_cmd(event, self.admin_handler.sync_fixture_times):
             yield r
 
     @filter.command("主场补差")

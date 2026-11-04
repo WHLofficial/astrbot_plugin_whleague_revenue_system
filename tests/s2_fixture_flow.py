@@ -185,12 +185,11 @@ async def test_schedule_fields_and_score():
             "1 利物浦 巴塞罗那 W12 D6 15:00\n2 利物浦 巴塞罗那 15:00\n3 利物浦 巴塞罗那\n"
         )
         assert r["imported"] == 3, r
-        m1 = (await env.dao.get_round_matches(1, 1, 1))[0]
-        assert m1["week_no"] == 12 and m1["day_no"] == 6 and m1["match_time"] == "15:00"
-        m2 = (await env.dao.get_round_matches(1, 1, 2))[0]
-        assert m2["week_no"] is None and m2["match_time"] == "15:00"
-        m3 = (await env.dao.get_round_matches(1, 1, 3))[0]
-        assert m3["week_no"] is None and m3["day_no"] is None and m3["match_time"] is None
+        # P3-C：周/天/时间仍解析但不再落库（真源在 tour，导入后跑 /主场赛程同步）
+        assert r["ignored_times"] == 2, r
+        for round_no in (1, 2, 3):
+            m = (await env.dao.get_round_matches(1, 1, round_no))[0]
+            assert m["week_no"] is None and m["day_no"] is None and m["match_time"] is None, m
 
         # 非法天/时间拒绝
         for bad in ("4 利物浦 巴塞罗那 D9 15:00", "5 利物浦 巴塞罗那 25:00"):

@@ -46,10 +46,10 @@ class _FakeEvent:
 async def test_plugin_import_and_commands():
     from astrbot_plugin_whleague_revenue_system import main as plugin_main
 
-    # 检查注册的命令名（v2.12.0：42 个，管理 31 + 玩家 11）
+    # 检查注册的命令名（v2.13.0：43 个，管理 32 + 玩家 11）
     src = inspect.getsource(plugin_main)
     expected_commands = [
-        "主场赛程导入", "主场天气", "主场天气覆盖", "主场天气推送", "主场赛果录入", "主场推进",
+        "主场赛程导入", "主场赛程同步", "主场天气", "主场天气覆盖", "主场天气推送", "主场赛果录入", "主场推进",
         "主场赛季命名",
         "主场属性导入", "主场设施", "主场改名", "主场发放",
         "主场事件", "主场事件选择", "主场事件选择列表", "主场事件结算", "主场事件取消",
