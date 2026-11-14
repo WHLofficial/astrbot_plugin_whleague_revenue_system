@@ -67,7 +67,7 @@ async def test_map_tour_matches():
     assert out["skipped"]["淘汰赛"] == 1, out["skipped"]
 
 
-async def test_map_skips_missing_fields():
+async def test_map_keeps_unscheduled_rows():
     matches = [
         _tour_match(1, 1, 1, "利物浦", "纽卡", week=None, time=None),
         _tour_match(2, 1, 2, None, "纽卡"),
@@ -76,7 +76,10 @@ async def test_map_skips_missing_fields():
     out = map_tour_matches("S9 | 顶级联赛", [STAGES_SUB[0]], matches)
     assert out["skipped"]["未排时刻"] == 1
     assert out["skipped"]["对手未定"] == 1
-    assert [r["tour_match_id"] for r in out["rows"]] == [3]
+    rows = {r["tour_match_id"]: r for r in out["rows"]}
+    assert set(rows) == {1, 3}                     # 未排时刻也保留，供补建行
+    assert rows[1]["scheduled"] is False and rows[1]["week"] is None
+    assert rows[3]["scheduled"] is True and rows[3]["round_no"] == 3
 
 
 async def test_map_unknown_competition():
@@ -94,6 +97,7 @@ async def test_plan_sync_updates_and_conflicts():
         _tour_match(3, 1, 3, "阿森纳", "热刺", time="20:00"),      # 已完赛，时刻不同也不覆盖
         _tour_match(4, 1, 4, "曼联", "里昂"),                      # 主客相反
         _tour_match(5, 1, 5, "巴萨", "拜仁"),                      # 本地没有
+        _tour_match(6, 1, 7, "皇马", "尤文", week=None, time=None),  # tour 未排期
     ])["rows"]
     local = [
         {"id": 11, "competition": "顶级联赛", "round_no": 1, "home_team": "利物浦",
@@ -116,7 +120,8 @@ async def test_plan_sync_updates_and_conflicts():
     assert [u["match_id"] for u in plan["updates"]] == [11], plan["updates"]
     assert [u["tour_match_id"] for u in plan["unchanged"]] == [2]
     assert {c["tour_match_id"] for c in plan["conflicts"]} == {3, 4}, plan["conflicts"]
-    assert [m["tour_match_id"] for m in plan["missing_local"]] == [5]
+    assert [m["tour_match_id"] for m in plan["missing_local"]] == [5, 6]
+    assert plan["pending"] == []                    # 本地无行先补建，补建后才谈 pending
     assert [m["home_team"] for m in plan["missing_tour"]] == ["多特"]
 
 
@@ -185,6 +190,8 @@ async def test_service_sync_writes_snapshot():
             "/api/public/tournaments/7": {"stages": STAGES_SUB[:1]},
             "/api/public/tournaments/7/matches": {"matches": [
                 _tour_match(101, 1, 1, "利物浦(CPU)", "纽卡"),
+                _tour_match(102, 1, 2, "曼城", "切尔西"),
+                _tour_match(103, 1, 3, "阿森纳", "热刺", week=None, day=None, time=None),
             ]},
         }
         calls, json, old = install_fake_aiohttp(routes)
@@ -195,20 +202,27 @@ async def test_service_sync_writes_snapshot():
         finally:
             restore_aiohttp(old)
         assert r["status"] == "ok", r
-        assert r["updated"] == 1 and r["fetched"] == 1, r
+        assert r["created"] == 2 and r["updated"] == 2 and r["fetched"] == 3, r
+        assert len(r["pending"]) == 1 and r["pending"][0]["tour_match_id"] == 103, r
         assert any(u.endswith("/api/public/tournaments/7/matches") for u in calls), calls
         assert not any("S8" in u for u in calls)
         m = (await env.dao.get_round_matches(1, 1, 1))[0]
         assert m["week_no"] == 5 and m["day_no"] == 6 and m["match_time"] == "17:30", m
         assert m["tour_match_id"] == 101 and m["kickoff_source"] == "tour", m
+        # 补建行也写入了时刻；未排期行建了空时刻行
+        m2 = (await env.dao.get_round_matches(1, 1, 2))[0]
+        assert m2["match_time"] == "17:30" and m2["tour_match_id"] == 102, m2
+        m3 = (await env.dao.get_round_matches(1, 1, 3))[0]
+        assert m3["match_time"] is None and m3["tour_match_id"] is None, m3
 
-        # 再跑一次：全部未变
+        # 再跑一次：全部未变，pending 不计更新
         calls, json, old = install_fake_aiohttp(routes)
         try:
             r2 = await svc.sync(1)
         finally:
             restore_aiohttp(old)
-        assert r2["updated"] == 0 and r2["unchanged"] == 1, r2
+        assert r2["created"] == 0 and r2["updated"] == 0 and r2["unchanged"] == 2, r2
+        assert len(r2["pending"]) == 1, r2
         # 本地多出来的次级场次计入 tour 暂无此场
         assert r2["missing_tour"] and r2["missing_tour"][0]["round_no"] == 15, r2
     finally:

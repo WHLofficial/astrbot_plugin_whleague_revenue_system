@@ -74,7 +74,11 @@ def stage_offsets(stages: list, matches: list) -> dict:
 
 
 def map_tour_matches(tournament_name, stages, matches) -> dict:
-    """tour 的一个赛事 → 待同步行 + 跳过原因统计。"""
+    """tour 的一个赛事 → 待同步行 + 跳过原因统计。
+
+    未排时刻的联赛场次也会返回（week/day/time 为 None）：tour 是赛程结构真源，
+    本地缺行时要能补建，只是暂无时刻可写。
+    """
     competition = competition_of(tournament_name)
     if competition is None:
         raise TourSyncError(f"认不出赛事「{tournament_name}」对应本地哪一项（需含 顶级联赛/次级联赛/冠军杯）")
@@ -94,17 +98,18 @@ def map_tour_matches(tournament_name, stages, matches) -> dict:
             skipped["对手未定"] += 1
             continue
         week, day, time = m.get("kickoffWeek"), m.get("kickoffDay"), m.get("kickoffTime")
-        if not week or not day or not time:
+        scheduled = bool(week and day and time)
+        if not scheduled:
             skipped["未排时刻"] += 1
-            continue
         rows.append({
             "competition": competition,
             "round_no": int(m["round"]) + int(offset),
             "home": home,
             "away": away,
-            "week": int(week),
-            "day": int(day),
-            "time": str(time),
+            "week": int(week) if scheduled else None,
+            "day": int(day) if scheduled else None,
+            "time": str(time) if scheduled else None,
+            "scheduled": scheduled,
             "tour_match_id": int(m["id"]),
             "status": m.get("status"),
         })
@@ -119,13 +124,14 @@ def plan_kickoff_sync(tour_rows: list, local_rows: list) -> dict:
     """比对 tour 行与本地行，给出要写的更新与各类落空清单（纯函数，不碰库）。
 
     已完赛/已有结果的场次不覆盖时刻（记 conflict），主客相反也不猜（记 conflict）。
+    tour 尚未排期的场次只记 pending，不写 NULL 覆盖本地快照。
     """
     local = {}
     for raw in local_rows:
         row = dict(raw)  # sqlite3.Row 没有 .get
         local[_key(row["competition"], row["round_no"], row["home_team"], row["away_team"])] = row
 
-    updates, unchanged, missing_local, conflicts = [], [], [], []
+    updates, unchanged, missing_local, conflicts, pending = [], [], [], [], []
     seen = set()
     for t in tour_rows:
         key = _key(t["competition"], t["round_no"], t["home"], t["away"])
@@ -139,6 +145,9 @@ def plan_kickoff_sync(tour_rows: list, local_rows: list) -> dict:
                 missing_local.append(t)
             continue
         seen.add(key)
+        if not t.get("scheduled", t.get("time") is not None):
+            pending.append(t)
+            continue
         same = (row.get("week_no") == t["week"] and row.get("day_no") == t["day"]
                 and row.get("match_time") == t["time"])
         if row.get("result"):
@@ -161,6 +170,7 @@ def plan_kickoff_sync(tour_rows: list, local_rows: list) -> dict:
         "missing_local": missing_local,
         "missing_tour": missing_tour,
         "conflicts": conflicts,
+        "pending": pending,
     }
 
 
@@ -240,6 +250,11 @@ class TourSyncService:
             fetched = await client.fetch_rows(label)
             local = await self._dao.list_matches_by_season(season)
             plan = plan_kickoff_sync(fetched["rows"], local)
+            created = await self._create_missing(season, plan["missing_local"])
+            if created:
+                # 新建行没有 id/tour 绑定，重算一次计划把它们的时刻一并写进去
+                local = await self._dao.list_matches_by_season(season)
+                plan = plan_kickoff_sync(fetched["rows"], local)
             for u in plan["updates"]:
                 await self._dao.set_match_kickoff(
                     u["match_id"], u["week"], u["day"], u["time"], u["tour_match_id"], "tour",
@@ -249,11 +264,13 @@ class TourSyncService:
                 "season_label": label,
                 "tournaments": fetched["tournaments"],
                 "fetched": len(fetched["rows"]),
+                "created": created,
                 "updated": len(plan["updates"]),
                 "unchanged": len(plan["unchanged"]),
                 "missing_local": plan["missing_local"],
                 "missing_tour": plan["missing_tour"],
                 "conflicts": plan["conflicts"],
+                "pending": plan["pending"],
                 "skipped": fetched["skipped"],
             }
         except TourSyncError as e:
@@ -261,3 +278,19 @@ class TourSyncService:
         except Exception as e:  # 网络/解析等一律兜住，命令层给中文提示
             logger.error(f"tour 时刻同步失败: {type(e).__name__}: {e}")
             return {"status": "error", "error": f"同步失败：{type(e).__name__}: {e}"}
+
+    async def _create_missing(self, season: int, rows: list) -> int:
+        """tour 有、本地没有的联赛场次补建行（含未排时刻的），返回实际新建数。
+
+        用当前窗口号落库：新行属于当前结算窗口；重复跑由 matches 唯一键幂等。
+        """
+        if not rows:
+            return 0
+        state = await self._dao.get_league_state()
+        window_seq = int(state["window_seq"]) if state else 1
+        created = 0
+        for t in rows:
+            created += await self._dao.add_match(
+                season, window_seq, t["round_no"], t["home"], t["away"], t["competition"],
+            )
+        return created

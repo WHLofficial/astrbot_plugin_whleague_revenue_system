@@ -499,11 +499,28 @@ class ChartService:
 
     # ─── 轮次表格图（展示工作表风格） ─────────────────────
 
+    async def _resolve_round(self, season: int, window_seq: int, round_no: int,
+                             competition: str) -> tuple[int, list]:
+        """当前窗口优先；窗口已推进时回落到该轮最近出现的窗口。
+
+        提示「还没有赛程」往往不是没导入，而是导入时的 window_seq 已经不是
+        当前窗口；看赛程图不该被窗口挡住。
+        """
+        matches = await self._dao.get_round_matches(season, window_seq, round_no, competition)
+        if matches:
+            return window_seq, matches
+        latest = await self._dao.get_round_matches_latest(season, round_no, competition)
+        if latest:
+            return int(latest[0]["window_seq"]), latest
+        return window_seq, []
+
     async def render_round_chart(self, round_no: int, competition: str = "联赛") -> str:
         state = await self._dao.get_league_state()
         season = state["season_number"] if state else 1
         window_seq = state["window_seq"] if state else 1
-        matches = await self._dao.get_round_matches(season, window_seq, round_no, competition)
+        window_seq, matches = await self._resolve_round(
+            season, window_seq, round_no, competition
+        )
         played = sorted((dict(m) for m in matches if m["result"]), key=match_sort_key)
         if not played:
             raise ChartError(f"第 {round_no} 轮({competition})还没有已录入赛果的比赛")
@@ -563,7 +580,9 @@ class ChartService:
         state = await self._dao.get_league_state()
         season = state["season_number"] if state else 1
         window_seq = state["window_seq"] if state else 1
-        matches = await self._dao.get_round_matches(season, window_seq, round_no, competition)
+        window_seq, matches = await self._resolve_round(
+            season, window_seq, round_no, competition
+        )
         if not matches:
             raise ChartError(f"第 {round_no} 轮({competition})还没有赛程")
         matches = sorted((dict(m) for m in matches), key=match_sort_key)

@@ -427,6 +427,25 @@ class StadiumDAO:
             (season, window_seq, round_no),
         )
 
+    async def get_round_matches_latest(
+        self, season: int, round_no: int, competition: str | None = None
+    ) -> list:
+        """该轮最近一次出现的窗口里的全部行（含已推进窗口）。
+
+        轮次号在同一赛季内唯一，但窗口推进会改变 window_seq；看赛程图不应被
+        当前窗口挡住，故按 MAX(window_seq) 回落。
+        """
+        where = "season_number=? AND round_no=?"
+        params: list = [season, round_no]
+        if competition:
+            where += " AND competition=?"
+            params.append(competition)
+        return await self._db.fetchall(
+            f"SELECT * FROM matches WHERE {where} AND window_seq=("
+            f"SELECT MAX(window_seq) FROM matches WHERE {where}) ORDER BY id",
+            tuple(params + params),
+        )
+
     async def get_window_matches(self, season: int, window_seq: int) -> list:
         return await self._db.fetchall(
             "SELECT * FROM matches WHERE season_number=? AND window_seq=? ORDER BY round_no, id",

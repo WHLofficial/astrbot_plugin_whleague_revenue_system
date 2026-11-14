@@ -1027,6 +1027,8 @@ class AdminHandler:
             f"🕒 {label} 时刻同步：更新 {result['updated']} 场"
             f"（未变 {result['unchanged']}，tour 共 {result['fetched']} 场）"
         ]
+        if result.get("created"):
+            lines[0] += f"，补建 {result['created']} 场"
         for note, items in (
             ("本地缺场次", result["missing_local"]),
             ("tour 暂无此场", result["missing_tour"]),
@@ -1043,9 +1045,14 @@ class AdminHandler:
             )
             more = f" 等 {len(items)} 项" if len(items) > len(shown) else ""
             lines.append(f"· {note}：{detail}{more}")
+        if result.get("pending"):
+            lines.append(f"· tour 未排期：{len(result['pending'])} 场（已建行，时刻待 tour 排期）")
         if result.get("skipped"):
-            detail = "、".join(f"{k} {v}" for k, v in result["skipped"].items())
-            lines.append(f"· 跳过：{detail}")
+            detail = "、".join(
+                f"{k} {v}" for k, v in result["skipped"].items() if k != "未排时刻"
+            )
+            if detail:
+                lines.append(f"· 跳过：{detail}")
         for line in lines[1:]:
             logger.info(f"timesync {line}")
         yield event.plain_result(chr(10).join(lines))

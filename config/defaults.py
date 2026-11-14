@@ -2,7 +2,7 @@ import json
 import math
 import os
 
-PLUGIN_VERSION = "2.12.0"
+PLUGIN_VERSION = "2.14.0"
 """插件版本号，与 metadata.yaml 保持一致（tests/s17_framework_compat 校验）。"""
 
 _SCHEMA_PATH = os.path.join(

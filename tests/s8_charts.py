@@ -206,6 +206,22 @@ async def test_preview_chart_renders():
         await env.teardown()
 
 
+async def test_preview_chart_falls_back_to_previous_window():
+    """窗口推进后旧轮次仍能出图（不再误报「还没有赛程」）。"""
+    env = await TestEnv().setup()
+    try:
+        for team in ("利物浦", "巴塞罗那"):
+            await env.stadium_service.import_attributes(team, influence=120.0)
+        await env.fixture_service.import_fixtures("顶级9 利物浦 巴塞罗那")
+        await env.fixture_service.advance_window("tester")
+        svc = ChartService(env.db, env.dao, env.cfg)
+        path = await svc.render_round_preview_chart(1, "顶级联赛")
+        assert _png_ok(path), path
+        assert "_w1_" in Path(path).name, path       # 图落在导入时的窗口 1
+    finally:
+        await env.teardown()
+
+
 async def test_preview_chart_no_fixtures():
     env = await TestEnv().setup()
     try:

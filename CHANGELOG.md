@@ -3,6 +3,22 @@
 本文件记录本项目的显著变更，格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [2.14.0] - 2026-11-14
+
+### Added
+
+- **`/主场赛程同步` 自动补建本地缺行**：tour 有、本地没有的联赛场次按「赛事+轮次+主客」建行（落在当前结算窗口，含 tour 尚未排期的场次），返回体新增 `created`；命令输出首行追加「补建 N 场」。补建后重算一次计划，已排时刻的行同批写入，避免两轮同步。
+- **未排期清单**：同步计划新增 `pending`（本地已有行、tour 尚未给时刻），永远不写空时刻覆盖本地快照；命令输出单列「tour 未排期：N 场（已建行，时刻待 tour 排期）」。
+
+### Fixed
+
+- **赛程图被窗口挡住**：`render_round_chart` / `render_round_preview_chart` 先查当前窗口，查不到时回落到该轮最近一次出现的窗口（`dao.get_round_matches_latest`，按 `MAX(window_seq)`）。窗口推进后旧轮次不再误报「还没有赛程」。
+- **版本号漂移**：`config/defaults.py` 从 2.12.0 对齐到 2.14.0（v2.13.0 只改了 metadata）。
+
+### Tests
+
+- `tests/s19_tour_sync.py` 更新：未排时刻行保留断言；同步计划 pending；服务全流程新增 2 行补建（1 行有时刻、1 行未排期），二次同步 `created=0 / unchanged=2 / pending=1`。
+
 ## [2.13.0] - 2026-11-04
 
 ### Changed
