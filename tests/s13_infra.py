@@ -1,4 +1,7 @@
-"""基础设施直测：备份快照/清理（含消失文件容错）+ 群调度门禁与文件钩子。"""
+"""基础设施直测：备份快照/清理（含消失文件容错）+ 群调度门禁。
+
+v3：群文件自动导入钩子已随导入/录入功能下线删除。
+"""
 
 import os
 import sqlite3
@@ -7,14 +10,14 @@ from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
 from tests.common import TestEnv, install_stubs  # noqa: E402,F401  (导入即装桩)
 
 from astrbot_plugin_whleague_revenue_system.main import StadiumPlugin  # noqa: E402
 from astrbot_plugin_whleague_revenue_system.services.backup_service import (  # noqa: E402
     BackupService,
 )
-
-from astrbot.api.message_components import File  # noqa: E402  (桩)
 
 
 def _plugin(env, whitelist):
@@ -24,17 +27,15 @@ def _plugin(env, whitelist):
     p.config_cache["group_whitelist"] = whitelist
     p.dao = env.dao
     p.db = env.db
-    p.stadium_service = env.stadium_service
-    p.fixture_service = env.fixture_service
+    p.weather_service = env.weather_service
     return p
 
 
 class _GroupEvent:
-    def __init__(self, group="123", sender="10001", admin=False, files=()):
+    def __init__(self, group="123", sender="10001", admin=False):
         self._group = group
         self._sender = sender
         self._admin = admin
-        self._files = list(files)
         self.sent = []
 
     def get_group_id(self):
@@ -45,16 +46,6 @@ class _GroupEvent:
 
     def is_admin(self):
         return self._admin
-
-    def get_messages(self):
-        return list(self._files)
-
-    async def send(self, msg):
-        self.sent.append(msg)
-
-
-def _file_comp(name, path):
-    return File(name=name, file=path, url="")
 
 
 # ─── 备份服务 ─────────────────────────────────────────────
@@ -151,7 +142,7 @@ async def test_backup_cleanup_tolerates_vanished_file():
         await env.teardown()
 
 
-# ─── 调度门禁与群文件钩子 ─────────────────────────────────
+# ─── 调度门禁（群文件钩子已删，无文件测试） ────────────────
 
 
 async def test_is_group_allowed_truth_table():
@@ -184,45 +175,10 @@ async def test_cmd_gates_block_outside_whitelist():
         await env.teardown()
 
 
-async def test_on_group_file_gates_silent():
-    """白名单外 / 非管理员 / 文件名不匹配 → 三路均静默。"""
-    env = await TestEnv().setup()
-    try:
-        p = _plugin(env, ["888"])
-        e = _GroupEvent(group="123", admin=True,
-                        files=[_file_comp("属性_a.csv", "nowhere.csv")])
-        await p.on_group_file(e)
-        assert e.sent == [], e.sent
-
-        p2 = _plugin(env, [])
-        e2 = _GroupEvent(group="123", sender="10001", admin=False,
-                         files=[_file_comp("属性_a.csv", "nowhere.csv")])
-        await p2.on_group_file(e2)
-        assert e2.sent == [], e2.sent
-
-        e3 = _GroupEvent(group="123", admin=True,
-                         files=[_file_comp("无关文件.csv", "nowhere.csv")])
-        await p2.on_group_file(e3)
-        assert e3.sent == [], e3.sent
-    finally:
-        await env.teardown()
-
-
-async def test_on_group_file_attribute_e2e():
-    """管理员发属性文件 → 存进 imports 目录 → 自动导入 → 回执含导入汇总。"""
-    env = await TestEnv().setup()
-    try:
-        p = _plugin(env, [])
-        src = Path(env.db.db_path).parent / "src_属性.csv"
-        src.write_text("队名,影响力,容量,等级\n利物浦,150,12000,0\n",
-                       encoding="utf-8-sig")
-        e = _GroupEvent(group="123", admin=True,
-                        files=[_file_comp("属性_测试1.csv", str(src))])
-        await p.on_group_file(e)
-        assert len(e.sent) == 1, e.sent
-        reply = e.sent[0]
-        assert "已导入属性 1 队" in reply, reply
-        assert "✅ 利物浦" in reply, reply
-        assert (Path(env.db.db_path).parent / "imports" / "属性_测试1.csv").exists()
-    finally:
-        await env.teardown()
+async def test_group_file_hook_removed():
+    """v3：群文件自动导入钩子已下线，main.py 不应再注册任何消息钩子。"""
+    with open(os.path.join(REPO_ROOT, "main.py"), encoding="utf-8") as f:
+        src = f.read()
+    assert "on_group_file" not in src, "群文件钩子应已删除"
+    assert "event_message_type" not in src, "main.py 不应再注册消息类型钩子"
+    assert "_auto_import" not in src, "自动导入路径应已删除"

@@ -2,7 +2,7 @@ import json
 import math
 import os
 
-PLUGIN_VERSION = "2.14.0"
+PLUGIN_VERSION = "3.0.0"
 """插件版本号，与 metadata.yaml 保持一致（tests/s17_framework_compat 校验）。"""
 
 _SCHEMA_PATH = os.path.join(
@@ -48,105 +48,21 @@ TYPE_MAP = {key: _TYPE_MAP[meta["type"]] for key, meta in _SCHEMA.items()}
 
 _LIST_KEYS = tuple(key for key, meta in _SCHEMA.items() if meta["type"] == "list")
 
-# 小数类配置的允许区间（闭区间）
-_FLOAT_RANGES = {
-    "default_influence": (1.0, 1000.0),
-    "fans_per_influence": (0.1, 1000.0),
-    "fans_grow_rate": (0.0, 1.0),
-    "fans_grow_heat_base": (0.0, 1.0),
-    "fans_grow_heat_span": (0.0, 1.0),
-    "fans_drop_rate": (0.0, 1.0),
-    "fans_drop_heat_extra": (0.0, 2.0),
-    "attendance_multiplier_base": (0.1, 100.0),
-    "attendance_multiplier_per_tier": (0.0, 2.0),
-    "ticket_revenue_per_10k": (0.0, 100.0),
-    "commercial_per_10k_per_level": (0.0, 10.0),
-    "broadcast_per_match_per_level": (0.0, 10.0),
-    "expansion_cost_per_100": (0.0, 10.0),
-    "naming_base": (0.0, 100.0),
-    "naming_per_capacity_wan": (0.0, 10.0),
-    "naming_per_fans_wan": (0.0, 10.0),
-    "naming_terminate_penalty": (0.0, 1.0),
-    "naming_fans_drop_threshold": (0.0, 1.0),
-    "naming_terminate_probability": (0.0, 1.0),
-    "event_hit_probability": (0.0, 1.0),
-    "import_max_file_size_mb": (0.1, 500.0),
-    "event_money_clamp": (0.0, 1000.0),
-    "event_fans_clamp": (0.0, 1.0),
-    "event_maintenance_clamp": (0.0, 1000.0),
-    "event_satisfaction_clamp": (0.0, 1.0),
-    "event_brand_heat_clamp": (0.0, 1.0),
-    "event_build_credit_clamp": (0.0, 1000.0),
-    "event_influence_clamp": (0.0, 200.0),
-    "event_booking_cancel_clamp": (0.0, 10.0),
-    "event_soft_condition_factor": (0.0, 1.0),
-    "start_funds": (0.0, 1e9),
-    "build_credit_ratio": (0.0, 1.0),
-    "llm_timeout_seconds": (1, 300),
-    # 冠名权市场：套餐系数/对赌线/行情参数
-    "naming_pkg_stable_factor": (0.1, 3.0),
-    "naming_pkg_short_factor": (0.1, 3.0),
-    "naming_pkg_bet_factor": (0.1, 3.0),
-    "naming_pkg_bet_bonus_rate": (0.0, 3.0),
-    "naming_pkg_bet_attend": (0.0, 1.0),
-    "naming_pkg_bet_fans": (0.0, 1.0),
-    "naming_bet_expected_prob": (0.0, 1.0),
-    "market_satisfy_floor": (0.0, 2.0),
-}
-
 # 整数配置业务上限（超出拒绝）；未列出的整数键不设上限
 _INT_UPPER_BOUNDS = {
-    "fans_cap": 10_000_000,
-    "naming_windows": 1000,
-    "activity_slots": 20,
-    "max_open_tier": 4,
-    "event_max_occurrences": 20,
-    "event_batch_window_seconds": 3600,
-    "llm_max_calls": 100,
     "backup_keep_count": 10_000,
-    # 冠名权市场：配额/名额/TTL/套餐窗口数
-    "market_top_seat_ratio": 100,
-    "market_offers_per_brand": 20,
-    "market_emerging_slots": 20,
-    "market_offer_ttl_hours": 8760,
-    "naming_pkg_stable_windows": 100,
-    "naming_pkg_short_windows": 100,
-    "naming_pkg_bet_windows": 100,
 }
 
 _INT_LOWER_BOUNDS = {
-    "fans_cap": 1,
-    "naming_windows": 1,
-    "activity_slots": 0,
-    "max_open_tier": 0,
-    "event_max_occurrences": 1,
-    "event_batch_window_seconds": 0,
-    "llm_max_calls": 0,
     "backup_keep_count": 1,
-    "market_top_seat_ratio": 1,
-    "market_offers_per_brand": 1,
-    "market_emerging_slots": 0,
-    "market_offer_ttl_hours": 0,
-    "naming_pkg_stable_windows": 1,
-    "naming_pkg_short_windows": 1,
-    "naming_pkg_bet_windows": 1,
 }
 
 _TIME_KEYS = ("backup_time",)
 
 _JSON_STRING_KEYS = (
-    "tier_table",
     "weather_probabilities",
     "weather_ranges",
-    "form_coef_table",
-    "facility_effects",
-    "activity_config",
     "competition_aliases",
-    "market_satisfy_config",
-    "market_heat_config",
-    "market_industry_templates",
-    "market_tier_profiles",
-    "event_signal_config",
 )
 
 
@@ -189,39 +105,13 @@ def parse_json_object(raw) -> dict:
     return data if isinstance(data, dict) else {}
 
 
-def parse_float_list(raw) -> list[float]:
-    """解析逗号分隔的小数列表（子设施升级费用）。"""
-    parts = [p.strip() for p in str(raw).split(",") if p.strip()]
-    out = []
-    for p in parts:
-        try:
-            out.append(float(p))
-        except ValueError:
-            raise ValueError(f"含非法数字: {p}")
-    return out
-
-
 def validate_and_cast(key: str, raw: str):
-    """校验并转换管理员通过 /主场设置 传入的配置值。"""
+    """校验并转换管理员通过 WebUI/配置传入的配置值。"""
     if key not in DEFAULT_CONFIG:
         raise ValueError(f"未知配置项: {key}")
 
     if key in _JSON_STRING_KEYS:
         return _validate_json_object(raw, key)
-
-    if key == "market_bid_mode":
-        mode = raw.strip()
-        if mode not in ("明标", "暗标", "先到先得", "常态"):
-            raise ValueError("market_bid_mode 需为 明标/暗标/先到先得/常态 之一")
-        return mode
-
-    if key == "facility_upgrade_costs":
-        values = parse_float_list(raw)
-        if len(values) < 1 or len(values) > 20:
-            raise ValueError("facility_upgrade_costs 需为 1-20 个逗号分隔的小数")
-        if any(v <= 0 for v in values):
-            raise ValueError("facility_upgrade_costs 每级费用需为正数")
-        return ",".join(f"{v:g}" for v in values)
 
     if key in _LIST_KEYS:
         return parse_group_list(raw)
@@ -262,10 +152,5 @@ def validate_and_cast(key: str, raw: str):
         if not math.isfinite(parsed):
             # NaN 与任何区间比较恒 False，会绕过下面的范围检查
             raise ValueError(f"配置 {key} 需为有限数字")
-        lo, hi = _FLOAT_RANGES.get(key, (None, None))
-        if lo is not None and parsed < lo:
-            raise ValueError(f"配置 {key} 不能小于 {lo}")
-        if hi is not None and parsed > hi:
-            raise ValueError(f"配置 {key} 不能大于 {hi}")
         return parsed
     return raw.strip()

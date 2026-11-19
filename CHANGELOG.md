@@ -3,6 +3,36 @@
 本文件记录本项目的显著变更，格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [3.0.0] - 2026-11-15
+
+**破坏性变更**：插件从「经营模拟器」收敛为「WHL 展示插件」——只保留赛程/赛果、天气、三张图、帮助。
+
+### Removed（破坏性）
+
+- **数据库 schema v15**：只保留 5 张表（matches/stadium/league_state/admins/plugin_config）；删除 16 张旧表（market_offers、event_choices、events_log、window_summaries、window_fans_log、revenue_transactions、club_balance、naming_rights、brand_pool、market_rounds、event_pool、stadium_facilities、venue_bookings、influence_history、season_names、round_names）。迁移仅支持 v12–v14 → v15（season 2→9、比分串解析、tour_match_id 去重），`version < 12` 需先升 2.14，`> 15` 或非法值直接报错不再静默改写。
+- **命令 40+ → 8**：下线赛程导入、赛果录入、推进、结算、事件、品牌、市场、冠名、档期、财务、设施、发放、改名、赛季命名、配置、管理增删、群文件自动导入钩子等全部经营命令。
+- **服务 11 个下线**：event_engine、event_effects、llm_writer、brand_service、market_service、stadium_service、window_service、fans_service、file_import_service、backfill_service、negotiation_bridge。
+- **配置 84 → 11 键**：删除 `club_sync_season`、`tour_sync_season` 与全部经营/事件/冠名/市场/设施/LLM/收入参数键；赛季号由 club 当前赛季驱动，不再需要赛季换算配置。
+- **天气推送不再订正旧账**：删除 `_settlement_inputs`/`apply_weather_correction`/`ensure_stadium` 与 attendance/ticket_revenue/commercial/broadcast 读写——上座/票房结算全部在 club 侧。
+
+### Added
+
+- **club 当前赛季驱动**：`ClubSyncClient.fetch_current_season()`（`GET /api/seasons/current`，公开无签名），10 分钟内存缓存；running 优先、失败回落本地 league_state、双无报错；成功后写 `league_state(season_number, "S{N}")`。
+- **tour 全量同步引擎**：club 三个 tournamentId 逐赛事拉取（合计 7 GET）；stage offset 按阶段顺序累计（次级 base 1–14/final 15–20/playoff 21–22，冠军杯 group 1–6/elim 7+，淘汰赛不再丢弃）；两回合每 leg 一行；点球（小组/联赛平局、淘汰赛定胜负）、弃权（result='C'、score='弃权'）、轮空不落库、对手未定/占位分类跳过；`tour_match_id` 优先匹配、归一队名唯一键兜底；未排期行补建；每赛事独立事务 partial；改判覆盖。
+- **只读上座拉取**：`fetch_fixtures(tournament_id, round)`（`GET /api/fixtures`，(tid,round) 10 分钟缓存）供统计图/走势图按 matchId 映射上座，缺失显示 `—` 不丢行。
+- **三张图重做**：轮次预告图（本地数据+已赛比分列）、轮次统计图（club 上座映射）、赛季走势图（每队累计积分折线 × 当轮场均上座柱双轴，仅顶级/次级，次级标注「不含带入分」）；文件名去掉 window 段；轮次查询去掉窗口回落逻辑。
+
+### Changed
+
+- **`/主场赛程同步` 升级为全量同步**：不再只是拉时刻；赛程/赛果/leg/点球/弃权一次同步，报告 fetched/created/updated/unchanged/pending/skipped/missing_tour/conflicts。
+- **`/主场天气推送` 只推已有天气**：payload `{season, competition, roundNo, items:[{home,away,weather,coef}]}`；预览只算不发；系数在预报时固化。
+- **requirements**：移除 xlsx 文件导入依赖（文件导入已下线）。
+- **配置键收敛**：84 → 11（见 Removed）；`validate_and_cast` 与区间表同步收敛。
+
+### Tests
+
+- 全量收敛为 8 模块（s0/s1/s6/s8/s13/s17/s18/s19），`python -m tests.run_all` 全绿（75 用例）：v15 迁移矩阵（fresh/v12/v13/v14/幂等/非法版本/回滚）、天气抽签与轮次解析、8 条命令门禁与回显、三图（上座缺失 —/次级积分从 0/冠军杯报错/文件名无 window）、备份服务、club season 解析（running 优先/缓存/回落）、tour 同步引擎（stage offset/leg/点球/弃权/轮空/TBD/tour_match_id 优先/改判覆盖/事务回滚）、club_sync 签名金标准与推送三态。
+
 ## [2.14.0] - 2026-11-14
 
 ### Added
