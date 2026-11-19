@@ -1,4 +1,8 @@
-"""天气同步测试：签名金标准、推送三态、补抽幂等、旧账订正守恒幂等、预览只读。"""
+"""天气推送测试：签名金标准、推送三态、只推已有天气、预览只读、payload 结构。
+
+v3：sync_weather 只推已有天气到 club，不做补抽订正、不碰任何经营/财务字段；
+赛季号即插件自身赛季号（club 当前赛季驱动，旧配置换算已下线）。
+"""
 
 import json
 import os
@@ -8,9 +12,9 @@ import types
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from tests.common import TestEnv  # noqa: E402
-from astrbot_plugin_whleague_revenue_system.services import club_sync, formula  # noqa: E402
+from astrbot_plugin_whleague_revenue_system.services import club_sync  # noqa: E402
 from astrbot_plugin_whleague_revenue_system.services.club_sync import ClubSyncClient  # noqa: E402
-from astrbot_plugin_whleague_revenue_system.services.fixture_service import FixtureError  # noqa: E402
+from astrbot_plugin_whleague_revenue_system.services.weather_service import WeatherError  # noqa: E402
 
 GOLDEN_SECRET = "whl-golden-secret"
 GOLDEN_TS = "1700000000"
@@ -88,11 +92,18 @@ def remove_aiohttp():
 
 
 async def _sync_env(cfg_extra: dict | None = None):
+    """v15 库 + 两行已预报天气（R12 顶级联赛），league_state=S9。"""
     cfg = {"club_sync_url": "https://club.example.com", "club_sync_secret": "s3cret"}
     cfg.update(cfg_extra or {})
     env = await TestEnv(cfg_override=cfg).setup()
-    await env.fixture_service.import_fixtures("1 利物浦 巴塞罗那\n1 纽卡斯尔联 勒沃库森\n")
-    await env.fixture_service.forecast_round(1)
+    await env.dao.set_league_state(9, "S9")
+    for tmid, home, away, weather, coef in (
+        (101, "利物浦", "巴塞罗那", "雨", 0.8342),
+        (102, "纽卡斯尔联", "勒沃库森", "晴", 1.02),
+    ):
+        await env.dao.upsert_match(9, 11, "顶级联赛", 12, home, away, tour_match_id=tmid)
+        row = await env.db.fetchone("SELECT id FROM matches WHERE tour_match_id=?", (tmid,))
+        await env.dao.set_match_weather_by_id(row["id"], weather, coef)
     return env
 
 
@@ -188,201 +199,120 @@ async def test_push_4xx_no_retry():
         restore()
 
 
-# ─── 补抽与订正 ───────────────────────────────────────────
+# ─── sync_weather（只推已有天气） ─────────────────────────
 
-async def test_fill_wx_coef_idempotent():
-    env = await _sync_env()
-    try:
-        matches = await env.dao.get_round_matches(1, 1, 1)
-        m = matches[0]
-        await env.db.execute("UPDATE matches SET wx_coef=NULL WHERE id=?", (m["id"],))
-        assert await env.dao.fill_wx_coef(m["id"], 0.9123) == 1
-        assert await env.dao.fill_wx_coef(m["id"], 0.5555) == 0
-        row = await env.dao.get_match(m["id"])
-        assert row["wx_coef"] == 0.9123
-    finally:
-        await env.teardown()
-
-
-async def test_weather_correction_atomic_and_idempotent():
-    env = await _sync_env()
-    try:
-        await env.fixture_service.record_results(1, "利物浦 胜 2-1")
-        matches = await env.dao.get_round_matches(1, 1, 1)
-        m = [x for x in matches if x["home_team"] == "利物浦"][0]
-        await env.db.execute(
-            "UPDATE matches SET wx_coef=NULL, attendance=1000, ticket_revenue=1.0, "
-            "commercial=0.0, broadcast=0.0 WHERE id=?", (m["id"],),
-        )
-        balance_before = (await env.dao.get_balance("利物浦"))["balance"]
-        entries = [("ticket", 2.5, f"天气订正|match:{m['id']}", 1)]
-        ok = await env.dao.apply_weather_correction(
-            m["id"], 0.8, 21000, 3.5, 1.0, 0.0, "利物浦", 1, 1, entries, 1000,
-        )
-        assert ok is True
-        row = await env.dao.get_match(m["id"])
-        assert row["wx_coef"] == 0.8 and row["attendance"] == 21000
-        assert row["ticket_revenue"] == 3.5 and row["commercial"] == 1.0
-        assert (await env.dao.get_balance("利物浦"))["balance"] == balance_before + 2.5
-        assert await env.dao.has_txn_note(f"天气订正|match:{m['id']}")
-
-        # 二次调用：守卫 wx_coef IS NULL 失败 ⇒ False，且不重复记账
-        again = await env.dao.apply_weather_correction(
-            m["id"], 0.9, 9999, 9.9, 9.9, 9.9, "利物浦", 1, 1,
-            [("ticket", 9.9, f"天气订正|match:{m['id']}", 1)], 21000,
-        )
-        assert again is False
-        row2 = await env.dao.get_match(m["id"])
-        assert row2["attendance"] == 21000 and row2["ticket_revenue"] == 3.5
-        assert (await env.dao.get_balance("利物浦"))["balance"] == balance_before + 2.5
-    finally:
-        await env.teardown()
-
-
-async def test_sync_weather_unconfigured_raises():
+async def test_sync_weather_unconfigured_returns_bypass():
     env = await _sync_env({"club_sync_url": "", "club_sync_secret": ""})
     try:
-        try:
-            await env.fixture_service.sync_weather()
-        except FixtureError as e:
-            assert "club_sync_url" in str(e), e
-        else:
-            raise AssertionError("未配置时应当报错")
+        result = await env.weather_service.sync_weather()
+        assert result["status"] == "bypass" and "club_sync_url" in result["reason"], result
     finally:
         await env.teardown()
 
 
-async def test_sync_weather_full_flow_and_idempotent():
+async def test_sync_weather_full_flow_payload_and_idempotent():
     calls, restore = install_fake_aiohttp([(200, '{"ok":true,"verdicts":[{"home":"利物浦","status":"ok"}]}')])
     env = await _sync_env()
     try:
-        await env.fixture_service.record_results(1, "利物浦 胜 2-1")
-        matches = await env.dao.get_round_matches(1, 1, 1)
-        settled = [x for x in matches if x["home_team"] == "利物浦"][0]
-        pending = [x for x in matches if x["home_team"] == "纽卡斯尔联"][0]
-        # 模拟 v13 前旧账：系数未落库；已结算场次另塞入错误收入值
-        await env.db.execute("UPDATE matches SET wx_coef=NULL WHERE id=?", (pending["id"],))
-        await env.db.execute(
-            "UPDATE matches SET wx_coef=NULL, attendance=1000, ticket_revenue=1.0, "
-            "commercial=0.0, broadcast=0.0 WHERE id=?", (settled["id"],),
-        )
-        balance_before = (await env.dao.get_balance("利物浦"))["balance"]
-
-        result = await env.fixture_service.sync_weather()
-        assert result["preview"] is False
+        result = await env.weather_service.sync_weather()
+        assert result["status"] == "ok" and result["preview"] is False, result
         totals = result["totals"]
         assert totals["rounds"] == 1 and totals["matches"] == 2, totals
-        assert totals["fixed"] == 2 and totals["corrected"] == 1, totals
         assert totals["push_ok"] == 1 and totals["push_error"] == 0, totals
 
-        row = await env.dao.get_match(settled["id"])
-        assert row["wx_coef"] is not None
-        assert row["attendance"] != 1000 and row["ticket_revenue"] != 1.0
-        pending_row = await env.dao.get_match(pending["id"])
-        assert pending_row["wx_coef"] is not None and pending_row["result"] is None
-
-        # 账本：订正流水与余额增量一致
-        txn = await env.dao.list_transactions("利物浦", limit=50)
-        fixes = [t for t in txn if t["note"] == f"天气订正|match:{settled['id']}"]
-        assert fixes, txn
-        delta = round(sum(t["amount"] for t in fixes), 4)
-        assert delta == result["totals"]["delta"], (delta, result["totals"]["delta"])
-        assert (await env.dao.get_balance("利物浦"))["balance"] == round(balance_before + delta, 4)
-
-        # 推送载荷与落库系数一致
+        # payload：season/competition/roundNo/items 恰四键；items 恰 home/away/weather/coef
         payload = json.loads(calls[0]["data"].decode("utf-8"))
-        assert payload["roundNo"] == 1, payload
-        assert payload["competition"] == result["rounds"][0]["competition"], payload
-        assert payload["season"] == 1, payload
-        assert result["rounds"][0]["push_season"] == 1, result["rounds"][0]
+        assert payload["season"] == 9 and payload["competition"] == "顶级联赛"
+        assert payload["roundNo"] == 12, payload
+        assert set(payload) == {"season", "competition", "roundNo", "items"}, payload
         by_home = {i["home"]: i for i in payload["items"]}
-        assert by_home["利物浦"]["coef"] == row["wx_coef"]
-        assert by_home["纽卡斯尔联"]["coef"] == pending_row["wx_coef"]
+        assert set(by_home) == {"利物浦", "纽卡斯尔联"}
+        assert set(by_home["利物浦"]) == {"home", "away", "weather", "coef"}
+        assert by_home["利物浦"]["weather"] == "雨" and by_home["利物浦"]["coef"] == 0.8342
+        assert by_home["纽卡斯尔联"]["weather"] == "晴" and by_home["纽卡斯尔联"]["coef"] == 1.02
 
-        # 再跑一次：不再补抽、不再订正、余额不变（幂等）
-        txn_count = len(txn)
-        again = await env.fixture_service.sync_weather()
-        assert again["totals"]["fixed"] == 0 and again["totals"]["corrected"] == 0, again["totals"]
-        assert (await env.dao.get_balance("利物浦"))["balance"] == round(balance_before + delta, 4)
-        assert len(await env.dao.list_transactions("利物浦", limit=50)) == txn_count
+        # 推送载荷与落库固化系数一致
+        row = await env.dao.get_round_matches(9, 12, "顶级联赛")
+        coefs = {m["home_team"]: m["wx_coef"] for m in row}
+        assert by_home["利物浦"]["coef"] == coefs["利物浦"]
+        assert by_home["纽卡斯尔联"]["coef"] == coefs["纽卡斯尔联"]
+
+        # 只推不订正：推送全程不触发任何财务写（财务表不存在、经营列无值变化）
+        fin_tables = [
+            r["name"] for r in await env.db.fetchall(
+                "SELECT name FROM sqlite_master WHERE type='table' "
+                "AND name IN ('revenue_transactions', 'club_balance')"
+            )
+        ]
+        assert fin_tables == [], fin_tables
+        for m in row:
+            for col in ("attendance", "ticket_revenue", "commercial", "broadcast"):
+                assert col not in m.keys(), (m["home_team"], col)
+
+        # 幂等：再跑一次只推不改（payload 相同、库不变）
+        before = [dict(m) for m in await env.dao.list_weathered_matches()]
+        again = await env.weather_service.sync_weather()
+        assert again["totals"]["push_ok"] == 1
+        assert json.loads(calls[1]["data"].decode("utf-8")) == payload
+        assert [dict(m) for m in await env.dao.list_weathered_matches()] == before
     finally:
         restore()
         await env.teardown()
 
 
-async def test_sync_weather_season_override():
-    """插件赛季号与平台赛季号不同号：按 club_sync_season 换算推送。"""
-    calls, restore = install_fake_aiohttp([(200, '{"ok":true,"summary":{"pushed":2}}')])
-    env = await _sync_env({"club_sync_season": 9})
-    try:
-        result = await env.fixture_service.sync_weather()
-        assert result["rounds"][0]["season"] == 1, result["rounds"][0]
-        assert result["rounds"][0]["push_season"] == 9, result["rounds"][0]
-        payload = json.loads(calls[0]["data"].decode("utf-8"))
-        assert payload["season"] == 9, payload
-    finally:
-        restore()
-        await env.teardown()
-
-
-async def test_sync_weather_season_default_is_plugin_season():
-    """club_sync_season=0（默认）时推送插件自身赛季号。"""
-    calls, restore = install_fake_aiohttp([(200, '{"ok":true}')])
-    env = await _sync_env({"club_sync_season": 0})
-    try:
-        result = await env.fixture_service.sync_weather()
-        assert result["rounds"][0]["push_season"] == 1, result["rounds"][0]
-        assert json.loads(calls[0]["data"].decode("utf-8"))["season"] == 1
-    finally:
-        restore()
-        await env.teardown()
-
-
-async def test_sync_weather_cancelled_skips_correction():
+async def test_sync_weather_preview_no_request_no_write():
     calls, restore = install_fake_aiohttp([(200, '{"ok":true}')])
     env = await _sync_env()
     try:
-        await env.fixture_service.record_results(1, "利物浦 取消")
-        matches = await env.dao.get_round_matches(1, 1, 1)
-        m = [x for x in matches if x["home_team"] == "利物浦"][0]
-        assert m["result"] == "C"
-        await env.db.execute("UPDATE matches SET wx_coef=NULL WHERE id=?", (m["id"],))
-        txn_before = len(await env.dao.list_transactions("利物浦", limit=50))
-        result = await env.fixture_service.sync_weather()
-        assert result["totals"]["fixed"] == 1 and result["totals"]["corrected"] == 0, result["totals"]
-        assert (await env.dao.get_match(m["id"]))["wx_coef"] is not None
-        assert len(await env.dao.list_transactions("利物浦", limit=50)) == txn_before
+        result = await env.weather_service.sync_weather(preview=True)
+        assert result["status"] == "preview" and result["preview"] is True, result
+        assert calls == [], "预览不得发请求"
+        assert result["totals"]["push_ok"] == 0 and result["totals"]["push_error"] == 0
+        for r in result["rounds"]:
+            assert r["push"]["status"] == "preview"
+        # 库不变
+        rows = [dict(m) for m in await env.dao.list_weathered_matches()]
+        assert {m["home_team"]: (m["weather"], m["wx_coef"]) for m in rows} == {
+            "利物浦": ("雨", 0.8342), "纽卡斯尔联": ("晴", 1.02),
+        }
     finally:
         restore()
         await env.teardown()
 
 
-async def test_sync_weather_preview_readonly():
-    calls, restore = install_fake_aiohttp([(200, '{"ok":true}')])
+async def test_sync_weather_only_current_season_and_round_conversion():
+    """M3/M6 回归：只推当前赛季；roundNo 经换算表转为 tour stage 内轮次。
+
+    旧实现推全部赛季的已预报场次（覆盖 club 旧季记录/全部 unmatched），且直接推
+    带 stage offset 的本地 round_no（club 按 tour 的 m.round 定位，次级 15+/冠军杯
+    7+ 必 unmatched）。
+    """
+    calls, restore = install_fake_aiohttp([(200, '{"ok":true,"verdicts":[]}')])
     env = await _sync_env()
     try:
-        await env.fixture_service.record_results(1, "利物浦 胜 2-1")
-        matches = await env.dao.get_round_matches(1, 1, 1)
-        settled = [x for x in matches if x["home_team"] == "利物浦"][0]
-        pending = [x for x in matches if x["home_team"] == "纽卡斯尔联"][0]
+        # 旧赛季 S8 已预报行：不推，只计 skipped_other_season
+        await env.dao.upsert_match(8, 11, "顶级联赛", 5, "旧季主队", "旧季客队",
+                                   tour_match_id=55)
+        old_row = await env.db.fetchone("SELECT id FROM matches WHERE tour_match_id=55")
+        await env.dao.set_match_weather_by_id(old_row["id"], "雨", 0.85)
+        # 换算表：tid=11 的本地第 12 轮 = tour stage 内第 3 轮（offset 场景）
+        await env.dao.set_config("tour_round_map", '{"11": {"12": 3}}')
+        # 迁移行文本「联赛」推送时归一为「顶级联赛」（club 只认三类标准名，原样推必 400）
         await env.db.execute(
-            "UPDATE matches SET wx_coef=NULL, attendance=1000, ticket_revenue=1.0, "
-            "commercial=0.0, broadcast=0.0 WHERE id=?", (settled["id"],),
+            "UPDATE matches SET competition='联赛' WHERE tour_match_id=102"
         )
-        await env.db.execute("UPDATE matches SET wx_coef=NULL WHERE id=?", (pending["id"],))
-        balance_before = (await env.dao.get_balance("利物浦"))["balance"]
+        result = await env.weather_service.sync_weather()
+        assert result["status"] == "ok", result
+        assert result["totals"]["skipped_other_season"] == 1, result["totals"]
+        assert result["totals"]["rounds"] == 1 and result["totals"]["matches"] == 2
+        assert len(calls) == 1, "旧赛季场次不得产生推送"
+        payload = json.loads(calls[0]["data"].decode("utf-8"))
+        assert payload["season"] == 9 and payload["roundNo"] == 3, payload
+        assert {i["home"] for i in payload["items"]} == {"利物浦", "纽卡斯尔联"}
+        # 回显点名跳过数
+        from astrbot_plugin_whleague_revenue_system.handlers.admin import AdminHandler
 
-        result = await env.fixture_service.sync_weather(preview=True)
-        assert result["preview"] is True
-        assert result["totals"]["corrected"] == 1 and result["totals"]["push_ok"] == 0
-        assert calls == []  # 预览不推送
-        assert (await env.dao.get_match(settled["id"]))["wx_coef"] is None
-        assert (await env.dao.get_match(pending["id"]))["wx_coef"] is None
-        assert (await env.dao.get_balance("利物浦"))["balance"] == balance_before
-        assert not await env.dao.has_txn_note(f"天气订正|match:{settled['id']}")
-        # 预览给出预估差异（旧值 1000 座 vs 重算值）
-        entry = result["rounds"][0]["corrected"][0]
-        assert entry["attendance"][0] == 1000 and entry["attendance"][1] > 0
+        assert "跳过旧赛季已预报场次：1" in AdminHandler._format_sync(result)
     finally:
         restore()
         await env.teardown()
@@ -394,8 +324,8 @@ async def test_sync_weather_no_weather_raises():
     }).setup()
     try:
         try:
-            await env.fixture_service.sync_weather()
-        except FixtureError as e:
+            await env.weather_service.sync_weather()
+        except WeatherError as e:
             assert "没有已预报天气" in str(e), e
         else:
             raise AssertionError("无天气场次时应当报错")
@@ -426,10 +356,10 @@ async def test_handler_usage_text():
 
 
 async def test_format_sync_surfaces_platform_verdicts():
-    """平台逐场 verdict 必须回显给人看：created/replaced/unchanged 算落库，其余点名列原因。"""
+    """平台逐场 verdict 必须回显给人看：落库数 + 预览/旁路/失败三态。"""
     from astrbot_plugin_whleague_revenue_system.handlers.admin import AdminHandler
 
-    def _result(verdicts, summary, *, status="ok", preview=False, corrected=()):
+    def _result(verdicts, summary, *, status="ok", preview=False):
         return {
             "preview": preview,
             "rounds": [
@@ -438,68 +368,27 @@ async def test_format_sync_surfaces_platform_verdicts():
                     "competition": "顶级联赛",
                     "round_no": 3,
                     "matches": len(verdicts),
-                    "fixed": 1,
-                    "corrected": list(corrected),
-                    "skipped": [],
                     "push": (
                         {"status": status}
                         if status != "ok"
-                        else {"status": "ok", "competition": "顶级联赛", "response": {"ok": True, "verdicts": verdicts, "summary": summary}}
+                        else {"status": "ok", "response": {"ok": True, "verdicts": verdicts, "summary": summary}}
                     ),
                 }
             ],
-            "totals": {"rounds": 1, "matches": len(verdicts), "fixed": 1, "corrected": len(corrected), "delta": 0.0,
+            "totals": {"rounds": 1, "matches": len(verdicts),
                        "push_ok": 1 if status == "ok" else 0, "push_error": 0 if status == "ok" else 1},
         }
 
-    mixed = AdminHandler._format_sync(
-        _result(
-            [
-                {"home": "利物浦", "away": "曼城", "status": "created", "matchId": 11},
-                {"home": "利物浦", "away": "曼联", "status": "unmatched", "detail": "该轮没有这对主客队"},
-                {"home": "阿森纳", "away": "曼城", "status": "skipped_no_stadium", "detail": "主队没有球场行"},
-            ],
-            {"created": 1, "replaced": 0, "unchanged": 0, "unmatched": 1, "skipped_no_stadium": 1, "bad_weather": 0,
-             "settled": 0, "pushed": 1},
-        )
-    )
-    assert "平台落库 1/3 场" in mixed, mixed
-    assert "created×" not in mixed, mixed  # created 是落库成功，不许被算成未落库
-    assert "unmatched×1" in mixed and "skipped_no_stadium×1" in mixed, mixed
-    assert "利物浦 vs 曼联：unmatched——该轮没有这对主客队" in mixed, mixed
-
-    all_landed = AdminHandler._format_sync(
-        _result(
-            [{"home": "利物浦", "away": "曼城", "status": "created", "matchId": 11},
-             {"home": "阿森纳", "away": "曼城", "status": "unchanged", "matchId": 12}],
-            {"created": 1, "replaced": 0, "unchanged": 1, "unmatched": 0, "skipped_no_stadium": 0, "bad_weather": 0,
-             "settled": 1, "pushed": 2},
-        )
-    )
-    assert "平台落库 2/2 场" in all_landed, all_landed
-    assert "1 场已结算（历史账待订正批收敛）" in all_landed, all_landed
-    assert "未落库" not in all_landed, all_landed
+    ok_text = AdminHandler._format_sync(_result(
+        [{"home": "利物浦", "away": "曼城", "status": "created", "matchId": 11},
+         {"home": "利物浦", "away": "曼联", "status": "unchanged", "matchId": 12}],
+        {"pushed": 2},
+    ))
+    assert "推送 ok（平台落库 2/2 场）" in ok_text, ok_text
 
     assert "旁路" in AdminHandler._format_sync(_result([], {}, status="bypass"))
     preview_text = AdminHandler._format_sync(
-        _result([{"home": "利物浦", "away": "曼城", "status": "created", "matchId": 11}], {"pushed": 1}, status="preview", preview=True)
+        _result([{"home": "利物浦", "away": "曼城", "status": "created", "matchId": 11}], {"pushed": 1},
+                status="preview", preview=True)
     )
-    assert "预览" in preview_text and "只算不写" in preview_text, preview_text
-
-
-async def test_formula_roll_weather_with_coef():
-    from astrbot_plugin_whleague_revenue_system.config.defaults import DEFAULT_CONFIG
-
-    cfg = dict(DEFAULT_CONFIG)
-    weather, coef = formula.roll_weather_with_coef(cfg)
-    assert weather in ("晴", "多云", "雨", "雪"), weather
-    lo, hi = formula.weather_ranges(cfg)[weather]
-    assert lo <= coef <= hi, (weather, coef, lo, hi)
-    assert coef == round(coef, 4), coef
-    # 带系数结算：同系数两次调用上座差异只来自扰动（±3% 内），无系数回落不报错
-    args = dict(fans=20000.0, capacity=40000, tier=2, weather=weather,
-                form_pts_value=5, home_influence=90.0, away_influence=88.0)
-    a = formula.attendance(cfg, wx_coef=coef, **args)
-    b = formula.attendance(cfg, wx_coef=coef, **args)
-    assert abs(a - b) <= max(a, b) * 0.07, (a, b)
-    assert formula.attendance(cfg, wx_coef=None, **args) >= 0
+    assert "预览" in preview_text and "只算不发" in preview_text, preview_text

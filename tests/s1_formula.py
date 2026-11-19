@@ -1,319 +1,85 @@
-"""数值锚点测试：开局四档影响力、等级倍数阶梯、天气区间、系数表、非对称掉粉。"""
+"""天气与轮次解析公式测试：区间锚点、概率归一、轮次 token 解析。"""
 
 import sys
 import os
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from tests.common import TestEnv  # noqa: E402
 from astrbot_plugin_whleague_revenue_system.config.defaults import DEFAULT_CONFIG  # noqa: E402
 from astrbot_plugin_whleague_revenue_system.services import formula  # noqa: E402
-
-INFLUENCES = {
-    "min": (88.55, 2302),
-    "median": (126.41, 3261),
-    "mean": (134.68, 3443),
-    "max": (214.42, 4773),
-}
-CAPACITY0 = 12000
 
 
 def _cfg():
     return dict(DEFAULT_CONFIG)
 
 
-async def test_diehard_target():
-    """饱和阶梯：26/22/15/12 三断点 120/160/200，逐带分段线性累计。"""
-    cfg = _cfg()
-    for name, (infl, fans) in INFLUENCES.items():
-        got = formula.diehard_target(cfg, infl)
-        assert abs(got - fans) < 1, f"{name}: target {got} != {fans}"
-    # 锚点：断点处取带内斜率满额
-    anchors = {
-        100: 2600, 120: 3120, 126.41: 3261.02, 160: 4000,
-        200: 4600, 214.42: 4773.04, 248: 5176, 277.28: 5527.36, 300: 5800,
-    }
-    for infl, exp in anchors.items():
-        got = formula.diehard_target(cfg, infl)
-        assert abs(got - exp) < 1e-9, f"{infl}: {got} != {exp}"
-    # 跨带连续（断点两侧差 < 1）
-    for bp in (120, 160, 200):
-        left = formula.diehard_target(cfg, bp - 0.01)
-        right = formula.diehard_target(cfg, bp + 0.01)
-        assert abs(left - right) < 1.0, f"断点 {bp} 不连续: {left} vs {right}"
-    # 回退：表非法/缺失 → 线性 死忠系数×影响力
-    cfg2 = dict(cfg)
-    cfg2["fans_target_table"] = "{bad json"
-    assert abs(formula.diehard_target(cfg2, 150) - 3000) < 1e-9
-    cfg3 = dict(cfg)
-    cfg3.pop("fans_target_table")
-    assert abs(formula.diehard_target(cfg3, 100) - 2000) < 1e-9
-    assert formula.diehard_target(cfg, 214.42) <= float(cfg["fans_cap"]), "死忠目标应低于上限"
-
-
-async def test_attendance_multiplier_ladder():
-    cfg = _cfg()
-    expected = [4.0, 5.4, 6.8, 8.2, 9.6]
-    for tier, exp in enumerate(expected):
-        got = formula.attendance_multiplier(cfg, tier)
-        assert abs(got - exp) < 1e-9, f"tier {tier}: {got} != {exp}"
-
-
-async def test_opening_attendance_four_brackets():
-    """开局 0 级 1.2 万座：弱队（阶梯 2302）约八成上座，中游与头部接近坐满
-    （满座微降：容量×random(0.985, 0.999)，不恰好等于容量）。"""
-    cfg = _cfg()
-    import random
-
-    random.seed(2026)
-    lo = int(CAPACITY0 * formula.SELL_OUT_FILL[0])
-    hi = int(CAPACITY0 * formula.SELL_OUT_FILL[1])
-    for name, (infl, fans) in INFLUENCES.items():
-        infl_fans = formula.diehard_target(cfg, infl)
-        att = formula.attendance(
-            cfg, fans=infl_fans, capacity=CAPACITY0, tier=0,
-            weather=None, form_pts_value=4,
-            home_influence=infl, away_influence=infl,
-        )
-        if name == "min":
-            assert 9000 <= att <= 10200, f"min: {att}"
-        else:
-            assert lo <= att < CAPACITY0, f"{name} 应接近坐满（{lo}~{hi}）: {att}"
-
-
 async def test_weather_ranges():
+    """天气系数区间：四档天气各有 [lo, hi]，lo<=hi。"""
     cfg = _cfg()
-    import json
-    import random
-
-    random.seed(7)
-    table = json.loads(cfg["weather_ranges"])
-    for wx in table:
-        bounds = table[wx]
-        coef = formula.weather_coef(cfg, wx)
-        assert float(bounds[0]) <= coef <= float(bounds[1]), f"{wx}: {coef}"
-    # 区间跨 0.75-1.25
-    allvals = [v for bounds in table.values() for v in bounds]
-    assert min(allvals) == 0.75, "最低应为 0.75"
-    assert max(allvals) == 1.25, "最高应为 1.25"
+    ranges = formula.weather_ranges(cfg)
+    assert set(ranges) == {"晴", "多云", "雨", "雪"}, ranges
+    for name, bounds in ranges.items():
+        lo, hi = float(bounds[0]), float(bounds[1])
+        assert lo <= hi, (name, bounds)
 
 
-async def test_form_coef_table():
+async def test_weather_coef_within_range():
+    """weather_coef 落在对应天气区间内；未知天气回落 1.0。"""
     cfg = _cfg()
-    assert formula.form_coef(cfg, 0) == 0.7
-    assert formula.form_coef(cfg, 4) == 1.0
-    assert formula.form_coef(cfg, 7) == 1.19
-    assert formula.form_coef(cfg, 9) == 1.25
-    assert formula.form_coef(cfg, 99) == 1.25  # 钳制
-    assert formula.form_pts(["W", "W", "D"]) == 7
-    assert formula.form_pts(["L", "L", "D"]) == 1
+    ranges = formula.weather_ranges(cfg)
+    for name, bounds in ranges.items():
+        lo, hi = float(bounds[0]), float(bounds[1])
+        for _ in range(50):
+            c = formula.weather_coef(cfg, name)
+            assert lo <= c <= hi, (name, c, bounds)
+    assert formula.weather_coef(cfg, None) == 1.0
+    assert formula.weather_coef(cfg, "未知天气") == 1.0
 
 
-async def test_extreme_scenarios():
-    """连败 × 雪天极端场景：需求应显著压低但仍非负。"""
+async def test_roll_weather_with_coef():
+    """roll_weather_with_coef：天气在四档内、系数 4 位小数且落在对应区间。"""
     cfg = _cfg()
-    import random
-
-    random.seed(3)
-    fans = 4288  # 顶级队
-    att = formula.attendance(
-        cfg, fans=fans, capacity=100000, tier=4,
-        weather="雪", form_pts_value=0,
-        home_influence=214.42, away_influence=88.55,
-    )
-    demand_base = fans * formula.attendance_multiplier(cfg, 4) * formula.tier_attend_coef(cfg, 4)
-    assert att < demand_base * 0.55, f"极端场景应显著低于基础需求: {att} vs {demand_base}"
-    assert att >= 0
-
-
-async def test_maintenance_s9():
-    cfg = _cfg()
-    m = formula.tier_maintenance(cfg, 0, 12000, 6)
-    assert abs(m - (2.0 + 0.8 * 1.2 * 6)) < 1e-9, m
-    m4 = formula.tier_maintenance(cfg, 4, 100000, 6)
-    assert abs(m4 - (14.0 + 0.2 * 10 * 6)) < 1e-9, m4
-
-
-async def test_match_revenues():
-    cfg = _cfg()
-    ticket, commercial, broadcast = formula.match_revenues(cfg, 21000, 3, 3)
-    assert abs(ticket - 3.15) < 1e-6, ticket
-    assert abs(commercial - 0.63) < 1e-6, commercial
-    assert abs(broadcast - 0.9) < 1e-6, broadcast
-
-
-async def test_expansion_and_facility_costs():
-    cfg = _cfg()
-    cost = formula.expansion_cost(cfg, 12000, 25000)
-    assert abs(cost - 13.0) < 1e-9, cost  # 13000座 / 100 × 0.1
-    assert formula.facility_cost_to_level(cfg, 0) == 0
-    assert formula.facility_cost_to_level(cfg, 1) == 3.0
-    assert formula.facility_cost_to_level(cfg, 3) == 16.0
-    assert formula.facility_cost_to_level(cfg, 5) == 44.0
-
-
-async def test_asymmetric_fans_evolution():
-    cfg = _cfg()
-    # 满座两侧对称：都是 50%
-    grow = formula.fans_grow_coef(cfg, 1.0)
-    drop = formula.fans_drop_coef(cfg, 1.0)
-    assert abs(grow - 0.5) < 1e-9
-    assert abs(drop - 0.5) < 1e-9
-    # 55% 上座率：涨 41%（0.5×0.82），掉 68%（0.5×1.36）
-    grow55 = formula.fans_grow_coef(cfg, 0.55)
-    drop55 = formula.fans_drop_coef(cfg, 0.55)
-    assert abs(grow55 - 0.41) < 1e-9, grow55
-    assert abs(drop55 - 0.68) < 1e-9, drop55
-    # 示例：fans 4288 → target 3000，DropCoef 0.68（Pts 中性）
-    fans = formula.evolve_fans(cfg, fans=4288, target=3000, attend_rate=0.55, form_pts_value=4)
-    assert 3400 <= fans <= 3430, fans
-
-
-async def test_activity_income():
-    cfg = _cfg()
-    import random
-
-    random.seed(11)
-    r = formula.activity_income(cfg, "esports")
-    assert r["income"] >= 2.0 and r["income"] <= 4.0
-    r2 = formula.activity_income(cfg, "open_day")
-    assert abs(r2["income"] - 0.5) < 1e-9
-    r3 = formula.activity_income(cfg, "idle")
-    assert r3["income"] == 0.0
-
-
-async def test_naming_fee():
-    cfg = _cfg()
-    fee = formula.naming_fee(cfg, 35000, 3261, 1.0)
-    # 公式保留 3 位小数
-    assert abs(fee - 1.589) < 1e-6, fee
+    ranges = formula.weather_ranges(cfg)
+    for _ in range(50):
+        weather, coef = formula.roll_weather_with_coef(cfg)
+        assert weather in ("晴", "多云", "雨", "雪"), weather
+        lo, hi = float(ranges[weather][0]), float(ranges[weather][1])
+        assert lo <= coef <= hi, (weather, coef)
+        assert coef == round(coef, 4), coef
 
 
 async def test_parse_round_token():
+    """轮次 token：前缀识别赛事 + 数字即轮次；无前缀=None（全部赛事）；非法报错。"""
     cfg = _cfg()
-    cases = [
-        ("1", "联赛", 1),
-        ("第9轮", "联赛", 9),
-        ("顶级9", "顶级联赛", 9),
-        ("顶3", "顶级联赛", 3),
-        ("超级联赛第2轮", "顶级联赛", 2),
-        ("次级11", "次级联赛", 11),
-        ("次第5轮", "次级联赛", 5),
-        ("冠军3", "冠军杯", 3),
-        ("冠军杯第4轮", "冠军杯", 4),
-        ("小组赛第3轮", "冠军杯", 3),
-        ("欧冠第4轮", "冠军杯", 4),
-    ]
-    for token, comp, rnd in cases:
-        got_comp, got_rnd = formula.parse_round_token(cfg, token)
-        assert (got_comp, got_rnd) == (comp, rnd), f"{token}: {got_comp},{got_rnd}"
-    for bad in ("", "abc", "顶级", "第轮"):
-        try:
-            formula.parse_round_token(cfg, bad)
-            assert False, f"应拒绝 {bad}"
-        except ValueError:
-            pass
+    assert formula.parse_round_token(cfg, "顶级9") == ("顶级联赛", 9)
+    assert formula.parse_round_token(cfg, "次级11") == ("次级联赛", 11)
+    assert formula.parse_round_token(cfg, "冠军3") == ("冠军杯", 3)
+    # 「联赛」是顶级联赛的旧前缀（v2 迁移文本），「联赛12」按顶级联赛解析
+    assert formula.parse_round_token(cfg, "联赛12") == ("顶级联赛", 12)
+    # 纯数字 = 全部赛事（帮助文案口径），不再回落旧文本「联赛」
+    assert formula.parse_round_token(cfg, "5") == (None, 5)
+    try:
+        formula.parse_round_token(cfg, "顶级")
+        assert False, "无数字应报错"
+    except ValueError:
+        pass
 
 
 async def test_split_competition():
-    """前缀剥离：识别赛事并返回剩余（不要求剩余含数字，供命名轮次使用）。"""
+    """split_competition：前缀剥离；无前缀命中为 None（全部赛事）。"""
     cfg = _cfg()
-    cases = [
-        ("1", "联赛", "1"),
-        ("顶级9", "顶级联赛", "9"),
-        ("顶级", "顶级联赛", ""),
-        ("顶3", "顶级联赛", "3"),
-        ("次级11", "次级联赛", "11"),
-        ("小组赛", "冠军杯", "赛"),
-        ("abc", "联赛", "abc"),
-        ("", "联赛", ""),
-    ]
-    for token, comp, rest in cases:
-        got_comp, got_rest = formula.split_competition(cfg, token)
-        assert (got_comp, got_rest) == (comp, rest), f"{token}: {got_comp},{got_rest}"
+    assert formula.split_competition(cfg, "顶级9") == ("顶级联赛", "9")
+    assert formula.split_competition(cfg, "冠军杯小组第3轮") == ("冠军杯", "小组第3轮")
+    assert formula.split_competition(cfg, "12") == (None, "12")
 
 
-async def test_result_from_score():
-    cases = [
-        ("2-1", "W"), ("1-2", "L"), ("1-1", "D"),
-        ("2:1", "W"), ("2：1", "W"),
-        ("0-0PK2-4", "L"), ("0-0PK4-2", "W"), ("0-0PK2-2", "D"),
-        ("1-1PK0-0", "D"),
-        ("0-0PK", None), ("abc", None), ("2", None), ("2-1-3", None), ("", None),
-    ]
-    for text, expect in cases:
-        got = formula.result_from_score(text)
-        assert got == expect, f"{text}: {got!r} vs {expect!r}"
-
-
-async def test_form_pts_skips_cancelled():
-    """取消（C）不计入积分，也不占「近 3 场」名额。"""
-    assert formula.form_pts(["W", "W", "D"]) == 7
-    assert formula.form_pts(["C", "W"]) == 3
-    assert formula.form_pts(["W", "C", "W", "W"]) == 9  # 前 3 场非取消 = W,W,W
-    assert formula.form_pts(["C", "C", "C"]) == 0
-
-
-async def test_effective_form_pts():
-    """非取消场次不足 3 场一律按中性 4 分；满 3 场恢复实际积分。"""
-    assert formula.NEUTRAL_FORM_PTS == 4
-    assert formula.effective_form_pts([]) == 4
-    assert formula.effective_form_pts(["W"]) == 4
-    assert formula.effective_form_pts(["L", "D"]) == 4  # 实际仅 1 分也强制中性
-    assert formula.effective_form_pts(["C", "W"]) == 4
-    assert formula.effective_form_pts(["C", "C"]) == 4
-    assert formula.effective_form_pts(["W", "W"]) == 4
-    # 满 3 场后走真实路径（取消不占名额照常跳过）
-    assert formula.effective_form_pts(["W", "L", "L"]) == 3
-    assert formula.effective_form_pts(["W", "W", "D"]) == 7
-    assert formula.effective_form_pts(["C", "L", "L", "W"]) == 3
-
-
-def run_all():
-    import asyncio
-
-    failures = 0
-    for name in sorted([n for n in dir() if n.startswith("test_")]):
-        fn = globals()[name]
-        try:
-            asyncio.run(fn())
-            print(f"  PASS {name}")
-        except AssertionError as e:
-            failures += 1
-            print(f"  FAIL {name}: {e}")
-        except Exception as e:
-            failures += 1
-            print(f"  ERROR {name}: {type(e).__name__}: {e}")
-    print(f"s1_formula: {failures} failed")
-    return failures
-
-
-async def test_fans_target_table_defense():
-    """C🟡4：畸形条目剔除不株连整表；升序+开放段恒在尾；全坏回退线性。"""
-    cfg = dict(DEFAULT_CONFIG)
-    # 乱序开放段 + 4 类坏条目（非 dict/负斜率/负上限/数值非法）；
-    # 缺 max_influence 的条目按原设计默认 0=开放段，不算坏条目
-    raw = ('{"bands":[{"max_influence":0,"slope":10},{"max_influence":150,"slope":26},'
-           '"junk",[1,2],{"max_influence":180,"slope":-5},{"max_influence":-3,"slope":9},'
-           '{"slope":7},{"max_influence":"abc","slope":3},{"max_influence":120,"slope":20}]}')
-    cfg["fans_target_table"] = raw
-    bands = formula.fans_target_table(cfg)
-    assert bands == [(120.0, 20.0), (150.0, 26.0), (0.0, 10.0), (0.0, 7.0)], bands
-    # 清洗后逐带累计正确（120×20=2400；+30×26=780；+50×10=500，首个开放段即截断）
-    assert formula.diehard_target(cfg, 100) == 2000.0
-    assert formula.diehard_target(cfg, 130) == 2660.0
-    assert formula.diehard_target(cfg, 200) == 3680.0
-
-    # 整表全坏 → 回退线性
-    bad = dict(DEFAULT_CONFIG)
-    bad["fans_target_table"] = '{"bands":["junk",{"max_influence":-1,"slope":5}]}'
-    assert formula.fans_target_table(bad) == [(0.0, float(bad["fans_per_influence"]))]
-
-    # 根本不是 JSON 对象 → 同样回退
-    bad2 = dict(DEFAULT_CONFIG)
-    bad2["fans_target_table"] = "[1,2,3]"
-    assert formula.fans_target_table(bad2) == [(0.0, float(bad2["fans_per_influence"]))]
-
-
-if __name__ == "__main__":
-    sys.exit(1 if run_all() else 0)
+async def test_competition_texts_alias():
+    """库内文本等价集：顶级联赛查询同时命中 v2 迁移行「联赛」；其余赛事自映射。"""
+    assert formula.competition_texts("顶级联赛") == ("顶级联赛", "联赛")
+    assert formula.competition_texts("次级联赛") == ("次级联赛",)
+    assert formula.competition_texts("冠军杯") == ("冠军杯",)
+    assert formula.competition_texts(None) == ()
+    # 写出方向归一（club 天气推送只认三类标准名）
+    assert formula.normalize_competition("联赛") == "顶级联赛"
+    assert formula.normalize_competition("顶级联赛") == "顶级联赛"
+    assert formula.normalize_competition("冠军杯") == "冠军杯"

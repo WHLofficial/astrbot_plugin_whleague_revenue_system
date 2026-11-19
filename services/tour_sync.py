@@ -1,27 +1,46 @@
-"""赛程时刻同步：从 tour 公开接口只读拉取开球时刻，写回本地快照。
+"""tour 全量同步引擎（v3）：赛程/赛果/leg/点球/弃权 以 tour 为唯一真源。
 
-方向固定为 tour → 插件。tour 是时刻的唯一真源，插件不再接受人工录入时刻
-（`/主场赛程导入` 的周/天/时间字段仍解析，但直接丢弃），本地只保留一份副本，
-断网或 tour 未排期时预报图仍可用上次快照出图。
-
-轮次映射（插件轮次 → tour 轮次）：
-- 顶级联赛：一一对应；
-- 次级联赛：预赛阶段一一对应，决赛阶段（冲刺/挑战组）叠加预赛的轮次数
-  （S9 是 14 ⇒ 插件 15–20 = tour 1–6）；
-- 冠军杯：小组赛一一对应；淘汰赛暂不同步（两回合共用同一轮次号，本地无 leg 列）。
+数据流（设计 §5）：
+- club /api/seasons/current 给出当前赛季与三个 tournamentId（club_sync.fetch_current_season）；
+- 逐赛事 GET /api/public/tournaments/{id}（stages）与 /{id}/matches（每赛事 2 个 GET）；
+- stage offset 按阶段顺序累计前面各阶段的实际最大轮次（淘汰赛同样有偏移，不再丢弃）；
+- 行映射：两回合每 leg 一行（leg 空按 0，进唯一键）；CPU 后缀归一后匹配、展示保留
+  tour 原名；note 含「轮空」不落库；对手未定/占位不落库并分类计入 skipped；
+- 匹配写入：tour_match_id 优先，归一队名唯一键兜底；未排期行也补建（时刻为空）；
+  主客与本地相反不猜（记 conflicts，不覆盖不补建）；每赛事独立事务，单赛事失败
+  不影响其他（status=partial）；
+- tour 未排期（week/day/time 为 NULL）不覆盖本地时刻（CSV 导入等本地快照保留）；
+- 结果：只 finished 落终局比分；live 仅更新 tour_status；result 主队视角 W/D/L/C；
+  小组/联赛点球仍按平局（pen 只展示），淘汰赛点球定胜负；walkoverSide → result='C'、
+  score='弃权'；tour 改判时 finished 每次覆盖本地比分/结果；两回合不本地算总比分；
+- 本地 round_no（= stage offset + tour.round）与 club 定位键（tour stage 内 m.round）
+  的换算表随同步落 kv（tour_round_map），天气推送/上座拉取按换算后的轮次定位。
 """
 
+import json
 import re
+from datetime import datetime
 
 from astrbot.api import logger
 
-PUBLIC_TOURNAMENTS = "/api/public/tournaments"
+PUBLIC_TOURNAMENT = "/api/public/tournaments"
 _TIMEOUT_SECONDS = 15.0
 
-# 赛事名前缀 → 本地 competition 名（插件 matches.competition 的取值）
+# 本地 round_no → tour stage 内轮次 的换算表（plugin_config kv；JSON 键一律字符串）
+TOUR_ROUND_MAP_KEY = "tour_round_map"
+
+# 本地 competition 名（club 当前赛季映射给出，此处仅作展示域校验）
 COMPETITIONS = ("顶级联赛", "次级联赛", "冠军杯")
 
 _CPU_RE = re.compile(r"[（(]\s*cpu\s*[)）]", re.IGNORECASE)
+
+# 同步行展示字段（比对与写库共用；比对时排除 synced_at 本身）
+_SYNC_FIELDS = (
+    "tournament_id", "round_no", "leg", "stage_name", "home_team", "away_team",
+    "home_score", "away_score", "pen_home", "pen_away", "result", "score",
+    "tour_status", "walkover_side", "week_no", "day_no", "match_time",
+    "tour_match_id",
+)
 
 
 class TourSyncError(Exception):
@@ -34,144 +53,272 @@ def normalize_team(name) -> str:
     return re.sub(r"\s+", " ", s).strip()
 
 
-def competition_of(tournament_name) -> str | None:
-    """从 tour 赛事名（如「S9 | 顶级联赛」）认出本地赛事名；认不出返回 None。"""
-    name = str(tournament_name or "")
-    for comp in COMPETITIONS:
-        if comp in name:
-            return comp
-    return None
-
-
 def stage_offsets(stages: list, matches: list) -> dict:
-    """算每个 stage 的轮次偏移：stageId → 偏移（None = 该阶段不同步）。
+    """按 stage 顺序累计前面各阶段的实际最大轮次：stageId → offset。
 
-    偏移只对「决赛阶段」有意义：它要叠加基础阶段的轮次数，才能和插件轮次对齐。
-    淘汰赛返回 None（两回合同轮次号，本地没有 leg 列可区分）。
+    round_no = offset + tour.round。次级 base→final→playoff 的 offset 为
+    0/14/20（base 实际 14 轮、final 6 轮），冠军杯 group→elim 为 0/6，
+    顶级单阶段为 0；淘汰赛同样获得偏移（v3 起淘汰赛不再整段丢弃）。
     """
-    def cfg_of(stage):
-        cfg = stage.get("config") or {}
-        return cfg if isinstance(cfg, dict) else {}
+    max_round: dict = {}
+    for m in matches or []:
+        sid = m.get("stageId")
+        r = m.get("round")
+        if sid is None or r is None:
+            continue
+        try:
+            r = int(r)
+        except (TypeError, ValueError):
+            continue
+        max_round[sid] = max(max_round.get(sid, 0), r)
 
-    base_rounds = 0
-    for stage in stages:
-        if stage.get("kind") == "round_robin" and not cfg_of(stage).get("source"):
-            rounds = [int(m["round"]) for m in matches
-                      if m.get("stageId") == stage.get("id") and m.get("round") is not None]
-            base_rounds = max(rounds, default=0)
+    offsets: dict = {}
+    acc = 0
+    for s in sorted(stages or [], key=lambda x: (x.get("sortOrder") or 0)):
+        sid = s.get("id")
+        if sid is not None:
+            offsets[sid] = acc
+        acc += max_round.get(sid, 0)
+    return offsets
 
-    out = {}
-    for stage in stages:
-        sid = stage.get("id")
-        kind = stage.get("kind")
-        if kind == "elim":
-            out[sid] = None
-        elif kind == "round_robin" and cfg_of(stage).get("source"):
-            out[sid] = base_rounds
-        else:
-            out[sid] = 0
+
+def final_result(m: dict, is_elim: bool) -> dict:
+    """tour 一行 → 比分/结果/状态落库值（纯函数）。
+
+    - 未完赛（pending/live）：比分与 result 不落，tour_status 原样（live 仅更新状态）；
+    - 弃权（walkoverSide home/away/both）：result='C'、score='弃权'、比分不落；
+    - finished：round_robin/group 点球仍按平局（pen 只展示），elim 点球定胜负；
+    - score 展示串：'2:1' / '2:1（点球 4:2）' / '弃权'。
+    """
+    status = str(m.get("status") or "pending")
+    tour_status = status if status in ("pending", "live", "finished") else "pending"
+    out = {
+        "home_score": None, "away_score": None, "pen_home": None, "pen_away": None,
+        "result": None, "score": None, "tour_status": tour_status,
+    }
+    if tour_status != "finished":
+        return out
+    walkover = m.get("walkoverSide")
+    if walkover in ("home", "away", "both"):
+        out.update({"result": "C", "score": "弃权", "walkover_side": walkover})
+        return out
+    h, a = m.get("scoreHome"), m.get("scoreAway")
+    if h is None or a is None:
+        # 数据异常（完赛无比分）：不猜，保留 finished 状态与空比分
+        return out
+    h, a = int(h), int(a)
+    ph = int(m["penHome"]) if m.get("penHome") is not None else None
+    pa = int(m["penAway"]) if m.get("penAway") is not None else None
+    if is_elim and ph is not None and pa is not None:
+        result = "W" if ph > pa else ("L" if ph < pa else "D")
+    else:
+        result = "W" if h > a else ("L" if h < a else "D")
+    text = f"{h}:{a}"
+    if ph is not None and pa is not None:
+        text += f"（点球 {ph}:{pa}）"
+    out.update({
+        "home_score": h, "away_score": a, "pen_home": ph, "pen_away": pa,
+        "result": result, "score": text,
+    })
     return out
 
 
-def map_tour_matches(tournament_name, stages, matches) -> dict:
-    """tour 的一个赛事 → 待同步行 + 跳过原因统计。
+def map_tournament_rows(tournament_id: int, competition: str, stages: list, matches: list) -> dict:
+    """tour 一个赛事的 matches → 待落库行 + 跳过分类（轮空/对手未定/淘汰赛未定）。
 
-    未排时刻的联赛场次也会返回（week/day/time 为 None）：tour 是赛程结构真源，
-    本地缺行时要能补建，只是暂无时刻可写。
+    未排时刻的行也返回（week/day/time 为 None，tour 是赛程结构真源，本地缺行要补建）。
+    round_map：{round_no: tour stage 内轮次}——club weather-sync / fixtures 按
+    tour 的 m.round 定位，推送/拉取需用换算后的轮次（设计 §5.2 offset 的逆映射）。
     """
-    competition = competition_of(tournament_name)
-    if competition is None:
-        raise TourSyncError(f"认不出赛事「{tournament_name}」对应本地哪一项（需含 顶级联赛/次级联赛/冠军杯）")
     offsets = stage_offsets(stages, matches)
-    rows, skipped = [], {"淘汰赛": 0, "未排时刻": 0, "对手未定": 0, "未知阶段": 0}
-    for m in matches:
-        offset = offsets.get(m.get("stageId"))
-        if offset is None:
-            skipped["淘汰赛"] += 1
+    elim_ids = {s.get("id") for s in stages or [] if s.get("kind") == "elim"}
+    rows, skipped = [], {"轮空": 0, "对手未定": 0, "淘汰赛未定": 0}
+    round_map: dict = {}
+    for m in matches or []:
+        sid = m.get("stageId")
+        r = m.get("round")
+        if sid is None or sid not in offsets or r is None:
+            # 阶段/轮次缺失的异常行：无处挂靠，不落库
+            skipped["对手未定"] += 1
             continue
-        if offset == "?":
-            skipped["未知阶段"] += 1
+        note = str(m.get("note") or "")
+        if "轮空" in note:
+            skipped["轮空"] += 1
             continue
-        home = normalize_team(m.get("homeTeamName"))
-        away = normalize_team(m.get("awayTeamName"))
+        home = m.get("homeTeamName")
+        away = m.get("awayTeamName")
+        if m.get("homePlaceholder") or m.get("awayPlaceholder"):
+            skipped["淘汰赛未定"] += 1
+            continue
         if not home or not away:
             skipped["对手未定"] += 1
             continue
-        week, day, time = m.get("kickoffWeek"), m.get("kickoffDay"), m.get("kickoffTime")
-        scheduled = bool(week and day and time)
-        if not scheduled:
-            skipped["未排时刻"] += 1
+        week, day, mtime = m.get("kickoffWeek"), m.get("kickoffDay"), m.get("kickoffTime")
+        scheduled = week is not None and day is not None and mtime
+        leg = int(m["leg"]) if m.get("leg") is not None else 0
+        res = final_result(m, is_elim=sid in elim_ids)
+        walkover = m.get("walkoverSide")
+        round_no = int(r) + offsets[sid]
+        round_map[round_no] = int(r)
         rows.append({
-            "competition": competition,
-            "round_no": int(m["round"]) + int(offset),
-            "home": home,
-            "away": away,
-            "week": int(week) if scheduled else None,
-            "day": int(day) if scheduled else None,
-            "time": str(time) if scheduled else None,
-            "scheduled": scheduled,
             "tour_match_id": int(m["id"]),
-            "status": m.get("status"),
+            "tournament_id": int(tournament_id),
+            "competition": competition,
+            "round_no": round_no,
+            "leg": leg,
+            "stage_name": str(m.get("stageName") or ""),
+            "home_team": str(home).strip(),
+            "away_team": str(away).strip(),
+            "home_score": res["home_score"],
+            "away_score": res["away_score"],
+            "pen_home": res["pen_home"],
+            "pen_away": res["pen_away"],
+            "result": res["result"],
+            "score": res["score"],
+            "tour_status": res["tour_status"],
+            "walkover_side": walkover if walkover in ("home", "away", "both") else None,
+            "week_no": int(week) if scheduled else None,
+            "day_no": int(day) if scheduled else None,
+            "match_time": str(mtime) if scheduled else None,
+            "scheduled": scheduled,
         })
-    return {"competition": competition, "rows": rows, "skipped": skipped}
+    return {"rows": rows, "skipped": skipped, "round_map": round_map}
 
 
-def _key(competition, round_no, home, away) -> tuple:
-    return (str(competition), int(round_no), normalize_team(home), normalize_team(away))
+def _sync_equal(local, row: dict) -> bool:
+    """本地行与 tour 行的展示字段是否一致（队名按原文比对，CPU 改名视为变化）。
 
-
-def plan_kickoff_sync(tour_rows: list, local_rows: list) -> dict:
-    """比对 tour 行与本地行，给出要写的更新与各类落空清单（纯函数，不碰库）。
-
-    已完赛/已有结果的场次不覆盖时刻（记 conflict），主客相反也不猜（记 conflict）。
-    tour 尚未排期的场次只记 pending，不写 NULL 覆盖本地快照。
+    week/day/time 三项在 tour 未排期（NULL）时不比对：本地快照（CSV 导入等）
+    保留，不算差异——否则每次同步都会虚报 update 且被 COALESCE 吞掉。
     """
-    local = {}
-    for raw in local_rows:
-        row = dict(raw)  # sqlite3.Row 没有 .get
-        local[_key(row["competition"], row["round_no"], row["home_team"], row["away_team"])] = row
+    for f in _SYNC_FIELDS:
+        if f in ("week_no", "day_no", "match_time") and row.get(f) is None:
+            continue
+        if local[f] != row[f]:
+            return False
+    return True
 
-    updates, unchanged, missing_local, conflicts, pending = [], [], [], [], []
-    seen = set()
-    for t in tour_rows:
-        key = _key(t["competition"], t["round_no"], t["home"], t["away"])
-        row = local.get(key)
+
+def plan_sync(rows: list, local_rows: list) -> dict:
+    """比对 tour 行与本地行 → 写操作计划（纯函数，不碰库）。
+
+    匹配：tour_match_id 优先；无 id 用归一队名唯一键
+    (tournament_id, round_no, leg, 归一主队, 归一客队) 兜底。
+    命中且字段一致 → unchanged；命中有差异 → update op（含 match_id）；
+    主客与本地相反（同轮同 leg 归一队名对调命中）→ conflicts，不覆盖不补建；
+    未命中 → insert op；本地行未被任何 tour 行匹配 → missing_tour。
+    """
+    by_tmid: dict = {}
+    by_key: dict = {}
+    for raw in local_rows:
+        row = dict(raw)
+        tmid = row.get("tour_match_id")
+        if tmid is not None:
+            by_tmid.setdefault(int(tmid), row)
+        key = (
+            int(row["tournament_id"]), int(row["round_no"]), int(row["leg"]),
+            normalize_team(row["home_team"]), normalize_team(row["away_team"]),
+        )
+        by_key.setdefault(key, row)
+
+    ops: list = []
+    unchanged = 0
+    pending = 0
+    conflicts: list = []
+    matched_ids: set = set()
+    for t in rows:
+        if not t.get("scheduled"):
+            pending += 1
+        row = by_tmid.get(t["tour_match_id"])
         if row is None:
-            reversed_key = _key(t["competition"], t["round_no"], t["away"], t["home"])
-            if reversed_key in local:
-                seen.add(reversed_key)
-                conflicts.append({**t, "reason": "主客与本地相反，未覆盖"})
-            else:
-                missing_local.append(t)
+            row = by_key.get((
+                t["tournament_id"], t["round_no"], t["leg"],
+                normalize_team(t["home_team"]), normalize_team(t["away_team"]),
+            ))
+        if row is None:
+            # 主客反不猜：同轮同 leg 主客对调能对上 → 记冲突，不覆盖也不补建
+            reversed_row = by_key.get((
+                t["tournament_id"], t["round_no"], t["leg"],
+                normalize_team(t["away_team"]), normalize_team(t["home_team"]),
+            ))
+            if reversed_row is not None:
+                matched_ids.add(int(reversed_row["id"]))
+                conflicts.append({
+                    "competition": t["competition"], "round_no": t["round_no"],
+                    "leg": t["leg"], "home_team": t["home_team"],
+                    "away_team": t["away_team"],
+                    "reason": "主客与本地相反，未覆盖",
+                })
+                continue
+            ops.append({"kind": "insert", "row": t})
             continue
-        seen.add(key)
-        if not t.get("scheduled", t.get("time") is not None):
-            pending.append(t)
-            continue
-        same = (row.get("week_no") == t["week"] and row.get("day_no") == t["day"]
-                and row.get("match_time") == t["time"])
-        if row.get("result"):
-            if not same:
-                conflicts.append({**t, "reason": f"已完赛（{row['result']}），时刻不覆盖"})
-            continue
-        if same and row.get("tour_match_id") == t["tour_match_id"]:
-            unchanged.append(t)
-            continue
-        updates.append({**t, "match_id": row["id"]})
+        matched_ids.add(int(row["id"]))
+        if _sync_equal(row, t):
+            unchanged += 1
+        else:
+            ops.append({"kind": "update", "id": int(row["id"]), "row": t})
 
     missing_tour = [
-        {"competition": r["competition"], "round_no": r["round_no"],
-         "home_team": r["home_team"], "away_team": r["away_team"]}
-        for key, r in local.items() if key not in seen
+        {
+            "competition": r["competition"], "round_no": r["round_no"],
+            "leg": r["leg"], "home_team": r["home_team"], "away_team": r["away_team"],
+        }
+        for rid, r in ((int(x["id"]), dict(x)) for x in local_rows)
+        if rid not in matched_ids
     ]
     return {
-        "updates": updates,
-        "unchanged": unchanged,
-        "missing_local": missing_local,
-        "missing_tour": missing_tour,
-        "conflicts": conflicts,
-        "pending": pending,
+        "ops": ops, "unchanged": unchanged, "pending": pending,
+        "missing_tour": missing_tour, "conflicts": conflicts,
     }
+
+
+async def load_round_map(dao) -> dict:
+    """读 kv 换算表 → {tournament_id: {round_no: tour stage 内轮次}}；无表/坏表返回 {}。"""
+    try:
+        raw = await dao.get_config(TOUR_ROUND_MAP_KEY)
+        data = json.loads(raw) if raw else None
+    except Exception:
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    out: dict = {}
+    for tid, rounds in data.items():
+        try:
+            tid_int = int(tid)
+        except (TypeError, ValueError):
+            continue
+        if isinstance(rounds, dict):
+            mapping = {}
+            for rnd, tour_rnd in rounds.items():
+                try:
+                    mapping[int(rnd)] = int(tour_rnd)
+                except (TypeError, ValueError):
+                    continue
+            out[tid_int] = mapping
+    return out
+
+
+def effective_round(round_map: dict, tournament_id: int, round_no: int) -> int:
+    """本地 round_no（带 stage offset）→ club 定位用的 tour stage 内轮次。
+
+    无换算表/该轮不在表内（v2 迁移行等）按原值返回：顶级 1–22 与冠军杯小组
+    1–6 本就与 tour 轮次对齐，回落即正确。
+    """
+    try:
+        tid_map = round_map.get(int(tournament_id)) or {}
+        return int(tid_map.get(int(round_no), round_no))
+    except (TypeError, ValueError):
+        return int(round_no)
+
+
+def local_rows_for_tournament(local_rows: list, tournament_id: int) -> list:
+    """只保留指定赛事的本地行；同步报告按赛事独立比对，避免跨赛事虚报 missing_tour。"""
+    tid = int(tournament_id)
+    return [r for r in local_rows if int(r["tournament_id"] or 0) == tid]
+
+
+def _synced_at() -> str:
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
 class TourSyncClient:
@@ -179,15 +326,10 @@ class TourSyncClient:
 
     def __init__(self, cfg: dict):
         self._base = str(cfg.get("tour_api_base", "") or "").strip().rstrip("/")
-        self._season = str(cfg.get("tour_sync_season", "") or "").strip()
 
     @property
     def enabled(self) -> bool:
         return bool(self._base)
-
-    @property
-    def configured_season(self) -> str:
-        return self._season
 
     async def _get(self, session, path: str):
         url = f"{self._base}{path}"
@@ -201,96 +343,126 @@ class TourSyncClient:
             except ValueError:
                 raise TourSyncError(f"GET {path} 返回的不是 JSON")
 
-    async def fetch_rows(self, season_label: str) -> dict:
-        """拉本赛季三项赛事的全部时刻行；返回 {rows, tournaments, skipped}。"""
-        try:
-            import aiohttp
-        except ImportError:
-            raise TourSyncError("缺少 aiohttp 依赖，无法同步（pip install aiohttp）")
-
-        label = season_label or self._season
-        if not label:
-            raise TourSyncError("赛季未命名，且未配置 tour_sync_season，无法确定要同步 S 几")
-
-        rows, tournaments, skipped = [], [], {}
-        timeout = aiohttp.ClientTimeout(total=_TIMEOUT_SECONDS)
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            payload = await self._get(session, PUBLIC_TOURNAMENTS)
-            for t in payload.get("tournaments", []):
-                name = str(t.get("name") or "")
-                if label not in name:
-                    continue
-                if competition_of(name) is None:
-                    skipped[name] = "赛事名无法映射"
-                    continue
-                detail = await self._get(session, f"/api/public/tournaments/{t['id']}")
-                data = await self._get(session, f"/api/public/tournaments/{t['id']}/matches")
-                mapped = map_tour_matches(name, detail.get("stages") or [], data.get("matches") or [])
-                rows.extend(mapped["rows"])
-                tournaments.append(name)
-                skipped.update({f"{name}·{k}": v for k, v in mapped["skipped"].items() if v})
-        if not tournaments:
-            raise TourSyncError(f"tour 上没有找到名字含「{label}」的赛事")
-        return {"rows": rows, "tournaments": tournaments, "skipped": skipped}
+    async def fetch_tournament(self, session, tournament_id: int) -> tuple[dict, list]:
+        """拉一个赛事的详情（stages）与全部 matches；返回 (detail, matches)。"""
+        detail = await self._get(session, f"{PUBLIC_TOURNAMENT}/{tournament_id}")
+        data = await self._get(session, f"{PUBLIC_TOURNAMENT}/{tournament_id}/matches")
+        return detail, data.get("matches") or []
 
 
 class TourSyncService:
-    """把 tour 时刻同步进本地快照。失败不抛，返回 status=error 供命令层展示。"""
+    """tour 全量同步进本地 matches。失败不抛，返回 status 供命令层展示。"""
 
     def __init__(self, dao, cfg):
         self._dao = dao
         self._cfg = cfg
 
-    async def sync(self, season: int) -> dict:
+    async def sync(self) -> dict:
+        """club 当前赛季驱动三赛事全量同步。手动触发，幂等，不加 cron。"""
         client = TourSyncClient(self._cfg)
         if not client.enabled:
             return {"status": "bypass", "reason": "未配置 tour_api_base"}
+
+        from .club_sync import ClubSyncClient, CurrentSeasonError
+        club = ClubSyncClient(self._cfg)
         try:
-            label = client.configured_season or await self._dao.get_season_name(season) or ""
-            fetched = await client.fetch_rows(label)
-            local = await self._dao.list_matches_by_season(season)
-            plan = plan_kickoff_sync(fetched["rows"], local)
-            created = await self._create_missing(season, plan["missing_local"])
-            if created:
-                # 新建行没有 id/tour 绑定，重算一次计划把它们的时刻一并写进去
-                local = await self._dao.list_matches_by_season(season)
-                plan = plan_kickoff_sync(fetched["rows"], local)
-            for u in plan["updates"]:
-                await self._dao.set_match_kickoff(
-                    u["match_id"], u["week"], u["day"], u["time"], u["tour_match_id"], "tour",
-                )
-            return {
-                "status": "ok",
-                "season_label": label,
-                "tournaments": fetched["tournaments"],
-                "fetched": len(fetched["rows"]),
-                "created": created,
-                "updated": len(plan["updates"]),
-                "unchanged": len(plan["unchanged"]),
-                "missing_local": plan["missing_local"],
-                "missing_tour": plan["missing_tour"],
-                "conflicts": plan["conflicts"],
-                "pending": plan["pending"],
-                "skipped": fetched["skipped"],
-            }
-        except TourSyncError as e:
+            current = await club.fetch_current_season(self._dao)
+        except CurrentSeasonError as e:
             return {"status": "error", "error": str(e)}
-        except Exception as e:  # 网络/解析等一律兜住，命令层给中文提示
-            logger.error(f"tour 时刻同步失败: {type(e).__name__}: {e}")
-            return {"status": "error", "error": f"同步失败：{type(e).__name__}: {e}"}
+        tournaments = current.get("tournaments") or []
+        if not tournaments:
+            return {
+                "status": "error",
+                "error": "无法确定当前赛季的赛事列表（club 未返回赛事映射，仅本地赛季）",
+            }
+        season = int(current["season"])
+        label = current["season_label"]
 
-    async def _create_missing(self, season: int, rows: list) -> int:
-        """tour 有、本地没有的联赛场次补建行（含未排时刻的），返回实际新建数。
+        try:
+            import aiohttp
+        except ImportError:
+            return {"status": "error", "error": "缺少 aiohttp 依赖，无法同步（pip install aiohttp）"}
 
-        用当前窗口号落库：新行属于当前结算窗口；重复跑由 matches 唯一键幂等。
-        """
-        if not rows:
-            return 0
-        state = await self._dao.get_league_state()
-        window_seq = int(state["window_seq"]) if state else 1
-        created = 0
-        for t in rows:
-            created += await self._dao.add_match(
-                season, window_seq, t["round_no"], t["home"], t["away"], t["competition"],
-            )
-        return created
+        local_rows = await self._dao.list_matches_by_season(season)
+        synced_at = _synced_at()
+        fetched = created = updated = unchanged = pending_total = 0
+        skipped: dict = {}
+        missing_tour: list = []
+        conflicts: list = []
+        per_tournament: list = []
+        errors: list = []
+        # 轮次换算表：保留上次成功映射（单赛事本次失败时其旧映射仍可用），成功者覆盖
+        round_maps: dict = await load_round_map(self._dao)
+        rounds_dirty = False
+
+        timeout = aiohttp.ClientTimeout(total=_TIMEOUT_SECONDS)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            for t in tournaments:
+                tid, comp = t["tournament_id"], t["competition"]
+                entry = {"competition": comp, "tournament_id": tid}
+                try:
+                    detail, matches = await client.fetch_tournament(session, tid)
+                    mapped = map_tournament_rows(tid, comp, detail.get("stages") or [], matches)
+                    local_for_tid = local_rows_for_tournament(local_rows, tid)
+                    plan = plan_sync(mapped["rows"], local_for_tid)
+                    for op in plan["ops"]:
+                        op["row"]["synced_at"] = synced_at
+                    counts = await self._dao.apply_match_sync_ops(plan["ops"], season)
+                    fetched += len(mapped["rows"])
+                    created += counts["created"]
+                    updated += counts["updated"]
+                    unchanged += plan["unchanged"]
+                    pending_total += plan["pending"]
+                    for k, v in mapped["skipped"].items():
+                        skipped[k] = skipped.get(k, 0) + v
+                    missing_tour.extend(plan["missing_tour"])
+                    conflicts.extend(plan["conflicts"])
+                    if mapped["round_map"]:
+                        round_maps[int(tid)] = mapped["round_map"]
+                        rounds_dirty = True
+                    entry.update({
+                        "status": "ok", "fetched": len(mapped["rows"]),
+                        "created": counts["created"], "updated": counts["updated"],
+                        "unchanged": plan["unchanged"],
+                    })
+                except Exception as e:  # 单赛事失败不影响其他赛事（partial）
+                    logger.error(f"tour 同步 {comp} 失败: {type(e).__name__}: {e}")
+                    errors.append(f"{comp}（tournamentId={tid}）：{type(e).__name__}: {e}")
+                    entry.update({"status": "error", "error": str(e)})
+                per_tournament.append(entry)
+
+        if rounds_dirty:
+            # JSON 键只能为字符串：{tid: {round_no: tour_round}} 落 kv（int↔str 由读写两侧转换）
+            serialized = {
+                str(tid): {str(rnd): tr for rnd, tr in rounds.items()}
+                for tid, rounds in round_maps.items()
+            }
+            try:
+                await self._dao.set_config(
+                    TOUR_ROUND_MAP_KEY,
+                    json.dumps(serialized, ensure_ascii=False, separators=(",", ":")),
+                )
+            except Exception as e:  # kv 写失败不影响同步结果（换算表回落原值）
+                logger.warning(f"tour_round_map kv 写入失败: {type(e).__name__}: {e}")
+
+        if errors and len(errors) >= len(tournaments):
+            status = "error"
+        elif errors:
+            status = "partial"
+        else:
+            status = "ok"
+        return {
+            "status": status,
+            "season": season,
+            "season_label": label,
+            "fetched": fetched,
+            "created": created,
+            "updated": updated,
+            "unchanged": unchanged,
+            "pending": pending_total,
+            "skipped": skipped,
+            "missing_tour": missing_tour,
+            "conflicts": conflicts,
+            "tournaments": per_tournament,
+            "errors": errors,
+        }
