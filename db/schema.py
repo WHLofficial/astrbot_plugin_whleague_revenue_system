@@ -1,86 +1,63 @@
+"""schema v15：展示插件自包含结构（5 张核心表）+ v12–v14 迁移。
+
+v15 起不再保留 v1–v14 的增量迁移链：
+- 全新安装直接建 5 张表（matches / stadium / league_state / admins / plugin_config）。
+- 存量库仅支持 v12–v14 → v15 一次性重建；version < 12 报错要求先升到 v2.14，
+  version > 15 或非法值直接报错，不再静默改写。
+迁移流程：PRAGMA foreign_keys=OFF → BEGIN IMMEDIATE → 重建 matches/stadium/league_state
+→ 删 16 张旧表 → 写 schema_version=15 → COMMIT → PRAGMA foreign_keys=ON；失败回滚。
+"""
+
+import re
+
 from astrbot.api import logger
 
-SCHEMA_VERSION = 14
+SCHEMA_VERSION = 15
 
 SQL_CREATE_TABLES = r"""
-
-CREATE TABLE IF NOT EXISTS stadium (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    team_name TEXT NOT NULL UNIQUE,
-    name TEXT NOT NULL DEFAULT '',
-    capacity INTEGER NOT NULL DEFAULT 12000,
-    tier INTEGER NOT NULL DEFAULT 0,
-    influence REAL NOT NULL DEFAULT 90,
-    fans_diehards REAL NOT NULL DEFAULT 1800,
-    next_attendance_mod REAL NOT NULL DEFAULT 1.0,
-    created_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
-    updated_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
-);
-
-CREATE INDEX IF NOT EXISTS idx_stadium_tier ON stadium(tier);
-
-CREATE TABLE IF NOT EXISTS stadium_facilities (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    team_name TEXT NOT NULL REFERENCES stadium(team_name),
-    facility_key TEXT NOT NULL,
-    level INTEGER NOT NULL DEFAULT 0,
-    updated_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
-    UNIQUE(team_name, facility_key)
-);
-
-CREATE TABLE IF NOT EXISTS club_balance (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    team_name TEXT NOT NULL UNIQUE,
-    balance REAL NOT NULL DEFAULT 0,
-    build_credit REAL NOT NULL DEFAULT 0,
-    updated_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
-);
-
-CREATE TABLE IF NOT EXISTS league_state (
-    id INTEGER PRIMARY KEY CHECK (id = 1),
-    season_number INTEGER NOT NULL DEFAULT 1,
-    window_seq INTEGER NOT NULL DEFAULT 1,
-    current_round INTEGER NOT NULL DEFAULT 0,
-    updated_by TEXT NOT NULL DEFAULT '',
-    updated_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
-);
-
 CREATE TABLE IF NOT EXISTS matches (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     season_number INTEGER NOT NULL,
-    window_seq INTEGER NOT NULL,
+    tournament_id INTEGER NOT NULL,
+    competition TEXT NOT NULL,          -- 顶级联赛/次级联赛/冠军杯（展示文本，与 tournament_id 并存）
     round_no INTEGER NOT NULL,
-    competition TEXT NOT NULL DEFAULT '联赛',
+    leg INTEGER NOT NULL DEFAULT 0,     -- 0=单场，1/2=两回合
+    stage_name TEXT NOT NULL DEFAULT '',
     home_team TEXT NOT NULL,
     away_team TEXT NOT NULL,
+    home_score INTEGER,
+    away_score INTEGER,
+    pen_home INTEGER,
+    pen_away INTEGER,
+    result TEXT,                        -- W/D/L/C（主队视角）
+    score TEXT,                         -- 展示串：2:1 / 2:1（点球 4:2）/ 弃权
+    tour_status TEXT NOT NULL DEFAULT 'pending',
+    walkover_side TEXT,                 -- home/away
     weather TEXT,
     wx_coef REAL,
-    result TEXT,
-    score TEXT,
     week_no INTEGER,
     day_no INTEGER,
     match_time TEXT,
     tour_match_id INTEGER,
-    kickoff_source TEXT,
-    attendance INTEGER,
-    ticket_revenue REAL,
-    commercial REAL,
-    broadcast REAL,
+    synced_at TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
-    UNIQUE(season_number, window_seq, round_no, competition, home_team, away_team)
+    UNIQUE(season_number, tournament_id, round_no, leg, home_team, away_team)
 );
-
-CREATE INDEX IF NOT EXISTS idx_matches_round ON matches(season_number, window_seq, round_no);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_matches_tour ON matches(tour_match_id) WHERE tour_match_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_matches_round ON matches(season_number, tournament_id, round_no, leg);
 CREATE INDEX IF NOT EXISTS idx_matches_home ON matches(home_team);
 
-CREATE TABLE IF NOT EXISTS influence_history (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    team_name TEXT NOT NULL,
+CREATE TABLE IF NOT EXISTS stadium (
+    team_name TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    capacity INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS league_state (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
     season_number INTEGER NOT NULL,
-    window_seq INTEGER NOT NULL,
-    influence REAL NOT NULL,
-    created_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
-    UNIQUE(team_name, season_number, window_seq)
+    season_label TEXT NOT NULL,
+    updated_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
 );
 
 CREATE TABLE IF NOT EXISTS admins (
@@ -90,232 +67,165 @@ CREATE TABLE IF NOT EXISTS admins (
     created_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
 );
 
-CREATE TABLE IF NOT EXISTS naming_rights (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    team_name TEXT NOT NULL UNIQUE,
-    brand TEXT NOT NULL,
-    heat REAL NOT NULL,
-    fee_per_window REAL NOT NULL,
-    windows_total INTEGER NOT NULL,
-    windows_remaining INTEGER NOT NULL,
-    status TEXT NOT NULL DEFAULT 'active',
-    signed_season INTEGER NOT NULL,
-    signed_window INTEGER NOT NULL,
-    -- 套餐快照（'{}'=legacy 老公式合同）；品牌满意度（行情体系）
-    package_json TEXT NOT NULL DEFAULT '{}',
-    satisfaction REAL NOT NULL DEFAULT 1.0,
-    created_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
-);
-
-CREATE TABLE IF NOT EXISTS brand_pool (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    brand TEXT NOT NULL,
-    heat REAL NOT NULL,
-    source TEXT NOT NULL DEFAULT 'builtin',
-    status TEXT NOT NULL DEFAULT 'adopted',
-    -- 档位（头部/新兴/口碑）、行业、招商卖点、套餐变体、手动锁档
-    tier TEXT NOT NULL DEFAULT '口碑',
-    industry TEXT NOT NULL DEFAULT '通用',
-    pitch TEXT NOT NULL DEFAULT '',
-    packages_json TEXT NOT NULL DEFAULT '',
-    tier_locked INTEGER NOT NULL DEFAULT 0,
-    created_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
-);
-
-CREATE TABLE IF NOT EXISTS venue_bookings (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    team_name TEXT NOT NULL,
-    season_number INTEGER NOT NULL,
-    window_seq INTEGER NOT NULL,
-    slot_no INTEGER NOT NULL,
-    activity_type TEXT NOT NULL,
-    booked_by TEXT NOT NULL DEFAULT '',
-    created_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
-    UNIQUE(team_name, season_number, window_seq, slot_no)
-);
-
-CREATE TABLE IF NOT EXISTS revenue_transactions (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    team_name TEXT NOT NULL,
-    season_number INTEGER NOT NULL,
-    window_seq INTEGER NOT NULL,
-    round_no INTEGER,
-    kind TEXT NOT NULL,
-    amount REAL NOT NULL,
-    note TEXT NOT NULL DEFAULT '',
-    created_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
-);
-
-CREATE INDEX IF NOT EXISTS idx_tx_team ON revenue_transactions(team_name, season_number, window_seq);
-CREATE INDEX IF NOT EXISTS idx_tx_kind ON revenue_transactions(kind);
-
-CREATE TABLE IF NOT EXISTS event_pool (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    event_id TEXT NOT NULL UNIQUE,
-    name TEXT NOT NULL,
-    category TEXT NOT NULL DEFAULT '通用',
-    weight INTEGER NOT NULL DEFAULT 10,
-    conditions_json TEXT NOT NULL DEFAULT '{}',
-    effects_json TEXT NOT NULL DEFAULT '{}',
-    options_json TEXT NOT NULL DEFAULT '{}',
-    soft_conditions INTEGER NOT NULL DEFAULT 0,
-    event_type TEXT NOT NULL DEFAULT 'instant',
-    template TEXT NOT NULL DEFAULT '',
-    source TEXT NOT NULL DEFAULT 'builtin',
-    status TEXT NOT NULL DEFAULT 'adopted',
-    created_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
-);
-
-CREATE TABLE IF NOT EXISTS events_log (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    team_name TEXT NOT NULL,
-    season_number INTEGER NOT NULL,
-    window_seq INTEGER NOT NULL,
-    event_id TEXT NOT NULL,
-    effect_json TEXT NOT NULL DEFAULT '{}',
-    text TEXT NOT NULL DEFAULT '',
-    created_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
-);
-
-CREATE INDEX IF NOT EXISTS idx_events_log ON events_log(team_name, season_number, window_seq);
-
-CREATE TABLE IF NOT EXISTS event_choices (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    team_name TEXT NOT NULL,
-    season_number INTEGER NOT NULL,
-    window_seq INTEGER NOT NULL,
-    event_id TEXT NOT NULL,
-    choice_no INTEGER,
-    resolved INTEGER NOT NULL DEFAULT 0,
-    outcome TEXT NOT NULL DEFAULT '',
-    created_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
-    UNIQUE(team_name, season_number, window_seq, event_id)
-);
-
-CREATE INDEX IF NOT EXISTS idx_event_choices ON event_choices(season_number, window_seq);
-
-CREATE TABLE IF NOT EXISTS window_summaries (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    season_number INTEGER NOT NULL,
-    window_seq INTEGER NOT NULL,
-    tx_ids TEXT NOT NULL DEFAULT '',
-    created_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
-    UNIQUE(season_number, window_seq)
-);
-
 CREATE TABLE IF NOT EXISTS plugin_config (
     key TEXT PRIMARY KEY,
-    value TEXT NOT NULL,
-    updated_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
+    value TEXT NOT NULL
 );
-
--- 命名轮次登记：同一赛季内「赛事+轮次文本」唯一对应一个轮次号（同名即为同一轮，按（赛季,赛事）导入顺序定序）
-CREATE TABLE IF NOT EXISTS round_names (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    season_number INTEGER NOT NULL,
-    competition TEXT NOT NULL DEFAULT '联赛',
-    token TEXT NOT NULL,
-    round_no INTEGER NOT NULL,
-    created_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
-    UNIQUE(season_number, competition, token)
-);
-
--- 赛季命名：纯展示标签（身份仍是 league_state.season_number 整数，查询过滤一律用序号）
-CREATE TABLE IF NOT EXISTS season_names (
-    season_number INTEGER PRIMARY KEY,
-    name TEXT NOT NULL,
-    updated_by TEXT NOT NULL DEFAULT '',
-    updated_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
-);
-
--- 冠名权市场：招商期（每窗口一轮，开启时的模式快照）
-CREATE TABLE IF NOT EXISTS market_rounds (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    season_number INTEGER NOT NULL,
-    window_seq INTEGER NOT NULL,
-    bid_mode TEXT NOT NULL DEFAULT '明标',
-    status TEXT NOT NULL DEFAULT 'open',
-    opened_by TEXT NOT NULL DEFAULT '',
-    opened_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
-    settled_at TEXT,
-    UNIQUE(season_number, window_seq)
-);
-
--- 品牌报价（先到先得挂价 team_name 存 ''；package_json 为套餐/档位/性格参数快照）
-CREATE TABLE IF NOT EXISTS market_offers (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    round_id INTEGER NOT NULL REFERENCES market_rounds(id),
-    brand_id INTEGER NOT NULL REFERENCES brand_pool(id),
-    team_name TEXT NOT NULL DEFAULT '',
-    package_no INTEGER NOT NULL DEFAULT 1,
-    amount REAL NOT NULL,
-    windows INTEGER NOT NULL,
-    package_json TEXT NOT NULL DEFAULT '{}',
-    status TEXT NOT NULL DEFAULT 'pending',
-    created_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
-    expire_at TEXT,
-    UNIQUE(round_id, brand_id, team_name)
-);
-
-CREATE INDEX IF NOT EXISTS idx_market_offers_round ON market_offers(round_id, status);
-
--- 每窗每队死忠快照（对赌奖金 redo 重算的增长口径来源）
-CREATE TABLE IF NOT EXISTS window_fans_log (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    season_number INTEGER NOT NULL,
-    window_seq INTEGER NOT NULL,
-    team_name TEXT NOT NULL,
-    fans_before REAL NOT NULL,
-    fans_after REAL NOT NULL,
-    created_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
-    UNIQUE(season_number, window_seq, team_name)
-);
-
 """
+
+# v15 迁移后删除的 16 张旧表（财务/经营/事件/冠名/市场/设施/档期/身份/赛季命名）
+_V15_DROP_TABLES = (
+    "market_offers",
+    "event_choices",
+    "events_log",
+    "window_summaries",
+    "window_fans_log",
+    "revenue_transactions",
+    "club_balance",
+    "naming_rights",
+    "brand_pool",
+    "market_rounds",
+    "event_pool",
+    "stadium_facilities",
+    "venue_bookings",
+    "influence_history",
+    "season_names",
+    "round_names",
+)
+
+# 存量赛季号映射：v15 仅支持 2 -> 9（其余报错待人工确认）
+_V15_SEASON_MAP = {2: 9}
+
+# competition 文本 -> tournament_id；「联赛」为 v2 旧默认文本，落库归一为「顶级联赛」
+# （v3 读路径/club 映射统一用「顶级联赛」，不归一则迁移行在轮次图/走势图/天气全查空）
+_V15_COMPETITION_MAP = {
+    "联赛": 1,
+    "顶级联赛": 1,
+    "次级联赛": 2,
+    "冠军杯": 3,
+}
+_V15_COMPETITION_TEXT_NORMALIZE = {"联赛": "顶级联赛"}
+
+_MATCHES_DDL_V15 = """
+CREATE TABLE matches (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    season_number INTEGER NOT NULL,
+    tournament_id INTEGER NOT NULL,
+    competition TEXT NOT NULL,
+    round_no INTEGER NOT NULL,
+    leg INTEGER NOT NULL DEFAULT 0,
+    stage_name TEXT NOT NULL DEFAULT '',
+    home_team TEXT NOT NULL,
+    away_team TEXT NOT NULL,
+    home_score INTEGER,
+    away_score INTEGER,
+    pen_home INTEGER,
+    pen_away INTEGER,
+    result TEXT,
+    score TEXT,
+    tour_status TEXT NOT NULL DEFAULT 'pending',
+    walkover_side TEXT,
+    weather TEXT,
+    wx_coef REAL,
+    week_no INTEGER,
+    day_no INTEGER,
+    match_time TEXT,
+    tour_match_id INTEGER,
+    synced_at TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+    UNIQUE(season_number, tournament_id, round_no, leg, home_team, away_team)
+)
+"""
+
+_SCORE_RE = re.compile(r"^\s*(\d+)\s*[:：]\s*(\d+)")
+_PEN_RE = re.compile(r"点球\s*(\d+)\s*[:：]\s*(\d+)")
+
+
+def parse_score_text(score: str | None) -> tuple[int | None, int | None, int | None, int | None]:
+    """解析展示串 score -> (home_score, away_score, pen_home, pen_away)。
+
+    支持 '2:1' 与 '2:1（点球 4:2）'（全/半角括号与冒号）；「弃权」或无法解析时
+    返回全 None（比分不猜）。
+    """
+    if score is None:
+        return None, None, None, None
+    text = str(score).strip()
+    if not text or "弃权" in text:
+        return None, None, None, None
+    m = _SCORE_RE.match(text)
+    if not m:
+        return None, None, None, None
+    home, away = int(m.group(1)), int(m.group(2))
+    pen = _PEN_RE.search(text)
+    if pen:
+        return home, away, int(pen.group(1)), int(pen.group(2))
+    return home, away, None, None
 
 
 async def init_schema(db_manager):
     db = db_manager.conn
     async with db_manager.lock:
-        await db.executescript(SQL_CREATE_TABLES)
-        await db.commit()
-
-    cur = await db.execute("SELECT value FROM plugin_config WHERE key='schema_version'")
-    row = await cur.fetchone()
-    await cur.close()
-    if row is None:
-        await db.execute(
-            "INSERT INTO plugin_config (key, value) VALUES ('schema_version', ?)",
-            (str(SCHEMA_VERSION),),
+        cur = await db.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='plugin_config'"
         )
-        await db.execute(
-            "INSERT OR IGNORE INTO league_state (id, season_number, window_seq, current_round) VALUES (1, 1, 1, 0)"
-        )
-        await db.commit()
-        logger.info("Database schema initialized (version %d).", SCHEMA_VERSION)
-    else:
         try:
-            current = int(row["value"])
-        except (ValueError, TypeError):
-            logger.warning(
-                "Invalid schema_version value %r, rewriting to %d.",
-                row["value"],
-                SCHEMA_VERSION,
-            )
+            has_config = await cur.fetchone() is not None
+        finally:
+            await cur.close()
+
+        if not has_config:
+            # 全新安装：直建 5 表 + 版本号 + league_state 种子
+            await db.executescript(SQL_CREATE_TABLES)
+            await db.commit()
             await db.execute(
-                "UPDATE plugin_config SET value=?, updated_at=datetime('now','localtime') WHERE key='schema_version'",
+                "INSERT INTO plugin_config (key, value) VALUES ('schema_version', ?)",
                 (str(SCHEMA_VERSION),),
             )
-            await db.commit()
-            current = SCHEMA_VERSION
-        if current < SCHEMA_VERSION:
-            await _migrate(db, current)
             await db.execute(
-                "UPDATE plugin_config SET value=?, updated_at=datetime('now','localtime') WHERE key='schema_version'",
-                (str(SCHEMA_VERSION),),
+                "INSERT OR IGNORE INTO league_state (id, season_number, season_label) "
+                "VALUES (1, 1, 'S1')"
             )
             await db.commit()
-            logger.info("Database schema migrated %d -> %d.", current, SCHEMA_VERSION)
+            logger.info("Database schema initialized (version %d).", SCHEMA_VERSION)
+            return
+
+        cur = await db.execute("SELECT value FROM plugin_config WHERE key='schema_version'")
+        try:
+            row = await cur.fetchone()
+        finally:
+            await cur.close()
+
+        if row is None or row["value"] is None:
+            raise RuntimeError(
+                "plugin_config 存在但缺少 schema_version，库处于未知状态："
+                "v15 拒绝自动改写，请恢复备份后重试。"
+            )
+        raw = str(row["value"]).strip()
+        try:
+            current = int(raw)
+        except ValueError:
+            raise RuntimeError(
+                f"schema_version 非法值 {row['value']!r}：v15 起不再静默改写，"
+                "请人工修复或恢复备份。"
+            )
+        if current > SCHEMA_VERSION:
+            raise RuntimeError(
+                f"数据库 schema 版本 {current} 高于插件支持的 {SCHEMA_VERSION}："
+                "v15 起不再静默降级，请先升级插件。"
+            )
+        if current < 12:
+            raise RuntimeError(
+                f"数据库 schema 版本 {current} 过旧（v15 自包含迁移仅支持 v12–v14）："
+                "请先升级插件到 2.14 完成旧版迁移，再升级到当前版本。"
+            )
+        if current == SCHEMA_VERSION:
+            # 幂等补齐（IF NOT EXISTS），不重写版本号
+            await db.executescript(SQL_CREATE_TABLES)
+            await db.commit()
+            return
+        # 12 <= current < 15
+        await _migrate_v15(db, current)
+        logger.info("Database schema migrated %d -> %d.", current, SCHEMA_VERSION)
 
 
 async def _table_columns(db, table: str) -> set:
@@ -327,346 +237,185 @@ async def _table_columns(db, table: str) -> set:
         await cur.close()
 
 
-async def _migrate(db, current_version: int):
-    """增量迁移：仅在目标列缺失时执行，保证可重复运行。"""
-    if current_version < 1:
-        await db.execute(
-            "INSERT OR IGNORE INTO league_state (id, season_number, window_seq, current_round) VALUES (1, 1, 1, 0)"
+async def _check_v15_season(db) -> int:
+    """校验存量赛季号并返回映射后的当前赛季（不支持则报错列出待人工确认）。"""
+    cur = await db.execute("SELECT DISTINCT season_number FROM matches")
+    try:
+        rows = await cur.fetchall()
+    finally:
+        await cur.close()
+    seasons = sorted({int(r["season_number"]) for r in rows})
+    unsupported = [s for s in seasons if s not in _V15_SEASON_MAP]
+    if unsupported:
+        raise RuntimeError(
+            f"schema v15 迁移仅支持 season_number 映射 2→9，"
+            f"发现待人工确认的赛季号: {unsupported}；迁移已中止，库未改动。"
         )
-        await db.commit()
-    if current_version < 2:
-        cols = await _table_columns(db, "matches")
-        if "competition" not in cols:
-            # 重建 matches 表：新增 competition 列并纳入唯一键（同轮次多赛事可共存）
-            # 显式事务包裹（SQLite DDL 可回滚）：失败时旧表完好，下次启动可重试，避免残留空表丢数据
-            await db.execute("BEGIN IMMEDIATE")
+    mapped = {_V15_SEASON_MAP[s] for s in seasons}
+    if not mapped:
+        # 空 matches：沿用 league_state 的赛季号（同样必须可映射）
+        cur = await db.execute("SELECT season_number FROM league_state WHERE id=1")
+        try:
+            srow = await cur.fetchone()
+        finally:
+            await cur.close()
+        if srow is not None:
+            state_season = int(srow["season_number"])
+            if state_season not in _V15_SEASON_MAP:
+                raise RuntimeError(
+                    f"schema v15 迁移仅支持 season_number 映射 2→9，"
+                    f"league_state.season_number={state_season} 待人工确认；迁移已中止，库未改动。"
+                )
+            return _V15_SEASON_MAP[state_season]
+        return 9
+    if len(mapped) > 1:
+        raise RuntimeError(f"matches 存在多个赛季号 {sorted(mapped)}，待人工确认；迁移已中止。")
+    return mapped.pop()
+
+
+async def _migrate_v15(db, current_version: int) -> None:
+    """v12–v14 -> v15 一次性重建。全程单事务，失败回滚（版本不推进，可重试）。"""
+    await db.execute("PRAGMA foreign_keys=OFF")
+    try:
+        await db.execute("BEGIN IMMEDIATE")
+        try:
+            season = await _check_v15_season(db)
+
+            # 1) 重建 matches：window_seq/attendance 等旧列丢弃，补 tournament_id/leg/stage_name/比分列
+            await db.execute("ALTER TABLE matches RENAME TO matches_old_v15")
+            await db.execute(_MATCHES_DDL_V15)
+            old_cols = await _table_columns(db, "matches_old_v15")
+
+            def old_col(name: str, default: str = "NULL") -> str:
+                return name if name in old_cols else default
+
+            cur = await db.execute(
+                "SELECT id, season_number, competition, round_no, home_team, away_team, "
+                "weather, "
+                f"{old_col('wx_coef')} AS wx_coef, result, score, week_no, day_no, match_time, "
+                f"{old_col('tour_match_id')} AS tour_match_id, created_at FROM matches_old_v15 ORDER BY id"
+            )
             try:
+                old_rows = await cur.fetchall()
+            finally:
+                await cur.close()
+
+            unknown_competitions: dict[str, int] = {}
+            for r in old_rows:
+                comp = str(r["competition"] or "").strip()
+                tid = _V15_COMPETITION_MAP.get(comp)
+                if tid is None:
+                    unknown_competitions[comp] = unknown_competitions.get(comp, 0) + 1
+                    continue
+                home_score, away_score, pen_home, pen_away = parse_score_text(r["score"])
+                tour_status = "pending" if r["result"] is None else "finished"
                 await db.execute(
-                    "ALTER TABLE matches RENAME TO matches_old"
+                    "INSERT INTO matches (id, season_number, tournament_id, competition, round_no, "
+                    "leg, stage_name, home_team, away_team, home_score, away_score, pen_home, "
+                    "pen_away, result, score, tour_status, walkover_side, weather, wx_coef, "
+                    "week_no, day_no, match_time, tour_match_id, created_at) "
+                    "VALUES (?, ?, ?, ?, ?, 0, '', ?, ?, ?, ?, ?, ?, ?, ?, ?, "
+                    "NULL, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        int(r["id"]),
+                        _V15_SEASON_MAP[int(r["season_number"])],
+                        tid,
+                        _V15_COMPETITION_TEXT_NORMALIZE.get(comp, comp),
+                        int(r["round_no"]),
+                        str(r["home_team"]),
+                        str(r["away_team"]),
+                        home_score,
+                        away_score,
+                        pen_home,
+                        pen_away,
+                        r["result"],
+                        r["score"],
+                        tour_status,
+                        r["weather"],
+                        r["wx_coef"],
+                        r["week_no"],
+                        r["day_no"],
+                        r["match_time"],
+                        r["tour_match_id"],
+                        r["created_at"],
+                    ),
                 )
-                await db.execute(
-                    """
-                    CREATE TABLE matches (
-                        id INTEGER PRIMARY KEY AUTOINCREMENT,
-                        season_number INTEGER NOT NULL,
-                        window_seq INTEGER NOT NULL,
-                        round_no INTEGER NOT NULL,
-                        competition TEXT NOT NULL DEFAULT '联赛',
-                        home_team TEXT NOT NULL,
-                        away_team TEXT NOT NULL,
-                        weather TEXT,
-                        result TEXT,
-                        score TEXT,
-                        week_no INTEGER,
-                        day_no INTEGER,
-                        match_time TEXT,
-                        attendance INTEGER,
-                        ticket_revenue REAL,
-                        commercial REAL,
-                        broadcast REAL,
-                        created_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
-                        UNIQUE(season_number, window_seq, round_no, competition, home_team)
-                    )
-                    """
+            if unknown_competitions:
+                raise RuntimeError(
+                    f"schema v15 迁移发现待人工确认的 competition 文本: {unknown_competitions}；"
+                    "迁移已回滚，库未改动。"
                 )
-                await db.execute(
-                    """
-                    INSERT INTO matches
-                        (id, season_number, window_seq, round_no, competition, home_team,
-                         away_team, weather, result, attendance, ticket_revenue,
-                         commercial, broadcast, created_at)
-                    SELECT id, season_number, window_seq, round_no, '联赛', home_team,
-                           away_team, weather, result, attendance, ticket_revenue,
-                           commercial, broadcast, created_at
-                    FROM matches_old
-                    """
-                )
-                await db.execute("DROP TABLE matches_old")
-                await db.execute(
-                    "CREATE INDEX IF NOT EXISTS idx_matches_round ON matches(season_number, window_seq, round_no)"
-                )
-                await db.execute("CREATE INDEX IF NOT EXISTS idx_matches_home ON matches(home_team)")
-                await db.commit()
-            except BaseException:
-                await db.rollback()
-                raise
-            logger.info("Migrated matches table: added competition column.")
-    if current_version < 3:
-        cols = await _table_columns(db, "matches")
-        for col, ddl in (
-            ("score", "ALTER TABLE matches ADD COLUMN score TEXT"),
-            ("week_no", "ALTER TABLE matches ADD COLUMN week_no INTEGER"),
-            ("day_no", "ALTER TABLE matches ADD COLUMN day_no INTEGER"),
-            ("match_time", "ALTER TABLE matches ADD COLUMN match_time TEXT"),
-        ):
-            if col not in cols:
-                await db.execute(ddl)
-        await db.commit()
-        logger.info("Migrated matches table: added score/week/day/time columns.")
-    if current_version < 4:
-        cols = await _table_columns(db, "window_summaries")
-        if "tx_ids" not in cols:
-            # 记录结算创建的流水 ID，供强制重算时精确撤销
-            await db.execute(
-                "ALTER TABLE window_summaries ADD COLUMN tx_ids TEXT NOT NULL DEFAULT ''"
+
+            # 2) tour_match_id 去重：重复保留最小 id，其余置 NULL 并告警
+            cur = await db.execute(
+                "SELECT tour_match_id, COUNT(*) AS n FROM matches "
+                "WHERE tour_match_id IS NOT NULL GROUP BY tour_match_id HAVING n > 1"
             )
-        await db.commit()
-        logger.info("Migrated window_summaries table: added tx_ids column.")
-    if current_version < 5:
-        cols = await _table_columns(db, "event_pool")
-        for col, ddl in (
-            ("event_type", "ALTER TABLE event_pool ADD COLUMN event_type TEXT NOT NULL DEFAULT 'instant'"),
-            ("options_json", "ALTER TABLE event_pool ADD COLUMN options_json TEXT NOT NULL DEFAULT '{}'"),
-        ):
-            if col not in cols:
-                await db.execute(ddl)
-        # 选择型事件的玩家决策表（choice_no=NULL 表示尚未定夺，结算按最差兜底）
-        await db.executescript(
-            """
-            CREATE TABLE IF NOT EXISTS event_choices (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                team_name TEXT NOT NULL,
-                season_number INTEGER NOT NULL,
-                window_seq INTEGER NOT NULL,
-                event_id TEXT NOT NULL,
-                choice_no INTEGER,
-                resolved INTEGER NOT NULL DEFAULT 0,
-                outcome TEXT NOT NULL DEFAULT '',
-                created_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
-                UNIQUE(team_name, season_number, window_seq, event_id)
-            );
-            CREATE INDEX IF NOT EXISTS idx_event_choices ON event_choices(season_number, window_seq);
-            """
-        )
-        await db.commit()
-        logger.info("Migrated event tables: event_type/options_json + event_choices table.")
-    if current_version < 6:
-        # 命名轮次登记表：纯文字轮次（如「顶级」「小组赛」）在同一赛季同名恒同号
-        await db.executescript(
-            """
-            CREATE TABLE IF NOT EXISTS round_names (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                season_number INTEGER NOT NULL,
-                token TEXT NOT NULL,
-                round_no INTEGER NOT NULL,
-                created_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
-                UNIQUE(season_number, token)
-            );
-            """
-        )
-        await db.commit()
-        logger.info("Migrated round_names table for named rounds.")
-    if current_version < 7:
-        # 去重粒度收窄为「完整对阵」：唯一键加入 away_team，同主队窗口内可多场（重复对阵/双回合）
-        # 显式事务包裹（DDL 可回滚）：失败时旧表完好、下次启动可重试，避免残留空表丢数据
-        await db.execute("BEGIN IMMEDIATE")
-        try:
-            await db.execute("ALTER TABLE matches RENAME TO matches_old")
+            try:
+                dup_rows = await cur.fetchall()
+            finally:
+                await cur.close()
             await db.execute(
-                """
-                CREATE TABLE matches (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    season_number INTEGER NOT NULL,
-                    window_seq INTEGER NOT NULL,
-                    round_no INTEGER NOT NULL,
-                    competition TEXT NOT NULL DEFAULT '联赛',
-                    home_team TEXT NOT NULL,
-                    away_team TEXT NOT NULL,
-                    weather TEXT,
-                    result TEXT,
-                    score TEXT,
-                    week_no INTEGER,
-                    day_no INTEGER,
-                    match_time TEXT,
-                    attendance INTEGER,
-                    ticket_revenue REAL,
-                    commercial REAL,
-                    broadcast REAL,
-                    created_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
-                    UNIQUE(season_number, window_seq, round_no, competition, home_team, away_team)
+                "UPDATE matches SET tour_match_id=NULL WHERE tour_match_id IS NOT NULL AND id NOT IN ("
+                "SELECT MIN(id) FROM matches WHERE tour_match_id IS NOT NULL GROUP BY tour_match_id)"
+            )
+            for dup in dup_rows:
+                logger.warning(
+                    "schema v15 迁移：tour_match_id=%s 重复 %d 行，仅保留最小 id，其余置 NULL。",
+                    dup["tour_match_id"], int(dup["n"]),
                 )
-                """
+
+            # 3) 旧 matches 索引随 matches_old_v15 一并删除，再建新索引
+            await db.execute("DROP TABLE matches_old_v15")
+            await db.execute(
+                "CREATE UNIQUE INDEX uq_matches_tour ON matches(tour_match_id) "
+                "WHERE tour_match_id IS NOT NULL"
             )
             await db.execute(
-                """
-                INSERT INTO matches
-                    (id, season_number, window_seq, round_no, competition, home_team,
-                     away_team, weather, result, score, week_no, day_no, match_time,
-                     attendance, ticket_revenue, commercial, broadcast, created_at)
-                SELECT id, season_number, window_seq, round_no, competition, home_team,
-                       away_team, weather, result, score, week_no, day_no, match_time,
-                       attendance, ticket_revenue, commercial, broadcast, created_at
-                FROM matches_old
-                """
+                "CREATE INDEX idx_matches_round ON matches(season_number, tournament_id, round_no, leg)"
             )
-            await db.execute("DROP TABLE matches_old")
+            await db.execute("CREATE INDEX idx_matches_home ON matches(home_team)")
+
+            # 4) 重建 stadium：只保留 team_name/name/capacity
+            await db.execute("ALTER TABLE stadium RENAME TO stadium_old_v15")
             await db.execute(
-                "CREATE INDEX IF NOT EXISTS idx_matches_round ON matches(season_number, window_seq, round_no)"
+                "CREATE TABLE stadium ("
+                "team_name TEXT PRIMARY KEY, "
+                "name TEXT NOT NULL, "
+                "capacity INTEGER NOT NULL DEFAULT 0)"
             )
-            await db.execute("CREATE INDEX IF NOT EXISTS idx_matches_home ON matches(home_team)")
-            await db.commit()
-        except BaseException:
-            await db.rollback()
-            raise
-        logger.info("Migrated matches table: unique on full fixture (home+away).")
-    if current_version < 8:
-        # 轮次改为按（赛季, 赛事）导入顺序定序：round_names 增加 competition 列并纳入唯一键。
-        # 旧映射（全局编号）作废重建；已导入 matches 的轮次号不重算。事务包裹，失败回滚可重试。
-        await db.execute("BEGIN IMMEDIATE")
-        try:
-            await db.execute("DROP TABLE IF EXISTS round_names")
             await db.execute(
-                """
-                CREATE TABLE round_names (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    season_number INTEGER NOT NULL,
-                    competition TEXT NOT NULL DEFAULT '联赛',
-                    token TEXT NOT NULL,
-                    round_no INTEGER NOT NULL,
-                    created_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
-                    UNIQUE(season_number, competition, token)
-                )
-                """
+                "INSERT INTO stadium (team_name, name, capacity) "
+                "SELECT team_name, name, capacity FROM stadium_old_v15"
+            )
+            await db.execute("DROP TABLE stadium_old_v15")
+
+            # 5) 重建 league_state：赛季映射 + S 标签
+            await db.execute("DROP TABLE league_state")
+            await db.execute(
+                "CREATE TABLE league_state ("
+                "id INTEGER PRIMARY KEY CHECK (id = 1), "
+                "season_number INTEGER NOT NULL, "
+                "season_label TEXT NOT NULL, "
+                "updated_at TEXT NOT NULL DEFAULT (datetime('now','localtime')))"
+            )
+            await db.execute(
+                "INSERT INTO league_state (id, season_number, season_label) VALUES (1, ?, ?)",
+                (season, f"S{season}"),
+            )
+
+            # 6) 删除 16 张旧表
+            for name in _V15_DROP_TABLES:
+                await db.execute(f"DROP TABLE IF EXISTS {name}")
+
+            # 7) 写 schema_version=15（与数据变更同一事务）
+            await db.execute(
+                "UPDATE plugin_config SET value=? WHERE key='schema_version'",
+                (str(SCHEMA_VERSION),),
             )
             await db.commit()
         except BaseException:
             await db.rollback()
             raise
-        logger.info("Migrated round_names: per (season, competition) import-order numbering.")
-    if current_version < 9:
-        # 赛季命名表：每赛季一条展示名（有名只显名，无名回退 第N赛季）；CREATE IF NOT EXISTS 幂等
-        await db.executescript(
-            """
-            CREATE TABLE IF NOT EXISTS season_names (
-                season_number INTEGER PRIMARY KEY,
-                name TEXT NOT NULL,
-                updated_by TEXT NOT NULL DEFAULT '',
-                updated_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
-            );
-            """
-        )
-        await db.commit()
-        logger.info("Migrated season_names table for nameable seasons.")
-    if current_version < 10:
-        # 冠名权市场：brand_pool 档位/行业/卖点/套餐/锁档，naming_rights 套餐快照/满意度，
-        # 新表 market_rounds/market_offers。存量品牌 tier 一律置「口碑」（迁移拿不到配置里的
-        # 配额比例，不猜）；首次招商期按热度排名自动校准。
-        cols = await _table_columns(db, "brand_pool")
-        for col, ddl in (
-            ("tier", "ALTER TABLE brand_pool ADD COLUMN tier TEXT NOT NULL DEFAULT '口碑'"),
-            ("industry", "ALTER TABLE brand_pool ADD COLUMN industry TEXT NOT NULL DEFAULT '通用'"),
-            ("pitch", "ALTER TABLE brand_pool ADD COLUMN pitch TEXT NOT NULL DEFAULT ''"),
-            ("packages_json", "ALTER TABLE brand_pool ADD COLUMN packages_json TEXT NOT NULL DEFAULT ''"),
-            ("tier_locked", "ALTER TABLE brand_pool ADD COLUMN tier_locked INTEGER NOT NULL DEFAULT 0"),
-        ):
-            if col not in cols:
-                await db.execute(ddl)
-        # 内置品牌行业映射（仅补默认值，不覆盖已有行业）
-        await db.execute(
-            """
-            UPDATE brand_pool SET industry = CASE brand
-                WHEN '麒麟生物' THEN '医疗'
-                WHEN '阿迪达斯' THEN '运动'
-                WHEN '亚马逊' THEN '科技'
-                WHEN '可口可乐' THEN '饮食'
-                WHEN '海底捞' THEN '饮食'
-                WHEN '星海通讯' THEN '科技'
-                WHEN 'CVS Health' THEN '医疗'
-                ELSE industry
-            END
-            WHERE source='builtin' AND industry='通用'
-            """
-        )
-        cols = await _table_columns(db, "naming_rights")
-        for col, ddl in (
-            ("package_json", "ALTER TABLE naming_rights ADD COLUMN package_json TEXT NOT NULL DEFAULT '{}'"),
-            ("satisfaction", "ALTER TABLE naming_rights ADD COLUMN satisfaction REAL NOT NULL DEFAULT 1.0"),
-        ):
-            if col not in cols:
-                await db.execute(ddl)
-        await db.executescript(
-            """
-            CREATE TABLE IF NOT EXISTS market_rounds (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                season_number INTEGER NOT NULL,
-                window_seq INTEGER NOT NULL,
-                bid_mode TEXT NOT NULL DEFAULT '明标',
-                status TEXT NOT NULL DEFAULT 'open',
-                opened_by TEXT NOT NULL DEFAULT '',
-                opened_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
-                settled_at TEXT,
-                UNIQUE(season_number, window_seq)
-            );
-
-            CREATE TABLE IF NOT EXISTS market_offers (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                round_id INTEGER NOT NULL REFERENCES market_rounds(id),
-                brand_id INTEGER NOT NULL REFERENCES brand_pool(id),
-                team_name TEXT NOT NULL DEFAULT '',
-                package_no INTEGER NOT NULL DEFAULT 1,
-                amount REAL NOT NULL,
-                windows INTEGER NOT NULL,
-                package_json TEXT NOT NULL DEFAULT '{}',
-                status TEXT NOT NULL DEFAULT 'pending',
-                created_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
-                expire_at TEXT,
-                UNIQUE(round_id, brand_id, team_name)
-            );
-
-            CREATE INDEX IF NOT EXISTS idx_market_offers_round ON market_offers(round_id, status);
-            """
-        )
-        await db.commit()
-        logger.info("Migrated naming market: brand_pool tiers + market_rounds/market_offers.")
-
-    if current_version < 11:
-        # 每窗每队死忠快照：对赌奖金 redo 重算的增长口径来源（v11 前旧窗无快照，
-        # redo 回退现状行为）
-        await db.executescript(
-            """
-            CREATE TABLE IF NOT EXISTS window_fans_log (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                season_number INTEGER NOT NULL,
-                window_seq INTEGER NOT NULL,
-                team_name TEXT NOT NULL,
-                fans_before REAL NOT NULL,
-                fans_after REAL NOT NULL,
-                created_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
-                UNIQUE(season_number, window_seq, team_name)
-            );
-            """
-        )
-        await db.commit()
-        logger.info("Migrated window_fans_log: per-team diehard snapshot per window.")
-
-    if current_version < 12:
-        # 事件池软条件开关：置 1 时条件不满足按权重衰减而非硬剔除（动态权重）
-        cols = await _table_columns(db, "event_pool")
-        if "soft_conditions" not in cols:
-            await db.execute(
-                "ALTER TABLE event_pool ADD COLUMN soft_conditions INTEGER NOT NULL DEFAULT 0"
-            )
-        await db.commit()
-        logger.info("Migrated event_pool: added soft_conditions column.")
-
-    if current_version < 13:
-        # 天气系数固化：预报/覆盖时抽定的 wx_coef 落库，结算与平台推送按同系数走。
-        # NULL = v13 前的旧场次（系数未存过），结算回落现抽，推送时补抽落库。
-        cols = await _table_columns(db, "matches")
-        if "wx_coef" not in cols:
-            await db.execute("ALTER TABLE matches ADD COLUMN wx_coef REAL")
-        await db.commit()
-        logger.info("Migrated matches: added wx_coef column.")
-
-    if current_version < 14:
-        # 开球时刻改由 tour 公开接口提供（P3-C）：本地降级为快照。
-        # tour_match_id 是绑定锚点；kickoff_source 记来源（tour / 旧本地数据为空）。
-        cols = await _table_columns(db, "matches")
-        for col, ddl in (
-            ("tour_match_id", "ALTER TABLE matches ADD COLUMN tour_match_id INTEGER"),
-            ("kickoff_source", "ALTER TABLE matches ADD COLUMN kickoff_source TEXT"),
-        ):
-            if col not in cols:
-                await db.execute(ddl)
-        await db.commit()
-        logger.info("Migrated matches: added tour_match_id / kickoff_source columns.")
+    finally:
+        await db.execute("PRAGMA foreign_keys=ON")

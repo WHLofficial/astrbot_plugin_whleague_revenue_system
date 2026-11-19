@@ -1,6 +1,8 @@
-"""数据库结构：v4/v5/v6/v9 旧库迁移到最新（事件列 + 选择表 + 命名轮次表 + 赛季命名表 + 冠名权市场）与幂等。"""
+"""数据库结构 v15：fresh 5 表、v12–v14 合成库自包含迁移、幂等、非法版本报错、dao 核心读写。
 
-import json
+s0 只依赖 DatabaseManager + init_schema + StadiumDAO（不装配将亡服务）。
+"""
+
 import os
 import sys
 import tempfile
@@ -8,504 +10,730 @@ from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from tests.common import TestEnv  # noqa: E402
+import tests.common  # noqa: E402,F401  (import 副作用即 install_stubs)
+from tests.common import run_module  # noqa: E402
+
 from astrbot_plugin_whleague_revenue_system.db.connection import DatabaseManager  # noqa: E402
-from astrbot_plugin_whleague_revenue_system.db.schema import SCHEMA_VERSION, _table_columns, init_schema  # noqa: E402
+from astrbot_plugin_whleague_revenue_system.db.dao import StadiumDAO  # noqa: E402
+from astrbot_plugin_whleague_revenue_system.db.schema import (  # noqa: E402
+    SCHEMA_VERSION,
+    _table_columns,
+    init_schema,
+    parse_score_text,
+)
+
+CORE_TABLES = {"matches", "stadium", "league_state", "admins", "plugin_config"}
+DROPPED_TABLES = {
+    "market_offers", "event_choices", "events_log", "window_summaries",
+    "window_fans_log", "revenue_transactions", "club_balance", "naming_rights",
+    "brand_pool", "market_rounds", "event_pool", "stadium_facilities",
+    "venue_bookings", "influence_history", "season_names", "round_names",
+}
+MATCHES_COLUMNS = {
+    "id", "season_number", "tournament_id", "competition", "round_no", "leg",
+    "stage_name", "home_team", "away_team", "home_score", "away_score",
+    "pen_home", "pen_away", "result", "score", "tour_status", "walkover_side",
+    "weather", "wx_coef", "week_no", "day_no", "match_time", "tour_match_id",
+    "synced_at", "created_at",
+}
+DROPPED_MATCH_COLUMNS = {
+    "window_seq", "attendance", "ticket_revenue", "commercial", "broadcast",
+    "kickoff_source",
+}
+
+_LEGACY_TABLES_DDL = """
+CREATE TABLE league_state (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    season_number INTEGER NOT NULL DEFAULT 1,
+    window_seq INTEGER NOT NULL DEFAULT 1,
+    current_round INTEGER NOT NULL DEFAULT 0,
+    updated_by TEXT NOT NULL DEFAULT '',
+    updated_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
+);
+CREATE TABLE stadium (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    team_name TEXT NOT NULL UNIQUE,
+    name TEXT NOT NULL DEFAULT '',
+    capacity INTEGER NOT NULL DEFAULT 12000,
+    tier INTEGER NOT NULL DEFAULT 0,
+    influence REAL NOT NULL DEFAULT 90,
+    fans_diehards REAL NOT NULL DEFAULT 1800,
+    next_attendance_mod REAL NOT NULL DEFAULT 1.0,
+    created_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
+);
+CREATE TABLE admins (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    qq TEXT NOT NULL UNIQUE,
+    added_by TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
+);
+CREATE TABLE plugin_config (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL,
+    updated_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
+);
+CREATE TABLE market_offers (id INTEGER PRIMARY KEY);
+CREATE TABLE event_choices (id INTEGER PRIMARY KEY);
+CREATE TABLE events_log (id INTEGER PRIMARY KEY);
+CREATE TABLE window_summaries (id INTEGER PRIMARY KEY);
+CREATE TABLE window_fans_log (id INTEGER PRIMARY KEY);
+CREATE TABLE revenue_transactions (id INTEGER PRIMARY KEY);
+CREATE TABLE club_balance (id INTEGER PRIMARY KEY);
+CREATE TABLE naming_rights (id INTEGER PRIMARY KEY);
+CREATE TABLE brand_pool (id INTEGER PRIMARY KEY);
+CREATE TABLE market_rounds (id INTEGER PRIMARY KEY);
+CREATE TABLE event_pool (id INTEGER PRIMARY KEY);
+CREATE TABLE stadium_facilities (id INTEGER PRIMARY KEY);
+CREATE TABLE venue_bookings (id INTEGER PRIMARY KEY);
+CREATE TABLE influence_history (id INTEGER PRIMARY KEY);
+CREATE TABLE season_names (id INTEGER PRIMARY KEY);
+CREATE TABLE round_names (id INTEGER PRIMARY KEY);
+"""
 
 
-async def _make_v4_db(path: str) -> None:
-    """构造一个真实的 v4 结构数据库（event_pool 无新列、无 event_choices）。"""
+def _matches_ddl(extra_cols: str) -> str:
+    """v12–v14 旧 matches 结构：window_seq 键 + 财务列；extra_cols 为 v13/v14 增列。"""
+    return f"""
+    CREATE TABLE matches (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        season_number INTEGER NOT NULL,
+        window_seq INTEGER NOT NULL,
+        round_no INTEGER NOT NULL,
+        competition TEXT NOT NULL DEFAULT '联赛',
+        home_team TEXT NOT NULL,
+        away_team TEXT NOT NULL,
+        weather TEXT,
+        {extra_cols}
+        result TEXT,
+        score TEXT,
+        week_no INTEGER,
+        day_no INTEGER,
+        match_time TEXT,
+        attendance INTEGER,
+        ticket_revenue REAL,
+        commercial REAL,
+        broadcast REAL,
+        created_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+        UNIQUE(season_number, window_seq, round_no, competition, home_team, away_team)
+    )
+    """
+
+
+_LEGACY_SEED = """
+INSERT INTO plugin_config (key, value) VALUES ('schema_version', '{version}');
+INSERT INTO league_state (id, season_number, window_seq, current_round, updated_by)
+VALUES (1, 2, 1, 0, 'legacy');
+INSERT INTO stadium (team_name, name, capacity, tier, influence, fans_diehards)
+VALUES ('利物浦', '安菲尔德', 54000, 1, 95.0, 2000.0),
+       ('巴塞罗那', '诺坎普', 99000, 1, 93.0, 2200.0);
+INSERT INTO admins (qq, added_by) VALUES ('10001', 'owner');
+INSERT INTO club_balance (id) VALUES (1);
+INSERT INTO round_names (id) VALUES (1);
+"""
+
+# 5 行赛程样本：(season, window, round, comp, home, away, weather, wx, result,
+#               score, week, day, time, att, ticket, commercial, broadcast, created)
+_LEGACY_MATCH_ROWS = [
+    (2, 1, 1, "联赛", "利物浦", "巴塞罗那", "晴", 1.05, "W", "2:1",
+     1, 2, "2026-09-05 19:30", 12000, 100.0, 5.0, 3.0, "2026-08-01 10:00:00"),
+    (2, 1, 2, "联赛", "利物浦", "勒沃库森", "雨", 0.92, "D", "0:0",
+     2, 3, "2026-09-12 20:00", 9000, 80.0, 4.0, 2.0, "2026-08-01 10:00:00"),
+    (2, 2, 3, "次级联赛", "纽卡斯尔联", "阿贾克斯", None, None, "W",
+     "2:1（点球 4:2）", 3, 1, None, None, None, None, None, "2026-08-01 10:00:00"),
+    (2, 2, 1, "冠军杯", "利物浦", "皇马", "多云", 0.98, "C", "弃权",
+     1, 5, "2026-09-15 21:00", 0, 0.0, 0.0, 0.0, "2026-08-01 10:00:00"),
+    (2, 3, 4, "联赛", "巴塞罗那", "尤文图斯", None, None, None, None,
+     None, None, None, None, None, None, None, "2026-08-01 10:00:00"),
+]
+
+
+async def _make_legacy_db(path: str, version: int) -> None:
+    """构造 v12/v13/v14 结构合成库（含赛程样本与 16 张待删表）。"""
     import aiosqlite
 
+    if version >= 14:
+        extra = (
+            "wx_coef REAL,\n        tour_match_id INTEGER,\n        "
+            "kickoff_source TEXT,\n        "
+        )
+    elif version >= 13:
+        extra = "wx_coef REAL,\n        "
+    else:
+        extra = ""
     conn = await aiosqlite.connect(path)
     try:
-        await conn.executescript(
-            """
-            CREATE TABLE event_pool (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                event_id TEXT NOT NULL UNIQUE,
-                name TEXT NOT NULL,
-                category TEXT NOT NULL DEFAULT '通用',
-                weight INTEGER NOT NULL DEFAULT 10,
-                conditions_json TEXT NOT NULL DEFAULT '{}',
-                effects_json TEXT NOT NULL DEFAULT '{}',
-                template TEXT NOT NULL DEFAULT '',
-                source TEXT NOT NULL DEFAULT 'builtin',
-                status TEXT NOT NULL DEFAULT 'adopted',
-                created_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
-            );
-            CREATE TABLE plugin_config (
-                key TEXT PRIMARY KEY,
-                value TEXT NOT NULL,
-                updated_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
-            );
-            INSERT INTO plugin_config (key, value) VALUES ('schema_version', '4');
-            INSERT INTO event_pool (event_id, name, category, weight, conditions_json, effects_json, template, source, status)
-            VALUES ('v4_legacy', '旧版即发事件', '通用', 5, '{}', '{"money":1}', 't', 'builtin', 'adopted');
-            """
-        )
-        await conn.commit()
-    finally:
-        await conn.close()
-
-
-async def _make_v5_db(path: str) -> None:
-    """构造一个真实的 v5 结构数据库（事件列/选择表齐全、无命名轮次表）。"""
-    import aiosqlite
-
-    conn = await aiosqlite.connect(path)
-    try:
-        await conn.executescript(
-            """
-            CREATE TABLE event_pool (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                event_id TEXT NOT NULL UNIQUE,
-                name TEXT NOT NULL,
-                category TEXT NOT NULL DEFAULT '通用',
-                weight INTEGER NOT NULL DEFAULT 10,
-                conditions_json TEXT NOT NULL DEFAULT '{}',
-                effects_json TEXT NOT NULL DEFAULT '{}',
-                options_json TEXT NOT NULL DEFAULT '{}',
-                event_type TEXT NOT NULL DEFAULT 'instant',
-                template TEXT NOT NULL DEFAULT '',
-                source TEXT NOT NULL DEFAULT 'builtin',
-                status TEXT NOT NULL DEFAULT 'adopted',
-                created_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
-            );
-            CREATE TABLE event_choices (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                team_name TEXT NOT NULL,
-                season_number INTEGER NOT NULL,
-                window_seq INTEGER NOT NULL,
-                event_id TEXT NOT NULL,
-                choice_no INTEGER,
-                resolved INTEGER NOT NULL DEFAULT 0,
-                outcome TEXT NOT NULL DEFAULT '',
-                created_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
-                UNIQUE(team_name, season_number, window_seq, event_id)
-            );
-            CREATE TABLE plugin_config (
-                key TEXT PRIMARY KEY,
-                value TEXT NOT NULL,
-                updated_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
-            );
-            INSERT INTO plugin_config (key, value) VALUES ('schema_version', '5');
-            """
-        )
-        await conn.commit()
-    finally:
-        await conn.close()
-
-
-async def test_v4_to_latest_migration():
-    tmp = tempfile.TemporaryDirectory()
-    try:
-        path = str(Path(tmp.name) / "old.db")
-        await _make_v4_db(path)
-        db = DatabaseManager(path)
-        await db.init()
-        try:
-            await init_schema(db)
-            row = await db.fetchone(
-                "SELECT value FROM plugin_config WHERE key='schema_version'"
-            )
-            assert row["value"] == str(SCHEMA_VERSION)
-            # 事件池新增列
-            cols = await _table_columns(db.conn, "event_pool")
-            assert {"event_type", "options_json"} <= cols, cols
-            # 旧行保留且缺省为即发型
-            ev = await db.fetchone("SELECT * FROM event_pool WHERE event_id='v4_legacy'")
-            assert ev["event_type"] == "instant"
-            assert ev["options_json"] == "{}"
-            # 选择表存在且结构完整
-            cc = await _table_columns(db.conn, "event_choices")
-            assert {"team_name", "season_number", "window_seq",
-                    "event_id", "choice_no", "resolved", "outcome"} <= cc, cc
-            # 命名轮次登记表存在
-            rn = await _table_columns(db.conn, "round_names")
-            assert {"season_number", "token", "round_no"} <= rn, rn
-            # 赛季命名表存在（v9）
-            sn = await _table_columns(db.conn, "season_names")
-            assert {"season_number", "name", "updated_by"} <= sn, sn
-            # 重复初始化幂等（不重复加列/重建）
-            await init_schema(db)
-            row2 = await db.fetchone(
-                "SELECT value FROM plugin_config WHERE key='schema_version'"
-            )
-            assert row2["value"] == str(SCHEMA_VERSION)
-        finally:
-            await db.close()
-    finally:
-        tmp.cleanup()
-
-
-async def test_v5_to_latest_migration():
-    """v5 库迁移到当前版本：版本号更新、round_names 表可用。"""
-    tmp = tempfile.TemporaryDirectory()
-    try:
-        path = str(Path(tmp.name) / "v5.db")
-        await _make_v5_db(path)
-        db = DatabaseManager(path)
-        await db.init()
-        try:
-            await init_schema(db)
-            row = await db.fetchone(
-                "SELECT value FROM plugin_config WHERE key='schema_version'"
-            )
-            assert row["value"] == str(SCHEMA_VERSION)
-            cols = await _table_columns(db.conn, "round_names")
-            assert {"season_number", "competition", "token", "round_no"} <= cols, cols
-            sn = await _table_columns(db.conn, "season_names")
-            assert {"season_number", "name"} <= sn, sn
-            # 登记 API 可用：同名同号、递增分配
-            n1 = await db.fetchone(
-                "INSERT INTO round_names (season_number, competition, token, round_no) "
-                "VALUES (1, '顶级联赛', '顶级', 1) "
-                "ON CONFLICT(season_number, competition, token) DO NOTHING RETURNING round_no"
-            )
-            assert n1 is not None and n1["round_no"] == 1
-        finally:
-            await db.close()
-    finally:
-        tmp.cleanup()
-
-
-async def _make_v6_db(path: str) -> None:
-    """构造 v6 结构数据库：matches 唯一键为同轮次同赛事同主队（无 away_team）。"""
-    import aiosqlite
-
-    conn = await aiosqlite.connect(path)
-    try:
-        await conn.executescript(
-            """
-            CREATE TABLE matches (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                season_number INTEGER NOT NULL,
-                window_seq INTEGER NOT NULL,
-                round_no INTEGER NOT NULL,
-                competition TEXT NOT NULL DEFAULT '联赛',
-                home_team TEXT NOT NULL,
-                away_team TEXT NOT NULL,
-                weather TEXT,
-                result TEXT,
-                score TEXT,
-                week_no INTEGER,
-                day_no INTEGER,
-                match_time TEXT,
-                attendance INTEGER,
-                ticket_revenue REAL,
-                commercial REAL,
-                broadcast REAL,
-                created_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
-                UNIQUE(season_number, window_seq, round_no, competition, home_team)
-            );
-            CREATE TABLE round_names (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                season_number INTEGER NOT NULL,
-                token TEXT NOT NULL,
-                round_no INTEGER NOT NULL,
-                created_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
-                UNIQUE(season_number, token)
-            );
-            CREATE TABLE plugin_config (
-                key TEXT PRIMARY KEY,
-                value TEXT NOT NULL,
-                updated_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
-            );
-            INSERT INTO plugin_config (key, value) VALUES ('schema_version', '6');
-            INSERT INTO matches (season_number, window_seq, round_no, competition, home_team, away_team)
-            VALUES (1, 1, 1, '顶级联赛', '利物浦', '巴塞罗那');
-            """
-        )
-        await conn.commit()
-    finally:
-        await conn.close()
-
-
-async def test_v6_to_latest_migration():
-    """v6 库迁移到 v7：matches 唯一键收窄为完整对阵（home+away）。"""
-    tmp = tempfile.TemporaryDirectory()
-    try:
-        path = str(Path(tmp.name) / "v6.db")
-        await _make_v6_db(path)
-        db = DatabaseManager(path)
-        await db.init()
-        try:
-            await init_schema(db)
-            row = await db.fetchone(
-                "SELECT value FROM plugin_config WHERE key='schema_version'"
-            )
-            assert row["value"] == str(SCHEMA_VERSION)
-            # 迁移后旧数据保留
-            rows = await db.fetchall("SELECT * FROM matches")
-            assert rows and rows[0]["home_team"] == "利物浦"
-            # 语义验证：同轮同赛事同主队、不同客队可并存；完全相同的行仍判重
-            async def _ins(home, away) -> int:
-                cur = await db.execute(
-                    "INSERT OR IGNORE INTO matches (season_number, window_seq, round_no, competition, home_team, away_team) "
-                    "VALUES (1, 1, 1, '顶级联赛', ?, ?)",
-                    (home, away),
+        await conn.executescript(_LEGACY_TABLES_DDL)
+        await conn.execute(_matches_ddl(extra))
+        await conn.executescript(_LEGACY_SEED.format(version=version))
+        for i, r in enumerate(_LEGACY_MATCH_ROWS):
+            (season, window, round_no, comp, home, away, weather, wx, result,
+             score, week, day, mtime, att, ticket, commercial, broadcast, created) = r
+            wx_val = wx if version >= 13 else None
+            if version >= 14:
+                tour_ids = [501, 501, 502, None, None]
+                sources = ["tour", "tour", "tour", None, None]
+                await conn.execute(
+                    "INSERT INTO matches (season_number, window_seq, round_no, competition, "
+                    "home_team, away_team, weather, wx_coef, result, score, week_no, day_no, "
+                    "match_time, attendance, ticket_revenue, commercial, broadcast, "
+                    "tour_match_id, kickoff_source, created_at) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (season, window, round_no, comp, home, away, weather, wx_val, result,
+                     score, week, day, mtime, att, ticket, commercial, broadcast,
+                     tour_ids[i], sources[i], created),
                 )
-                try:
-                    return cur.rowcount or 0
-                finally:
-                    await cur.close()
+            elif version >= 13:
+                await conn.execute(
+                    "INSERT INTO matches (season_number, window_seq, round_no, competition, "
+                    "home_team, away_team, weather, wx_coef, result, score, week_no, day_no, "
+                    "match_time, attendance, ticket_revenue, commercial, broadcast, created_at) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (season, window, round_no, comp, home, away, weather, wx_val, result,
+                     score, week, day, mtime, att, ticket, commercial, broadcast, created),
+                )
+            else:
+                await conn.execute(
+                    "INSERT INTO matches (season_number, window_seq, round_no, competition, "
+                    "home_team, away_team, weather, result, score, week_no, day_no, "
+                    "match_time, attendance, ticket_revenue, commercial, broadcast, created_at) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (season, window, round_no, comp, home, away, weather, result, score,
+                     week, day, mtime, att, ticket, commercial, broadcast, created),
+                )
+        await conn.commit()
+    finally:
+        await conn.close()
 
-            assert await _ins("利物浦", "勒沃库森") == 1
-            assert await _ins("利物浦", "巴塞罗那") == 0  # 与旧行完全相同 → 重复跳过
+
+async def _table_set(db: DatabaseManager) -> set:
+    rows = await db.fetchall(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+    )
+    return {r["name"] for r in rows}
+
+
+async def _index_names(db: DatabaseManager) -> set:
+    rows = await db.fetchall("SELECT name FROM sqlite_master WHERE type='index'")
+    return {r["name"] for r in rows}
+
+
+async def _version_of(db: DatabaseManager):
+    row = await db.fetchone("SELECT value FROM plugin_config WHERE key='schema_version'")
+    return None if row is None else row["value"]
+
+
+async def _make_bare_version_db(path: str, version_value: str) -> None:
+    import aiosqlite
+
+    conn = await aiosqlite.connect(path)
+    try:
+        await conn.execute(
+            "CREATE TABLE plugin_config (key TEXT PRIMARY KEY, value TEXT NOT NULL)"
+        )
+        await conn.execute(
+            "INSERT INTO plugin_config (key, value) VALUES ('schema_version', ?)",
+            (version_value,),
+        )
+        await conn.commit()
+    finally:
+        await conn.close()
+
+
+async def _expect_runtime_error(db: DatabaseManager, keyword: str) -> str:
+    try:
+        await init_schema(db)
+        raise AssertionError(f"应报错（含 {keyword!r}）")
+    except RuntimeError as e:
+        assert keyword in str(e), (keyword, str(e))
+        return str(e)
+
+
+async def test_fresh_db_five_tables():
+    tmp = tempfile.TemporaryDirectory()
+    try:
+        db = DatabaseManager(str(Path(tmp.name) / "fresh.db"))
+        await db.init()
+        try:
+            await init_schema(db)
+            assert await _table_set(db) == CORE_TABLES
+            assert await _version_of(db) == str(SCHEMA_VERSION) == "15"
+            cols = await _table_columns(db.conn, "matches")
+            assert cols == MATCHES_COLUMNS, cols ^ MATCHES_COLUMNS
+            assert not (cols & DROPPED_MATCH_COLUMNS)
+            # 索引：partial 唯一 + 轮次 + 主队
+            idx = await _index_names(db)
+            assert {"uq_matches_tour", "idx_matches_round", "idx_matches_home"} <= idx, idx
+            # stadium 三列
+            assert await _table_columns(db.conn, "stadium") == {
+                "team_name", "name", "capacity",
+            }
+            # league_state 种子
+            row = await db.fetchone("SELECT * FROM league_state WHERE id=1")
+            assert row["season_number"] == 1 and row["season_label"] == "S1"
+            # plugin_config 无 updated_at 列
+            assert await _table_columns(db.conn, "plugin_config") == {"key", "value"}
+            # league_state 无 window_seq 列
+            assert await _table_columns(db.conn, "league_state") == {
+                "id", "season_number", "season_label", "updated_at",
+            }
         finally:
             await db.close()
     finally:
         tmp.cleanup()
 
 
-async def test_matches_rebuild_rollback_on_failure():
-    """matches 重建失败时回滚：不重建空表、旧数据完好，版本不推进（下次可重试）。"""
+async def test_fresh_db_idempotent():
+    tmp = tempfile.TemporaryDirectory()
+    try:
+        db = DatabaseManager(str(Path(tmp.name) / "fresh2.db"))
+        await db.init()
+        try:
+            await init_schema(db)
+            await init_schema(db)  # 连跑两遍
+            assert await _table_set(db) == CORE_TABLES
+            assert await _version_of(db) == "15"
+            rows = await db.fetchall("SELECT * FROM league_state")
+            assert len(rows) == 1 and rows[0]["season_label"] == "S1"
+        finally:
+            await db.close()
+    finally:
+        tmp.cleanup()
+
+
+async def test_v13_db_migration_to_v15():
+    tmp = tempfile.TemporaryDirectory()
+    try:
+        path = str(Path(tmp.name) / "v13.db")
+        await _make_legacy_db(path, 13)
+        db = DatabaseManager(path)
+        await db.init()
+        try:
+            await init_schema(db)
+            assert await _version_of(db) == "15"
+            assert await _table_set(db) == CORE_TABLES
+            assert not (await _table_set(db)) & DROPPED_TABLES
+            cols = await _table_columns(db.conn, "matches")
+            assert not (cols & DROPPED_MATCH_COLUMNS), cols & DROPPED_MATCH_COLUMNS
+            # 行数不变
+            rows = await db.fetchall("SELECT * FROM matches ORDER BY id")
+            assert len(rows) == 5
+            # season 2→9、leg/stage_name、walkover
+            assert all(r["season_number"] == 9 for r in rows)
+            assert all(r["leg"] == 0 and r["stage_name"] == "" for r in rows)
+            assert all(r["walkover_side"] is None for r in rows)
+            # competition→tournament_id；旧文本「联赛」归一为「顶级联赛」
+            # （v3 读路径/club 映射统一「顶级联赛」，不归一则迁移行全查空）
+            by_key = {
+                (r["competition"], r["home_team"], r["away_team"]): r for r in rows
+            }
+            assert by_key[("顶级联赛", "利物浦", "巴塞罗那")]["tournament_id"] == 1
+            assert by_key[("顶级联赛", "利物浦", "勒沃库森")]["tournament_id"] == 1
+            assert by_key[("次级联赛", "纽卡斯尔联", "阿贾克斯")]["tournament_id"] == 2
+            assert by_key[("冠军杯", "利物浦", "皇马")]["tournament_id"] == 3
+            assert by_key[("顶级联赛", "巴塞罗那", "尤文图斯")]["tournament_id"] == 1
+            assert not any(r["competition"] == "联赛" for r in rows), "旧文本「联赛」不得残留"
+            # score 解析：普通/点球/弃权/空
+            r1 = by_key[("顶级联赛", "利物浦", "巴塞罗那")]
+            assert (r1["home_score"], r1["away_score"], r1["pen_home"], r1["pen_away"]) == (2, 1, None, None)
+            r3 = by_key[("次级联赛", "纽卡斯尔联", "阿贾克斯")]
+            assert (r3["home_score"], r3["away_score"], r3["pen_home"], r3["pen_away"]) == (2, 1, 4, 2)
+            r4 = by_key[("冠军杯", "利物浦", "皇马")]
+            assert r4["home_score"] is None and r4["away_score"] is None
+            assert r4["result"] == "C" and r4["score"] == "弃权" and r4["tour_status"] == "finished"
+            r5 = by_key[("顶级联赛", "巴塞罗那", "尤文图斯")]
+            assert r5["tour_status"] == "pending" and r5["result"] is None
+            assert r1["tour_status"] == "finished" and r1["result"] == "W"
+            # weather/wx_coef/时刻/created_at 原样保留
+            assert r1["weather"] == "晴" and r1["wx_coef"] == 1.05
+            assert r1["week_no"] == 1 and r1["day_no"] == 2
+            assert r1["match_time"] == "2026-09-05 19:30"
+            assert r1["created_at"] == "2026-08-01 10:00:00"
+            assert r3["wx_coef"] is None and r3["weather"] is None
+            # stadium 只留三列且数据保留
+            st = await db.fetchall("SELECT * FROM stadium ORDER BY team_name")
+            assert [s["team_name"] for s in st] == ["利物浦", "巴塞罗那"]
+            assert st[0]["name"] == "安菲尔德" and st[0]["capacity"] == 54000
+            assert st[1]["name"] == "诺坎普" and st[1]["capacity"] == 99000
+            # league_state 重建为 S9
+            ls = await db.fetchone("SELECT * FROM league_state WHERE id=1")
+            assert ls["season_number"] == 9 and ls["season_label"] == "S9"
+            # admins 保留
+            admins_row = await db.fetchone("SELECT COUNT(*) AS n FROM admins")
+            assert admins_row["n"] == 1
+            # partial 唯一索引存在
+            assert "uq_matches_tour" in await _index_names(db)
+        finally:
+            await db.close()
+    finally:
+        tmp.cleanup()
+
+
+async def test_v12_db_migration_to_v15():
+    """v12 库（matches 无 wx_coef/tour_match_id/kickoff_source）迁移兼容缺列。"""
+    tmp = tempfile.TemporaryDirectory()
+    try:
+        path = str(Path(tmp.name) / "v12.db")
+        await _make_legacy_db(path, 12)
+        db = DatabaseManager(path)
+        await db.init()
+        try:
+            await init_schema(db)
+            assert await _version_of(db) == "15"
+            assert await _table_set(db) == CORE_TABLES
+            rows = await db.fetchall("SELECT * FROM matches")
+            assert len(rows) == 5
+            assert all(r["wx_coef"] is None and r["tour_match_id"] is None for r in rows)
+        finally:
+            await db.close()
+    finally:
+        tmp.cleanup()
+
+
+async def test_v14_db_migration_dedup_tour_match_id():
+    """v14 库：重复 tour_match_id 保留最小 id，其余置 NULL；kickoff_source 丢弃。"""
+    tmp = tempfile.TemporaryDirectory()
+    try:
+        path = str(Path(tmp.name) / "v14.db")
+        await _make_legacy_db(path, 14)
+        db = DatabaseManager(path)
+        await db.init()
+        try:
+            await init_schema(db)
+            assert await _version_of(db) == "15"
+            rows = await db.fetchall("SELECT * FROM matches ORDER BY id")
+            assert len(rows) == 5
+            assert rows[0]["tour_match_id"] == 501, "最小 id 保留绑定"
+            assert rows[1]["tour_match_id"] is None, "重复行置 NULL"
+            assert rows[2]["tour_match_id"] == 502
+            assert rows[3]["tour_match_id"] is None and rows[4]["tour_match_id"] is None
+            # 幂等：迁移后再跑 init_schema 不报错、版本不回退
+            await init_schema(db)
+            assert await _version_of(db) == "15"
+            assert await _table_set(db) == CORE_TABLES
+        finally:
+            await db.close()
+    finally:
+        tmp.cleanup()
+
+
+async def test_migration_below_12_raises():
+    tmp = tempfile.TemporaryDirectory()
+    try:
+        path = str(Path(tmp.name) / "v11.db")
+        await _make_bare_version_db(path, "11")
+        db = DatabaseManager(path)
+        await db.init()
+        try:
+            await _expect_runtime_error(db, "2.14")
+            assert await _version_of(db) == "11", "报错后版本不得被改写"
+        finally:
+            await db.close()
+    finally:
+        tmp.cleanup()
+
+
+async def test_migration_above_15_raises():
+    tmp = tempfile.TemporaryDirectory()
+    try:
+        path = str(Path(tmp.name) / "v16.db")
+        await _make_bare_version_db(path, "16")
+        db = DatabaseManager(path)
+        await db.init()
+        try:
+            await _expect_runtime_error(db, "16")
+            assert await _version_of(db) == "16"
+        finally:
+            await db.close()
+    finally:
+        tmp.cleanup()
+
+
+async def test_migration_invalid_version_raises():
+    tmp = tempfile.TemporaryDirectory()
+    try:
+        path = str(Path(tmp.name) / "vbad.db")
+        await _make_bare_version_db(path, "not-a-number")
+        db = DatabaseManager(path)
+        await db.init()
+        try:
+            await _expect_runtime_error(db, "not-a-number")
+            assert await _version_of(db) == "not-a-number", "非法值不得被静默改写"
+        finally:
+            await db.close()
+    finally:
+        tmp.cleanup()
+
+
+async def test_migration_missing_version_raises():
     import aiosqlite
 
     tmp = tempfile.TemporaryDirectory()
     try:
-        path = str(Path(tmp.name) / "v6_rollback.db")
-        await _make_v6_db(path)
+        path = str(Path(tmp.name) / "nover.db")
         conn = await aiosqlite.connect(path)
         try:
-            # 预置同名旧表，让 v7 重建的 RENAME 冲突，触发失败路径
-            await conn.execute("CREATE TABLE matches_old (id INTEGER PRIMARY KEY)")
+            await conn.execute(
+                "CREATE TABLE plugin_config (key TEXT PRIMARY KEY, value TEXT NOT NULL)"
+            )
             await conn.commit()
         finally:
             await conn.close()
         db = DatabaseManager(path)
         await db.init()
         try:
-            try:
-                await init_schema(db)
-                assert False, "重建应因表名冲突失败"
-            except aiosqlite.OperationalError:
-                pass
-            rows = await db.fetchall("SELECT * FROM matches")
-            assert rows and rows[0]["home_team"] == "利物浦", "失败后旧 matches 数据应完好"
-            ver = await db.fetchone(
-                "SELECT value FROM plugin_config WHERE key='schema_version'"
-            )
-            assert ver["value"] == "6", "失败后版本号不应推进，可重试迁移"
+            await _expect_runtime_error(db, "schema_version")
         finally:
             await db.close()
     finally:
         tmp.cleanup()
 
 
-async def test_fresh_db_has_choice_schema():
-    env = await TestEnv().setup()
-    try:
-        cols = await _table_columns(env.db.conn, "event_pool")
-        assert {"event_type", "options_json"} <= cols, cols
-        cc = await _table_columns(env.db.conn, "event_choices")
-        assert "choice_no" in cc
-        # 默认事件池：24 条内置（提交 2 起拆分为 6 即发 + 16 选择；v2.10.0 增 2 条冠名联动）
-        rows = await env.dao.list_events("adopted")
-        builtin = [r for r in rows if r["source"] == "builtin"]
-        assert len(builtin) == 24
-        # choice 决策表 API 可用
-        await env.dao.add_event_choice("利物浦", 1, 1, "storm_buzz")
-        await env.dao.add_event_choice("利物浦", 1, 1, "storm_buzz")  # 幂等
-        await env.dao.set_event_choice("利物浦", 1, 1, "storm_buzz", 2)
-        c = await env.dao.get_event_choice("利物浦", 1, 1, "storm_buzz")
-        assert c["choice_no"] == 2 and c["resolved"] == 0
-        pending = await env.dao.get_unresolved_choices(1, 1)
-        assert len(pending) == 1
-        await env.dao.mark_choice_resolved(c["id"], '{"no":2}')
-        pending2 = await env.dao.get_unresolved_choices(1, 1)
-        assert len(pending2) == 0
-        await env.dao.reset_choices_for_redo(1, 1)
-        pending3 = await env.dao.get_unresolved_choices(1, 1)
-        assert len(pending3) == 1 and pending3[0]["choice_no"] == 2
-        # 命名轮次登记：按（赛季,赛事）编号——同赛事同名同号、异名递增、不同赛事各从 1 起、跨赛季归一
-        a1 = await env.dao.add_named_round(1, "顶级联赛", "顶级")
-        a2 = await env.dao.add_named_round(1, "顶级联赛", "顶级")
-        s1 = await env.dao.add_named_round(1, "次级联赛", "次级")
-        d1 = await env.dao.add_named_round(1, "顶级联赛", "顶级9")
-        assert a1 == a2 == 1 and s1 == 1, (a1, a2, s1)
-        assert d1 == 2, d1  # 同赛事不同文本递增
-        assert await env.dao.get_named_round(1, "顶级联赛", "顶级") == 1
-        assert await env.dao.get_named_round(1, "顶级联赛", "未导入") is None
-        assert await env.dao.add_named_round(2, "顶级联赛", "顶级") == 1  # 跨赛季归一
-        # 赛季命名 DAO：写入/覆写/读取 + 展示标签回退
-        assert await env.dao.get_season_name(1) is None
-        await env.dao.set_season_name(1, "S8 黄金联赛", "tester")
-        await env.dao.set_season_name(1, "S8 黄金联赛·修订", "tester")  # 覆写
-        assert await env.dao.get_season_name(1) == "S8 黄金联赛·修订"
-        assert await env.dao.season_label(1) == "S8 黄金联赛·修订"
-        assert await env.dao.season_label(3) == "第 3 赛季"  # 未命名回退
-    finally:
-        await env.teardown()
-
-
-async def _make_v9_db(path: str) -> None:
-    """构造一个真实的 v9 结构数据库（naming_rights/brand_pool 无市场列、无 market 表）。"""
-    import aiosqlite
-
-    conn = await aiosqlite.connect(path)
-    try:
-        await conn.executescript(
-            """
-            CREATE TABLE plugin_config (
-                key TEXT PRIMARY KEY,
-                value TEXT NOT NULL,
-                updated_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
-            );
-            CREATE TABLE naming_rights (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                team_name TEXT NOT NULL UNIQUE,
-                brand TEXT NOT NULL,
-                heat REAL NOT NULL,
-                fee_per_window REAL NOT NULL,
-                windows_total INTEGER NOT NULL,
-                windows_remaining INTEGER NOT NULL,
-                status TEXT NOT NULL DEFAULT 'active',
-                signed_season INTEGER NOT NULL,
-                signed_window INTEGER NOT NULL,
-                created_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
-            );
-            CREATE TABLE brand_pool (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                brand TEXT NOT NULL,
-                heat REAL NOT NULL,
-                source TEXT NOT NULL DEFAULT 'builtin',
-                status TEXT NOT NULL DEFAULT 'adopted',
-                created_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
-            );
-            INSERT INTO plugin_config (key, value) VALUES ('schema_version', '9');
-            INSERT INTO naming_rights (team_name, brand, heat, fee_per_window, windows_total, windows_remaining, status, signed_season, signed_window)
-            VALUES ('利物浦', '麒麟生物', 1.2, 5.0, 4, 2, 'active', 1, 3);
-            INSERT INTO brand_pool (brand, heat, source, status) VALUES
-                ('麒麟生物', 1.2, 'builtin', 'adopted'),
-                ('阿迪达斯', 1.1, 'builtin', 'adopted'),
-                ('星际咖啡', 0.9, 'llm', 'adopted');
-            """
-        )
-        await conn.commit()
-    finally:
-        await conn.close()
-
-
-async def test_migrate_v9_to_v10_market_schema():
-    """v9 库迁移：市场列补齐、builtin 行业映射、market 表就绪、在途合同 legacy 快照、幂等。"""
+async def test_migration_unsupported_season_rollback():
+    """season_number=3 不支持：报错列出待人工确认，且回滚（版本/数据不变）。"""
     import aiosqlite
 
     tmp = tempfile.TemporaryDirectory()
-    db_path = str(Path(tmp.name) / "v9.db")
-    await _make_v9_db(db_path)
-    db = DatabaseManager(db_path)
     try:
-        await db.init()
-        await init_schema(db)
-        ver = await db.fetchone(
-            "SELECT value FROM plugin_config WHERE key='schema_version'"
-        )
-        assert ver["value"] == str(SCHEMA_VERSION), ver
-        bp = await _table_columns(db.conn, "brand_pool")
-        assert {"tier", "industry", "pitch", "packages_json", "tier_locked"} <= bp, bp
-        nr = await _table_columns(db.conn, "naming_rights")
-        assert {"package_json", "satisfaction"} <= nr, nr
-        # 在途老合同：legacy 快照 + 中性满意度
-        row = await db.fetchone(
-            "SELECT package_json, satisfaction FROM naming_rights WHERE team_name='利物浦'"
-        )
-        assert row["package_json"] == "{}" and row["satisfaction"] == 1.0, row
-        # 存量品牌一律口碑（迁移不猜配额，首次招商期自动校准）；builtin 行业映射、llm 品牌保持通用
-        brands = {r["brand"]: r for r in await db.fetchall("SELECT * FROM brand_pool")}
-        assert all(b["tier"] == "口碑" and b["tier_locked"] == 0 for b in brands.values())
-        assert brands["麒麟生物"]["industry"] == "医疗"
-        assert brands["阿迪达斯"]["industry"] == "运动"
-        assert brands["星际咖啡"]["industry"] == "通用", brands["星际咖啡"]
-        # market 表可用；同轮同品牌同队唯一（先到先得挂价 team_name='' 同品牌仅一条）
-        await db.execute(
-            "INSERT INTO market_rounds (season_number, window_seq, bid_mode) VALUES (1, 1, '明标')"
-        )
-        await db.execute(
-            "INSERT INTO market_offers (round_id, brand_id, team_name, package_no, amount, windows)"
-            " VALUES (1, 1, '利物浦', 1, 5.0, 6)"
-        )
+        path = str(Path(tmp.name) / "v13_s3.db")
+        await _make_legacy_db(path, 13)
+        conn = await aiosqlite.connect(path)
         try:
-            await db.execute(
-                "INSERT INTO market_offers (round_id, brand_id, team_name, package_no, amount, windows)"
-                " VALUES (1, 1, '利物浦', 2, 5.0, 6)"
-            )
-            assert False, "同轮同品牌同队重复报价应违反唯一约束"
-        except aiosqlite.IntegrityError:
-            pass
-        # 幂等：再次 init_schema 不报错、版本不回退
-        await init_schema(db)
-        ver2 = await db.fetchone(
-            "SELECT value FROM plugin_config WHERE key='schema_version'"
-        )
-        assert ver2["value"] == str(SCHEMA_VERSION)
+            await conn.execute("UPDATE matches SET season_number=3 WHERE id=1")
+            await conn.commit()
+        finally:
+            await conn.close()
+        db = DatabaseManager(path)
+        await db.init()
+        try:
+            await _expect_runtime_error(db, "season_number")
+            # 回滚：版本仍 13、16 张旧表仍在、matches 数据完好
+            assert await _version_of(db) == "13"
+            tables = await _table_set(db)
+            assert DROPPED_TABLES <= tables, DROPPED_TABLES - tables
+            rows = await db.fetchall("SELECT * FROM matches")
+            assert len(rows) == 5
+            cols = await _table_columns(db.conn, "matches")
+            assert "window_seq" in cols, "回滚后旧列应完好"
+        finally:
+            await db.close()
     finally:
-        await db.close()
         tmp.cleanup()
 
 
-async def test_fresh_db_has_market_schema():
-    """全新安装：市场列/表就绪，品牌池新列按默认值；配置键注册齐全 + market_bid_mode 白名单。"""
-    env = await TestEnv().setup()
+async def test_migration_unknown_competition_rollback():
+    """未知 competition 文本：报错待人工确认，且回滚。"""
+    import aiosqlite
+
+    tmp = tempfile.TemporaryDirectory()
     try:
-        bp = await _table_columns(env.db.conn, "brand_pool")
-        assert {"tier", "industry", "pitch", "packages_json", "tier_locked"} <= bp, bp
-        nr = await _table_columns(env.db.conn, "naming_rights")
-        assert {"package_json", "satisfaction"} <= nr, nr
-        cols = await _table_columns(env.db.conn, "market_rounds")
-        assert {"season_number", "window_seq", "bid_mode", "status", "settled_at"} <= cols, cols
-        cols = await _table_columns(env.db.conn, "market_offers")
-        assert {
-            "round_id", "brand_id", "team_name", "package_no", "amount", "windows",
-            "package_json", "status", "expire_at",
-        } <= cols, cols
-        # 品牌池已播种 7 内置品牌，档位默认口碑
-        rows = await env.dao.list_brands()
-        builtin = [r for r in rows if r["source"] == "builtin"]
-        assert len(builtin) == 7
-        assert all(r["tier"] == "口碑" for r in builtin)
+        path = str(Path(tmp.name) / "v13_badcomp.db")
+        await _make_legacy_db(path, 13)
+        conn = await aiosqlite.connect(path)
+        try:
+            await conn.execute("UPDATE matches SET competition='友谊赛' WHERE id=5")
+            await conn.commit()
+        finally:
+            await conn.close()
+        db = DatabaseManager(path)
+        await db.init()
+        try:
+            await _expect_runtime_error(db, "友谊赛")
+            assert await _version_of(db) == "13"
+            assert DROPPED_TABLES <= await _table_set(db)
+            rows = await db.fetchall("SELECT * FROM matches WHERE id=5")
+            assert rows[0]["competition"] == "友谊赛"
+        finally:
+            await db.close()
     finally:
-        await env.teardown()
+        tmp.cleanup()
 
-    from astrbot_plugin_whleague_revenue_system.config.defaults import (
-        DEFAULT_CONFIG,
-        validate_and_cast,
-    )
 
-    assert DEFAULT_CONFIG["market_bid_mode"] == "明标"
-    assert DEFAULT_CONFIG["market_top_seat_ratio"] == 8
-    assert DEFAULT_CONFIG["market_offers_per_brand"] == 3
-    assert DEFAULT_CONFIG["market_emerging_slots"] == 2
-    assert DEFAULT_CONFIG["market_offer_ttl_hours"] == 72
-    assert DEFAULT_CONFIG["naming_pkg_stable_windows"] == 6
-    assert DEFAULT_CONFIG["naming_pkg_stable_factor"] == 0.85
-    assert DEFAULT_CONFIG["naming_pkg_short_windows"] == 2
-    assert DEFAULT_CONFIG["naming_pkg_short_factor"] == 1.25
-    assert DEFAULT_CONFIG["naming_pkg_bet_windows"] == 4
-    assert DEFAULT_CONFIG["naming_pkg_bet_factor"] == 0.7
-    assert DEFAULT_CONFIG["naming_pkg_bet_bonus_rate"] == 0.7
-    assert DEFAULT_CONFIG["naming_pkg_bet_attend"] == 0.8
-    assert DEFAULT_CONFIG["naming_pkg_bet_fans"] == 0.03
-    assert DEFAULT_CONFIG["naming_bet_expected_prob"] == 0.5
-    assert DEFAULT_CONFIG["market_satisfy_floor"] == 0.6
-    satisfy = json.loads(DEFAULT_CONFIG["market_satisfy_config"])
-    assert satisfy["attend_weight"] == 0.5 and satisfy["line_buffer"] == 0.05
-    heat = json.loads(DEFAULT_CONFIG["market_heat_config"])
-    assert heat["champion"] == 0.10 and heat["clamp_high"] == 1.5
-    profiles = json.loads(DEFAULT_CONFIG["market_tier_profiles"])
-    assert set(profiles) == {"头部", "新兴", "口碑"}
-    for name, prof in profiles.items():
-        assert {
-            "satisfy_floor", "good_attend", "bad_attend",
-            "penalty_mult", "attend_buff", "fans_buff",
-        } <= set(prof), (name, prof)
-    json.loads(DEFAULT_CONFIG["market_industry_templates"])
-
-    assert validate_and_cast("market_bid_mode", " 暗标 ") == "暗标"
-    assert validate_and_cast("market_bid_mode", "先到先得") == "先到先得"
+async def test_dao_config_kv():
+    tmp = tempfile.TemporaryDirectory()
     try:
-        validate_and_cast("market_bid_mode", "密封递价")
-        assert False, "非法招商模式应被拒绝"
-    except ValueError as e:
-        assert "明标" in str(e)
+        db = DatabaseManager(str(Path(tmp.name) / "cfg.db"))
+        dao = StadiumDAO(db)
+        await db.init()
+        try:
+            await init_schema(db)
+            assert await dao.get_config("nope") is None
+            await dao.set_config("k", "v")
+            assert await dao.get_config("k") == "v"
+            await dao.set_config("k", "v2")
+            assert await dao.get_config("k") == "v2"
+            all_cfg = {r["key"]: r["value"] for r in await dao.get_all_config()}
+            assert all_cfg["k"] == "v2"
+            assert all_cfg["schema_version"] == "15"
+        finally:
+            await db.close()
+    finally:
+        tmp.cleanup()
+
+
+async def test_dao_league_state():
+    tmp = tempfile.TemporaryDirectory()
+    try:
+        db = DatabaseManager(str(Path(tmp.name) / "ls.db"))
+        dao = StadiumDAO(db)
+        await db.init()
+        try:
+            await init_schema(db)
+            row = await dao.get_league_state()
+            assert row["season_number"] == 1 and row["season_label"] == "S1"
+            await dao.set_league_state(9, "S9")
+            row = await dao.get_league_state()
+            assert row["season_number"] == 9 and row["season_label"] == "S9"
+            assert row["updated_at"] is not None
+            await dao.set_league_state(10, "S10")
+            rows = await db.fetchall("SELECT * FROM league_state")
+            assert len(rows) == 1 and rows[0]["season_number"] == 10
+        finally:
+            await db.close()
+    finally:
+        tmp.cleanup()
+
+
+async def test_dao_match_upsert():
+    tmp = tempfile.TemporaryDirectory()
+    try:
+        db = DatabaseManager(str(Path(tmp.name) / "up.db"))
+        dao = StadiumDAO(db)
+        await db.init()
+        try:
+            await init_schema(db)
+            # 唯一键插入
+            mid = await dao.upsert_match(
+                9, 1, "顶级联赛", 12, "利物浦", "巴塞罗那", leg=1,
+                stage_name="league_robin", tour_status="pending",
+            )
+            assert isinstance(mid, int) and mid > 0
+            row = await db.fetchone("SELECT * FROM matches WHERE id=?", (mid,))
+            assert row["leg"] == 1 and row["stage_name"] == "league_robin"
+            # 预置天气，验证 upsert 不触碰
+            await db.execute(
+                "UPDATE matches SET weather='晴', wx_coef=1.05 WHERE id=?", (mid,)
+            )
+            # 同唯一键 upsert：覆盖比分/点球/tour_status/walkover/时刻/tour_match_id
+            mid2 = await dao.upsert_match(
+                9, 1, "顶级联赛", 12, "利物浦", "巴塞罗那", leg=1,
+                home_score=2, away_score=1, pen_home=4, pen_away=2,
+                result="W", score="2:1（点球 4:2）", tour_status="finished",
+                walkover_side=None, week_no=7, day_no=6,
+                match_time="2026-11-20 20:00", tour_match_id=901,
+                synced_at="2026-11-15 09:00:00",
+            )
+            assert mid2 == mid
+            rows = await db.fetchall("SELECT * FROM matches")
+            assert len(rows) == 1
+            row = rows[0]
+            assert (row["home_score"], row["away_score"]) == (2, 1)
+            assert (row["pen_home"], row["pen_away"]) == (4, 2)
+            assert row["result"] == "W" and row["tour_status"] == "finished"
+            assert row["week_no"] == 7 and row["day_no"] == 6
+            assert row["tour_match_id"] == 901 and row["synced_at"] == "2026-11-15 09:00:00"
+            assert row["weather"] == "晴" and row["wx_coef"] == 1.05, "天气不得被同步覆盖"
+            # tour_match_id 优先匹配：唯一键外的轮次变化仍命中同一行
+            mid3 = await dao.upsert_match(
+                9, 1, "顶级联赛", 13, "利物浦", "巴塞罗那", leg=1,
+                home_score=3, away_score=0, result="W", score="3:0",
+                tour_match_id=901,
+            )
+            assert mid3 == mid
+            row = await db.fetchone("SELECT * FROM matches WHERE id=?", (mid,))
+            assert row["round_no"] == 13, "tour_match_id 命中后覆盖轮次"
+            assert (row["home_score"], row["away_score"]) == (3, 0)
+            # 唯一索引：直接插重复 tour_match_id 被拒
+            try:
+                await db.execute(
+                    "INSERT INTO matches (season_number, tournament_id, competition, round_no, "
+                    "leg, home_team, away_team, tour_match_id) "
+                    "VALUES (9, 1, '顶级联赛', 14, 0, 'X', 'Y', 901)"
+                )
+                assert False, "重复 tour_match_id 应违反 partial 唯一索引"
+            except Exception as e:
+                assert "UNIQUE" in str(e), str(e)
+        finally:
+            await db.close()
+    finally:
+        tmp.cleanup()
+
+
+async def test_dao_round_matches_no_window():
+    tmp = tempfile.TemporaryDirectory()
+    try:
+        db = DatabaseManager(str(Path(tmp.name) / "round.db"))
+        dao = StadiumDAO(db)
+        await db.init()
+        try:
+            await init_schema(db)
+            await dao.upsert_match(9, 1, "顶级联赛", 12, "A", "B")
+            await dao.upsert_match(9, 1, "顶级联赛", 12, "C", "D")
+            await dao.upsert_match(9, 2, "次级联赛", 12, "E", "F")
+            await dao.upsert_match(9, 1, "顶级联赛", 13, "G", "H")
+            # 新签名：无 window_seq 参数
+            rows = await dao.get_round_matches(9, 12)
+            assert len(rows) == 3 and {r["tournament_id"] for r in rows} == {1, 2}
+            rows = await dao.get_round_matches(9, 12, "顶级联赛")
+            assert len(rows) == 2 and all(r["tournament_id"] == 1 for r in rows)
+            rows = await dao.get_round_matches(9, 13)
+            assert len(rows) == 1 and rows[0]["home_team"] == "G"
+            rows = await dao.get_round_matches(9, 99)
+            assert rows == []
+        finally:
+            await db.close()
+    finally:
+        tmp.cleanup()
+
+
+async def test_dao_weather_round_key():
+    tmp = tempfile.TemporaryDirectory()
+    try:
+        db = DatabaseManager(str(Path(tmp.name) / "wx.db"))
+        dao = StadiumDAO(db)
+        await db.init()
+        try:
+            await init_schema(db)
+            await dao.upsert_match(9, 1, "顶级联赛", 12, "A", "B")
+            await dao.upsert_match(9, 1, "顶级联赛", 12, "C", "D", leg=2)
+            await dao.upsert_match(9, 1, "顶级联赛", 13, "E", "F")
+            # 轮级预报：轮内两行全有天气 + 系数固化
+            n = await dao.set_match_weather(9, 1, 12, "晴", 1.05)
+            assert n == 2
+            # 轮外行不受影响
+            row = await db.fetchone("SELECT * FROM matches WHERE home_team='E'")
+            assert row["weather"] is None
+            # fill_wx_coef：已固化 → 幂等 0
+            assert await dao.fill_wx_coef(9, 1, 12, 1.10) == 0
+            rows = await db.fetchall("SELECT wx_coef FROM matches WHERE round_no=12")
+            assert all(r["wx_coef"] == 1.05 for r in rows)
+            # 不带系数覆盖：系数保留
+            await dao.set_match_weather(9, 1, 12, "雨")
+            rows = await db.fetchall(
+                "SELECT weather, wx_coef FROM matches WHERE round_no=12"
+            )
+            assert all(r["weather"] == "雨" and r["wx_coef"] == 1.05 for r in rows)
+            # 空 wx 行补抽（只固化系数，不算已预报天气）
+            assert await dao.fill_wx_coef(9, 1, 13, 0.99) == 1
+            assert await dao.fill_wx_coef(9, 1, 13, 0.98) == 0, "第二次幂等"
+            # 已预报清单：仅 round 12 的两行有天气
+            lst = await dao.list_weathered_matches()
+            assert len(lst) == 2 and all(m["round_no"] == 12 for m in lst)
+        finally:
+            await db.close()
+    finally:
+        tmp.cleanup()
+
+
+async def test_parse_score_text_unit():
+    assert parse_score_text("2:1") == (2, 1, None, None)
+    assert parse_score_text("2:1（点球 4:2）") == (2, 1, 4, 2)
+    assert parse_score_text("2:1 (点球 4:2)") == (2, 1, 4, 2)
+    assert parse_score_text("0:0") == (0, 0, None, None)
+    assert parse_score_text("弃权") == (None, None, None, None)
+    assert parse_score_text(None) == (None, None, None, None)
+    assert parse_score_text("乱串") == (None, None, None, None)
+
+
+if __name__ == "__main__":
+    sys.exit(run_module("tests.s0_schema"))

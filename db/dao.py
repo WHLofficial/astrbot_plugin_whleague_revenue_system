@@ -1,4 +1,12 @@
+"""DAO：5 张核心表（matches/stadium/league_state/admins/plugin_config）读写。
+
+只保留展示插件用到的读写；财务/冠名/市场/事件/档期/命名轮次等旧面已随
+schema v15 的 16 张旧表一起下线。
+"""
+
 from datetime import datetime
+
+from ..services.formula import competition_texts
 
 
 class StadiumDAO:
@@ -15,9 +23,10 @@ class StadiumDAO:
     now_str = _now_str
 
     async def set_config(self, key: str, value: str) -> None:
+        """写配置 kv（v15 起 plugin_config 无 updated_at 列）。"""
         await self._db.execute(
-            "INSERT INTO plugin_config (key, value, updated_at) VALUES (?, ?, datetime('now','localtime')) "
-            "ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=datetime('now','localtime')",
+            "INSERT INTO plugin_config (key, value) VALUES (?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
             (key, value),
         )
 
@@ -27,6 +36,8 @@ class StadiumDAO:
 
     async def get_all_config(self) -> list:
         return await self._db.fetchall("SELECT key, value FROM plugin_config")
+
+    # ─── 管理员 ───────────────────────────────────────────
 
     async def is_admin(self, qq: str) -> bool:
         row = await self._db.fetchone(
@@ -54,34 +65,20 @@ class StadiumDAO:
             "SELECT * FROM league_state WHERE id=1"
         )
 
-    async def update_league_state(self, season, window_seq, current_round, updated_by) -> None:
+    async def set_league_state(self, season_number: int, season_label: str) -> None:
+        """设置当前赛季（v15：league_state 只有 season_number/season_label）。"""
         await self._db.execute(
-            "UPDATE league_state SET season_number=?, window_seq=?, current_round=?, "
-            "updated_by=?, updated_at=datetime('now','localtime') WHERE id=1",
-            (season, window_seq, current_round, updated_by),
-        )
-
-    async def get_season_name(self, season: int) -> str | None:
-        row = await self._db.fetchone(
-            "SELECT name FROM season_names WHERE season_number=?", (int(season),)
-        )
-        return row["name"] if row else None
-
-    async def set_season_name(self, season: int, name: str, updated_by: str) -> None:
-        await self._db.execute(
-            "INSERT INTO season_names (season_number, name, updated_by, updated_at) "
-            "VALUES (?, ?, ?, datetime('now','localtime')) "
-            "ON CONFLICT(season_number) DO UPDATE SET "
-            "name=excluded.name, updated_by=excluded.updated_by, updated_at=datetime('now','localtime')",
-            (int(season), name, updated_by),
+            "INSERT INTO league_state (id, season_number, season_label) VALUES (1, ?, ?) "
+            "ON CONFLICT(id) DO UPDATE SET season_number=excluded.season_number, "
+            "season_label=excluded.season_label, updated_at=datetime('now','localtime')",
+            (int(season_number), season_label),
         )
 
     async def season_label(self, season: int) -> str:
-        """展示用赛季标签：有名只显名，无名回退「第 N 赛季」。"""
-        name = await self.get_season_name(season)
-        return name if name else f"第 {int(season)} 赛季"
+        """展示用赛季标签（v3：赛季命名已下线，统一 S{n}）。"""
+        return f"S{int(season)}"
 
-    # ─── 球场 ─────────────────────────────────────────────
+    # ─── 球场（只读展示；容量/名称来自 club） ─────────────
 
     async def get_stadium(self, team_name: str):
         return await self._db.fetchone(
@@ -91,247 +88,16 @@ class StadiumDAO:
     async def list_stadiums(self) -> list:
         return await self._db.fetchall("SELECT * FROM stadium ORDER BY team_name")
 
-    async def create_stadium(
-        self, team_name: str, capacity: int, tier: int, influence: float, fans: float
-    ) -> None:
-        await self._db.execute(
-            "INSERT INTO stadium (team_name, name, capacity, tier, influence, fans_diehards) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            (team_name, f"{team_name}主场", capacity, tier, influence, fans),
-        )
-
-    async def update_stadium_attrs(
-        self, team_name: str, capacity: int | None = None, tier: int | None = None
-    ) -> None:
-        sets = ["updated_at=datetime('now','localtime')"]
-        params = []
-        if capacity is not None:
-            sets.append("capacity=?")
-            params.append(capacity)
-        if tier is not None:
-            sets.append("tier=?")
-            params.append(tier)
-        params.append(team_name)
-        await self._db.execute(
-            f"UPDATE stadium SET {', '.join(sets)} WHERE team_name=?", params
-        )
-
-    async def update_influence(self, team_name: str, influence: float) -> None:
-        await self._db.execute(
-            "UPDATE stadium SET influence=?, updated_at=datetime('now','localtime') WHERE team_name=?",
-            (influence, team_name),
-        )
-
-    async def update_fans(self, team_name: str, fans: float) -> None:
-        await self._db.execute(
-            "UPDATE stadium SET fans_diehards=?, updated_at=datetime('now','localtime') WHERE team_name=?",
-            (fans, team_name),
-        )
-
-    async def update_stadium_name(self, team_name: str, name: str) -> None:
-        await self._db.execute(
-            "UPDATE stadium SET name=?, updated_at=datetime('now','localtime') WHERE team_name=?",
-            (name, team_name),
-        )
-
-    async def update_attendance_mod(self, team_name: str, mod: float) -> None:
-        await self._db.execute(
-            "UPDATE stadium SET next_attendance_mod=?, updated_at=datetime('now','localtime') WHERE team_name=?",
-            (mod, team_name),
-        )
-
-    async def reset_attendance_mod(self, team_name: str) -> None:
-        await self._db.execute(
-            "UPDATE stadium SET next_attendance_mod=1.0, updated_at=datetime('now','localtime') WHERE team_name=?",
-            (team_name,),
-        )
-
-    # ─── 子设施 ───────────────────────────────────────────
-
-    async def get_facilities(self, team_name: str) -> dict:
-        rows = await self._db.fetchall(
-            "SELECT facility_key, level FROM stadium_facilities WHERE team_name=?",
-            (team_name,),
-        )
-        return {r["facility_key"]: r["level"] for r in rows}
-
-    async def get_facility_level(self, team_name: str, facility_key: str) -> int:
-        row = await self._db.fetchone(
-            "SELECT level FROM stadium_facilities WHERE team_name=? AND facility_key=?",
-            (team_name, facility_key),
-        )
-        return row["level"] if row else 0
-
-    async def upsert_facility(self, team_name: str, facility_key: str, level: int) -> None:
-        await self._db.execute(
-            "INSERT INTO stadium_facilities (team_name, facility_key, level, updated_at) "
-            "VALUES (?, ?, ?, datetime('now','localtime')) "
-            "ON CONFLICT(team_name, facility_key) DO UPDATE SET level=excluded.level, "
-            "updated_at=datetime('now','localtime')",
-            (team_name, facility_key, level),
-        )
-
-    # ─── 余额 ─────────────────────────────────────────────
-
-    async def get_balance(self, team_name: str):
-        return await self._db.fetchone(
-            "SELECT * FROM club_balance WHERE team_name=?", (team_name,)
-        )
-
-    async def ensure_balance(self, team_name: str, start_funds: float) -> None:
-        """确保余额行存在；实际新插入时同事务补记 init 流水，
-        使 recompute_balance（balance=SUM(非 credit 流水)）不丢启动资金。"""
-        async def work(conn):
-            cur = await conn.execute(
-                "INSERT OR IGNORE INTO club_balance (team_name, balance, build_credit) VALUES (?, ?, 0)",
-                (team_name, start_funds),
-            )
-            try:
-                inserted = cur.rowcount
-            finally:
-                await cur.close()
-            if inserted:
-                await conn.execute(
-                    "INSERT INTO revenue_transactions (team_name, season_number, window_seq, kind, amount, note) "
-                    "VALUES (?, 0, 0, 'init', ?, '初始球场与启动资金')",
-                    (team_name, start_funds),
-                )
-
-        await self._db.execute_transaction(work)
-
-    async def apply_balance(self, team_name: str, amount: float, build_credit_amount: float = 0.0) -> None:
-        if build_credit_amount:
-            await self._db.execute(
-                "UPDATE club_balance SET balance=balance+?, build_credit=build_credit+?, "
-                "updated_at=datetime('now','localtime') WHERE team_name=?",
-                (amount, build_credit_amount, team_name),
-            )
-        else:
-            await self._db.execute(
-                "UPDATE club_balance SET balance=balance+?, updated_at=datetime('now','localtime') WHERE team_name=?",
-                (amount, team_name),
-            )
-
-    async def deduct_build_credit(self, team_name: str, amount: float) -> float:
-        """用建设券抵扣建设支出，返回实际抵扣金额（事务内读改写，防并发扣成负券）。"""
-        if amount <= 0:
-            return 0.0
-
-        async def work(conn):
-            cur = await conn.execute(
-                "SELECT build_credit FROM club_balance WHERE team_name=?", (team_name,)
-            )
-            try:
-                row = await cur.fetchone()
-            finally:
-                await cur.close()
-            credit = row["build_credit"] if row else 0.0
-            used = min(credit, amount)
-            if used <= 0:
-                return 0.0
-            await conn.execute(
-                "UPDATE club_balance SET build_credit=build_credit-?, updated_at=datetime('now','localtime') WHERE team_name=?",
-                (used, team_name),
-            )
-            return used
-
-        return await self._db.execute_transaction(work)
-
-    # ─── 账务流水 ─────────────────────────────────────────
-
-    async def add_transaction(
-        self, team_name: str, season: int, window_seq: int, kind: str,
-        amount: float, note: str = "", round_no: int | None = None,
-    ) -> int:
-        """写入流水并返回其 id（供结算强制重算时精确撤销）。"""
-        cur = await self._db.execute(
-            "INSERT INTO revenue_transactions (team_name, season_number, window_seq, round_no, kind, amount, note) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (team_name, season, window_seq, round_no, kind, amount, note),
-        )
-        try:
-            return cur.lastrowid or 0
-        finally:
-            await cur.close()
-
-    async def record_entries(
-        self, team_name: str, season: int, window_seq: int,
-        entries: list, build_credit_amount: float = 0.0,
-    ) -> list:
-        """余额增量与流水同事务落盘：balance += Σamount（及建设券增量），逐条插入流水。
-
-        entries: [(kind, amount, note, round_no|None), ...]；返回流水 id 列表（与 entries 等长）。
-        """
-        async def work(conn):
-            ids = []
-            delta = 0.0
-            for kind, amount, note, round_no in entries:
-                delta += amount
-                cur = await conn.execute(
-                    "INSERT INTO revenue_transactions (team_name, season_number, window_seq, round_no, kind, amount, note) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                    (team_name, season, window_seq, round_no, kind, amount, note),
-                )
-                try:
-                    ids.append(cur.lastrowid or 0)
-                finally:
-                    await cur.close()
-            if delta:
-                await conn.execute(
-                    "UPDATE club_balance SET balance=balance+?, updated_at=datetime('now','localtime') WHERE team_name=?",
-                    (delta, team_name),
-                )
-            if build_credit_amount:
-                await conn.execute(
-                    "UPDATE club_balance SET build_credit=build_credit+?, updated_at=datetime('now','localtime') WHERE team_name=?",
-                    (build_credit_amount, team_name),
-                )
-            return ids
-
-        return await self._db.execute_transaction(work)
-
-    async def list_transactions(
-        self, team_name: str, season: int | None = None, window_seq: int | None = None,
-        limit: int = 100,
-    ) -> list:
-        sql = "SELECT * FROM revenue_transactions WHERE team_name=?"
-        params = [team_name]
-        if season is not None:
-            sql += " AND season_number=?"
-            params.append(season)
-        if window_seq is not None:
-            sql += " AND window_seq=?"
-            params.append(window_seq)
-        sql += " ORDER BY id DESC LIMIT ?"
-        params.append(limit)
-        return await self._db.fetchall(sql, params)
-
-    # ─── 赛程/赛果 ────────────────────────────────────────
-
-    async def add_match(
-        self, season: int, window_seq: int, round_no: int, home_team: str, away_team: str,
-        competition: str = "联赛", week_no: int | None = None,
-        day_no: int | None = None, match_time: str | None = None,
-    ) -> int:
-        """插入赛程行；重复导入（同轮次同赛事同主队）被忽略，返回实际插入数。"""
-        cur = await self._db.execute(
-            "INSERT OR IGNORE INTO matches (season_number, window_seq, round_no, competition, "
-            "home_team, away_team, week_no, day_no, match_time) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (season, window_seq, round_no, competition, home_team, away_team,
-             week_no, day_no, match_time),
-        )
-        try:
-            return cur.rowcount or 0
-        finally:
-            await cur.close()
+    # ─── matches（赛程/赛果同步面） ───────────────────────
 
     async def list_matches_by_season(self, season: int) -> list:
-        """取一季全部赛程行（含时刻快照与 tour 绑定），供时刻同步比对。"""
+        """取一季全部赛程行（v15 列集，含 tour 绑定与赛果），供全量同步比对。"""
         cur = await self._db.execute(
-            "SELECT id, round_no, competition, home_team, away_team, week_no, day_no, "
-            "match_time, tour_match_id, kickoff_source, result FROM matches "
-            "WHERE season_number=? ORDER BY round_no, id",
+            "SELECT id, season_number, tournament_id, competition, round_no, leg, stage_name, "
+            "home_team, away_team, home_score, away_score, pen_home, pen_away, result, score, "
+            "tour_status, walkover_side, weather, wx_coef, week_no, day_no, match_time, "
+            "tour_match_id, synced_at FROM matches "
+            "WHERE season_number=? ORDER BY round_no, leg, id",
             (season,),
         )
         try:
@@ -339,204 +105,181 @@ class StadiumDAO:
         finally:
             await cur.close()
 
-    async def set_match_kickoff(
-        self, match_id: int, week_no: int | None, day_no: int | None,
-        match_time: str | None, tour_match_id: int | None = None,
-        source: str = "tour",
-    ) -> None:
-        """写入时刻快照（tour 为真源，本地只存副本）并记下绑定锚点。"""
-        await self._db.execute(
-            "UPDATE matches SET week_no=?, day_no=?, match_time=?, tour_match_id=?, "
-            "kickoff_source=? WHERE id=?",
-            (week_no, day_no, match_time, tour_match_id, source, match_id),
+    async def upsert_match(
+        self, season: int, tournament_id: int, competition: str, round_no: int,
+        home_team: str, away_team: str, leg: int = 0, stage_name: str = "",
+        home_score: int | None = None, away_score: int | None = None,
+        pen_home: int | None = None, pen_away: int | None = None,
+        result: str | None = None, score: str | None = None,
+        tour_status: str = "pending", walkover_side: str | None = None,
+        week_no: int | None = None, day_no: int | None = None,
+        match_time: str | None = None, tour_match_id: int | None = None,
+        synced_at: str | None = None, match_id: int | None = None,
+    ) -> int:
+        """赛程行 upsert（tour 同步入口）：显式 match_id > tour_match_id > 唯一键。
+
+        命中已有行时覆盖 leg/比分/点球/result/score/tour_status/walkover/轮次/
+        时刻/tour_match_id/synced_at（stage_name 仅在传非空值时覆盖）；不触碰
+        weather/wx_coef（天气由插件本地管理）。返回 match id。
+        match_id 由引擎先做归一队名匹配后显式传入，跳过自匹配。
+        """
+        row = None
+        if match_id is not None:
+            row = await self._db.fetchone("SELECT id FROM matches WHERE id=?", (match_id,))
+        if row is None and tour_match_id is not None:
+            row = await self._db.fetchone(
+                "SELECT id FROM matches WHERE tour_match_id=?", (tour_match_id,)
+            )
+        if row is None:
+            row = await self._db.fetchone(
+                "SELECT id FROM matches WHERE season_number=? AND tournament_id=? "
+                "AND round_no=? AND leg=? AND home_team=? AND away_team=?",
+                (season, tournament_id, round_no, leg, home_team, away_team),
+            )
+        if row is not None:
+            await self._db.execute(
+                "UPDATE matches SET round_no=?, leg=?, "
+                "stage_name=COALESCE(NULLIF(?, ''), stage_name), "
+                "home_score=?, away_score=?, pen_home=?, pen_away=?, result=?, score=?, "
+                "tour_status=?, walkover_side=?, week_no=?, day_no=?, match_time=?, "
+                "tour_match_id=COALESCE(?, tour_match_id), synced_at=COALESCE(?, synced_at) "
+                "WHERE id=?",
+                (round_no, leg, stage_name, home_score, away_score, pen_home, pen_away,
+                 result, score, tour_status, walkover_side, week_no, day_no, match_time,
+                 tour_match_id, synced_at, row["id"]),
+            )
+            return int(row["id"])
+        cur = await self._db.execute(
+            "INSERT INTO matches (season_number, tournament_id, competition, round_no, leg, "
+            "stage_name, home_team, away_team, home_score, away_score, pen_home, pen_away, "
+            "result, score, tour_status, walkover_side, week_no, day_no, match_time, "
+            "tour_match_id, synced_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "
+            "?, ?, ?, ?, ?, ?)",
+            (season, tournament_id, competition, round_no, leg, stage_name, home_team,
+             away_team, home_score, away_score, pen_home, pen_away, result, score,
+             tour_status, walkover_side, week_no, day_no, match_time, tour_match_id,
+             synced_at),
         )
+        try:
+            return int(cur.lastrowid)
+        finally:
+            await cur.close()
 
-    async def clear_match_kickoff(self, match_id: int) -> None:
-        """清空时刻快照（tour 侧未排期时调用），绑定关系保留。"""
-        await self._db.execute(
-            "UPDATE matches SET week_no=NULL, day_no=NULL, match_time=NULL, "
-            "kickoff_source='tour' WHERE id=?",
-            (match_id,),
-        )
+    async def apply_match_sync_ops(self, ops: list, season: int) -> dict:
+        """事务执行一个赛事的赛程同步写批（单赛事独立事务，失败回滚）。
 
-    # ─── 命名轮次登记（同名即为同一轮，按（赛季,赛事）导入顺序定序） ──
-
-    async def get_named_round(self, season: int, competition: str, token: str) -> int | None:
-        """查询命名轮次（轮次文本）已登记的轮次号，未登记返回 None。"""
-        row = await self._db.fetchone(
-            "SELECT round_no FROM round_names WHERE season_number=? AND competition=? AND token=?",
-            (season, competition, token),
-        )
-        return int(row["round_no"]) if row else None
-
-    async def max_named_round_no(self, season: int, competition: str) -> int:
-        """该赛季该赛事已登记的最大轮次号（无则 0）。"""
-        row = await self._db.fetchone(
-            "SELECT COALESCE(MAX(round_no), 0) AS m FROM round_names "
-            "WHERE season_number=? AND competition=?",
-            (season, competition),
-        )
-        return int(row["m"]) if row else 0
-
-    async def add_named_round(self, season: int, competition: str, token: str) -> int:
-        """登记命名轮次：已存在返回原号，否则分配该赛事内下一个号并入库。
-
-        查重→取号→插入在同一事务内完成，防并发登记同一赛事时分配到相同轮次号。
+        ops 项：{"kind": "update", "id": int, "row": {展示字段}} 或
+        {"kind": "insert", "row": {...}}。返回 {"created": int, "updated": int}。
         """
         async def work(conn):
-            cur = await conn.execute(
-                "SELECT round_no FROM round_names WHERE season_number=? AND competition=? AND token=?",
-                (season, competition, token),
-            )
-            try:
-                row = await cur.fetchone()
-            finally:
-                await cur.close()
-            if row:
-                return int(row["round_no"])
-            cur = await conn.execute(
-                "SELECT COALESCE(MAX(round_no), 0) AS m FROM round_names "
-                "WHERE season_number=? AND competition=?",
-                (season, competition),
-            )
-            try:
-                row = await cur.fetchone()
-            finally:
-                await cur.close()
-            next_no = (int(row["m"]) if row else 0) + 1
-            await conn.execute(
-                "INSERT OR IGNORE INTO round_names (season_number, competition, token, round_no) "
-                "VALUES (?, ?, ?, ?)",
-                (season, competition, token, next_no),
-            )
-            return next_no
+            created = updated = 0
+            for op in ops:
+                row = op["row"]
+                if op["kind"] == "update":
+                    await conn.execute(
+                        "UPDATE matches SET round_no=?, leg=?, stage_name=?, "
+                        "home_team=?, away_team=?, home_score=?, away_score=?, "
+                        "pen_home=?, pen_away=?, result=?, score=?, tour_status=?, "
+                        "walkover_side=?, "
+                        # tour 未排期（week/day/time 为 NULL）不覆盖本地时刻：
+                        # CSV 导入等本地快照保留，tour 排期后非空值照常覆盖
+                        "week_no=COALESCE(?, week_no), day_no=COALESCE(?, day_no), "
+                        "match_time=COALESCE(?, match_time), "
+                        "tour_match_id=?, synced_at=? WHERE id=? AND season_number=?",
+                        (
+                            row["round_no"], row["leg"], row["stage_name"],
+                            row["home_team"], row["away_team"], row["home_score"],
+                            row["away_score"], row["pen_home"], row["pen_away"],
+                            row["result"], row["score"], row["tour_status"],
+                            row["walkover_side"], row["week_no"], row["day_no"],
+                            row["match_time"], row["tour_match_id"], row["synced_at"],
+                            op["id"], season,
+                        ),
+                    )
+                    updated += 1
+                else:
+                    await conn.execute(
+                        "INSERT INTO matches (season_number, tournament_id, competition, "
+                        "round_no, leg, stage_name, home_team, away_team, home_score, "
+                        "away_score, pen_home, pen_away, result, score, tour_status, "
+                        "walkover_side, week_no, day_no, match_time, tour_match_id, "
+                        "synced_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "
+                        "?, ?, ?, ?, ?, ?)",
+                        (
+                            season, row["tournament_id"], row["competition"],
+                            row["round_no"], row["leg"], row["stage_name"],
+                            row["home_team"], row["away_team"], row["home_score"],
+                            row["away_score"], row["pen_home"], row["pen_away"],
+                            row["result"], row["score"], row["tour_status"],
+                            row["walkover_side"], row["week_no"], row["day_no"],
+                            row["match_time"], row["tour_match_id"], row["synced_at"],
+                        ),
+                    )
+                    created += 1
+            return {"created": created, "updated": updated}
 
         return await self._db.execute_transaction(work)
 
     async def get_round_matches(
-        self, season: int, window_seq: int, round_no: int, competition: str | None = None
-    ) -> list:
-        if competition:
-            return await self._db.fetchall(
-                "SELECT * FROM matches WHERE season_number=? AND window_seq=? AND round_no=? "
-                "AND competition=? ORDER BY id",
-                (season, window_seq, round_no, competition),
-            )
-        return await self._db.fetchall(
-            "SELECT * FROM matches WHERE season_number=? AND window_seq=? AND round_no=? ORDER BY id",
-            (season, window_seq, round_no),
-        )
-
-    async def get_round_matches_latest(
         self, season: int, round_no: int, competition: str | None = None
     ) -> list:
-        """该轮最近一次出现的窗口里的全部行（含已推进窗口）。
+        """按赛季 + 轮次（可选赛事）取全部赛程行（v15：无 window 过滤）。
 
-        轮次号在同一赛季内唯一，但窗口推进会改变 window_seq；看赛程图不应被
-        当前窗口挡住，故按 MAX(window_seq) 回落。
+        赛事按等价文本集匹配：「联赛」迁移行与「顶级联赛」新行同轮可并存，
+        顶级联赛查询两者都命中（competition_texts）。
         """
-        where = "season_number=? AND round_no=?"
-        params: list = [season, round_no]
-        if competition:
-            where += " AND competition=?"
-            params.append(competition)
+        texts = competition_texts(competition)
+        if texts:
+            marks = ",".join("?" for _ in texts)
+            return await self._db.fetchall(
+                f"SELECT * FROM matches WHERE season_number=? AND round_no=? "
+                f"AND competition IN ({marks}) "
+                "ORDER BY tournament_id, leg, id",
+                (season, round_no, *texts),
+            )
         return await self._db.fetchall(
-            f"SELECT * FROM matches WHERE {where} AND window_seq=("
-            f"SELECT MAX(window_seq) FROM matches WHERE {where}) ORDER BY id",
-            tuple(params + params),
+            "SELECT * FROM matches WHERE season_number=? AND round_no=? "
+            "ORDER BY tournament_id, leg, id",
+            (season, round_no),
         )
 
-    async def get_window_matches(self, season: int, window_seq: int) -> list:
-        return await self._db.fetchall(
-            "SELECT * FROM matches WHERE season_number=? AND window_seq=? ORDER BY round_no, id",
-            (season, window_seq),
-        )
+    # ─── 天气 ─────────────────────────────────────────────
 
-    async def get_home_matches_window(self, team_name: str, season: int, window_seq: int) -> list:
-        return await self._db.fetchall(
-            "SELECT * FROM matches WHERE home_team=? AND season_number=? AND window_seq=? ORDER BY id",
-            (team_name, season, window_seq),
-        )
+    async def set_match_weather(
+        self, season: int, tournament_id: int, round_no: int,
+        weather: str, wx_coef: float | None = None,
+    ) -> int:
+        """轮级写天气（预报/覆盖）。wx_coef 非空时一并固化；为空保留原系数（COALESCE）。
 
-    async def get_home_matches_all(self, team_name: str) -> list:
-        return await self._db.fetchall(
-            "SELECT * FROM matches WHERE home_team=? ORDER BY season_number, window_seq, round_no",
-            (team_name,),
-        )
-
-    async def get_home_matches_season(self, team_name: str, season: int) -> list:
-        return await self._db.fetchall(
-            "SELECT * FROM matches WHERE home_team=? AND season_number=? "
-            "ORDER BY window_seq, round_no, id",
-            (team_name, season),
-        )
-
-    async def get_last_results(self, team_name: str, limit: int = 3) -> list:
-        """最近 limit 场已置赛果（取消场次 C 不计入，也不占「近 N 场」名额）。"""
-        rows = await self._db.fetchall(
-            "SELECT * FROM matches WHERE home_team=? AND result IS NOT NULL "
-            "ORDER BY season_number DESC, window_seq DESC, round_no DESC LIMIT ?",
-            (team_name, max(limit * 5, 20)),
-        )
-        return [r for r in rows if r["result"] != "C"][:limit]
-
-    async def get_team_results_recent(self, team_name: str, limit: int = 3) -> list:
-        """最近 limit 场已置赛果（主客场都算），主客场视角统一换算为该队 W/D/L。
-
-        行新增 result_team 列（W/D/L/C），供连胜/低迷判定使用。
+        返回受影响行数。
         """
-        rows = await self._db.fetchall(
-            "SELECT * FROM matches WHERE (home_team=? OR away_team=?) AND result IS NOT NULL "
-            "ORDER BY season_number DESC, window_seq DESC, round_no DESC LIMIT ?",
-            (team_name, team_name, max(limit * 5, 20)),
+        cur = await self._db.execute(
+            "UPDATE matches SET weather=?, wx_coef=COALESCE(?, wx_coef) "
+            "WHERE season_number=? AND tournament_id=? AND round_no=?",
+            (weather, wx_coef, season, tournament_id, round_no),
         )
-        out = []
-        for r in rows:
-            if r["result"] == "C":
-                continue
-            res = r["result"]
-            if r["home_team"] != team_name and res in ("W", "L"):
-                res = "L" if res == "W" else "W"
-            out.append({**r, "result_team": res})
-            if len(out) >= limit:
-                break
-        return out
+        try:
+            return cur.rowcount or 0
+        finally:
+            await cur.close()
 
-    async def get_season_result_matches(self, season: int) -> list:
-        """该赛季已有赛果且有比分的场次（冠军积分只认有比分的场次，缺比分跳过）。"""
-        return await self._db.fetchall(
-            "SELECT * FROM matches WHERE season_number=? AND result IS NOT NULL "
-            "AND result!='C' AND score IS NOT NULL AND score!=''",
-            (season,),
-        )
-
-    async def get_team_matches_window(self, team_name: str, season: int, window_seq: int) -> list:
-        """该窗口该队全部场次（主客场都算），战绩信号用。"""
-        return await self._db.fetchall(
-            "SELECT * FROM matches WHERE (home_team=? OR away_team=?) "
-            "AND season_number=? AND window_seq=? ORDER BY round_no, id",
-            (team_name, team_name, season, window_seq),
-        )
-
-    async def get_window_choice_outcomes(self, team_name: str, season: int, window_seq: int) -> list:
-        """该队该窗口已结算选择的 outcome JSON 列表（事件满意度信号回读用）。"""
-        return await self._db.fetchall(
-            "SELECT outcome FROM event_choices WHERE team_name=? AND season_number=? "
-            "AND window_seq=? AND resolved=1",
-            (team_name, season, window_seq),
-        )
-
-    async def set_match_weather(self, match_id: int, weather: str, wx_coef: float | None = None) -> None:
-        """写天气（覆盖/预报）。wx_coef 非空时一并固化；为空保留原系数（COALESCE）。"""
+    async def set_match_weather_by_id(
+        self, match_id: int, weather: str, wx_coef: float | None = None,
+    ) -> None:
+        """按行写天气（预报逐行抽签/手动覆盖单队）。wx_coef 非空一并固化。"""
         await self._db.execute(
             "UPDATE matches SET weather=?, wx_coef=COALESCE(?, wx_coef) WHERE id=?",
             (weather, wx_coef, match_id),
         )
 
-    async def fill_wx_coef(self, match_id: int, coef: float) -> int:
-        """补抽落库：仅当 wx_coef 仍为 NULL 时写入，返回受影响行数（0=已有系数，幂等）。"""
+    async def fill_wx_coef(
+        self, season: int, tournament_id: int, round_no: int, coef: float
+    ) -> int:
+        """补抽落库（轮级）：仅当 wx_coef 仍为 NULL 时写入，返回受影响行数（0=已固化，幂等）。"""
         cur = await self._db.execute(
-            "UPDATE matches SET wx_coef=? WHERE id=? AND wx_coef IS NULL", (coef, match_id)
+            "UPDATE matches SET wx_coef=? WHERE season_number=? AND tournament_id=? "
+            "AND round_no=? AND wx_coef IS NULL",
+            (coef, season, tournament_id, round_no),
         )
         try:
             return cur.rowcount or 0
@@ -547,751 +290,5 @@ class StadiumDAO:
         """全部已预报天气的场次（按赛季/赛事/轮次排序），供天气推送逐轮遍历。"""
         return await self._db.fetchall(
             "SELECT * FROM matches WHERE weather IS NOT NULL AND weather<>'' "
-            "ORDER BY season_number, competition, round_no, id"
-        )
-
-    async def update_match_revenues(
-        self, match_id: int, attendance: int,
-        ticket_revenue: float, commercial: float, broadcast: float,
-    ) -> None:
-        """订正已结算场次的上座/收入（不动 result/score）。"""
-        await self._db.execute(
-            "UPDATE matches SET attendance=?, ticket_revenue=?, commercial=?, broadcast=? WHERE id=?",
-            (attendance, ticket_revenue, commercial, broadcast, match_id),
-        )
-
-    async def has_txn_note(self, note: str) -> bool:
-        """按流水备注查重（天气订正幂等锚：同一场只订正一次）。"""
-        row = await self._db.fetchone(
-            "SELECT 1 FROM revenue_transactions WHERE note=? LIMIT 1", (note,)
-        )
-        return row is not None
-
-    async def apply_weather_correction(
-        self, match_id: int, wx_coef: float, attendance: int,
-        ticket_revenue: float, commercial: float, broadcast: float,
-        team_name: str, season: int, window_seq: int,
-        entries: list, expect_attendance: int | None,
-    ) -> bool:
-        """天气订正单事务落盘：固化系数 + 改写该场上座收入 + 追加冲正流水 + 同步余额。
-
-        守卫 `wx_coef IS NULL AND attendance IS ?`：同一场只订正一次，
-        并发/重复调用返回 False 且不记账（调用方据此跳过）。
-        entries: [(kind, amount, note, round_no), ...]，amount 可为负（收回）。
-        """
-        async def work(conn):
-            cur = await conn.execute(
-                "UPDATE matches SET wx_coef=?, attendance=?, ticket_revenue=?, commercial=?, broadcast=? "
-                "WHERE id=? AND wx_coef IS NULL AND attendance IS ?",
-                (wx_coef, attendance, ticket_revenue, commercial, broadcast,
-                 match_id, expect_attendance),
-            )
-            try:
-                if (cur.rowcount or 0) == 0:
-                    return False
-            finally:
-                await cur.close()
-            delta = 0.0
-            for kind, amount, note, round_no in entries:
-                delta += amount
-                cur = await conn.execute(
-                    "INSERT INTO revenue_transactions (team_name, season_number, window_seq, round_no, kind, amount, note) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                    (team_name, season, window_seq, round_no, kind, amount, note),
-                )
-                await cur.close()
-            if delta:
-                await conn.execute(
-                    "UPDATE club_balance SET balance=balance+?, updated_at=datetime('now','localtime') WHERE team_name=?",
-                    (delta, team_name),
-                )
-            return True
-
-        return await self._db.execute_transaction(work)
-
-    async def get_match(self, match_id: int):
-        return await self._db.fetchone("SELECT * FROM matches WHERE id=?", (match_id,))
-
-    async def set_match_result(
-        self, match_id: int, result: str, attendance: int,
-        ticket_revenue: float, commercial: float, broadcast: float, score: str | None = None,
-    ) -> None:
-        await self._db.execute(
-            "UPDATE matches SET result=?, score=?, attendance=?, ticket_revenue=?, commercial=?, broadcast=? WHERE id=?",
-            (result, score, attendance, ticket_revenue, commercial, broadcast, match_id),
-        )
-
-    async def claim_match_result(
-        self, match_id: int, result: str, attendance: int,
-        ticket_revenue: float, commercial: float, broadcast: float, score: str | None = None,
-    ) -> int:
-        """原子认领赛果录入：仅当 result 仍为 NULL 时写入，返回受影响行数（0=已被并发录入）。
-
-        记账（apply_balance/add_transaction）必须在本方法返回 1 之后进行，
-        防止并发录入对同一场比赛重复付款。
-        """
-        cur = await self._db.execute(
-            "UPDATE matches SET result=?, score=?, attendance=?, ticket_revenue=?, commercial=?, broadcast=? "
-            "WHERE id=? AND result IS NULL",
-            (result, score, attendance, ticket_revenue, commercial, broadcast, match_id),
-        )
-        try:
-            return cur.rowcount or 0
-        finally:
-            await cur.close()
-
-    # ─── 影响力历史 ───────────────────────────────────────
-
-    async def add_influence_history(
-        self, team_name: str, season: int, window_seq: int, influence: float
-    ) -> None:
-        await self._db.execute(
-            "INSERT OR REPLACE INTO influence_history (team_name, season_number, window_seq, influence) "
-            "VALUES (?, ?, ?, ?)",
-            (team_name, season, window_seq, influence),
-        )
-
-    # ─── 冠名 ─────────────────────────────────────────────
-
-    async def get_active_naming(self, team_name: str):
-        return await self._db.fetchone(
-            "SELECT * FROM naming_rights WHERE team_name=? AND status='active'", (team_name,)
-        )
-
-    async def add_naming(
-        self, team_name: str, brand: str, heat: float, fee_per_window: float,
-        windows_total: int, season: int, window_seq: int,
-        package_json: str = "{}",
-    ) -> None:
-        # team_name UNIQUE（一队一行）：顶替同队 expired/terminated 旧行；active 冲突由服务层校验拦截
-        await self._db.execute(
-            "INSERT OR REPLACE INTO naming_rights (team_name, brand, heat, fee_per_window, windows_total, "
-            "windows_remaining, status, signed_season, signed_window, package_json) "
-            "VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?, ?)",
-            (team_name, brand, heat, fee_per_window, windows_total, windows_total,
-             season, window_seq, package_json),
-        )
-
-    async def renew_naming(self, team_name: str, fee_per_window: float, windows_total: int,
-                           season: int, window_seq: int, package_json: str = "{}") -> None:
-        """续约原地换约：费用/窗口总数与剩余/签约期/套餐快照一次更新（无缝直签）。"""
-        await self._db.execute(
-            "UPDATE naming_rights SET fee_per_window=?, windows_total=?, windows_remaining=?, "
-            "package_json=?, signed_season=?, signed_window=? "
-            "WHERE team_name=? AND status='active'",
-            (fee_per_window, windows_total, windows_total, package_json,
-             season, window_seq, team_name),
-        )
-
-    async def tick_naming(self, team_name: str) -> None:
-        await self._db.execute(
-            "UPDATE naming_rights SET windows_remaining=windows_remaining-1 "
-            "WHERE team_name=? AND status='active'",
-            (team_name,),
-        )
-
-    async def expire_namings(self) -> None:
-        await self._db.execute(
-            "UPDATE naming_rights SET status='expired' WHERE status='active' AND windows_remaining<=0"
-        )
-
-    async def terminate_naming(self, team_name: str) -> None:
-        await self._db.execute(
-            "UPDATE naming_rights SET status='terminated', windows_remaining=0 "
-            "WHERE team_name=? AND status='active'",
-            (team_name,),
-        )
-
-    # ─── 品牌池 ───────────────────────────────────────────
-
-    async def add_brand(self, brand: str, heat: float, source: str, status: str = "adopted",
-                        industry: str = "通用", tier: str = "口碑", pitch: str = "",
-                        packages_json: str = "{}") -> None:
-        await self._db.execute(
-            "INSERT OR IGNORE INTO brand_pool (brand, heat, source, status, industry, tier, pitch, packages_json) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (brand, heat, source, status, industry, tier, pitch, packages_json),
-        )
-
-    async def get_brand_by_name(self, brand: str):
-        return await self._db.fetchone(
-            "SELECT * FROM brand_pool WHERE brand=?", (brand,)
-        )
-
-    async def get_brand(self, brand_id: int):
-        return await self._db.fetchone(
-            "SELECT * FROM brand_pool WHERE id=?", (brand_id,)
-        )
-
-    async def list_brands(self, status: str | None = None) -> list:
-        if status is None:
-            return await self._db.fetchall("SELECT * FROM brand_pool ORDER BY id")
-        return await self._db.fetchall(
-            "SELECT * FROM brand_pool WHERE status=? ORDER BY id", (status,)
-        )
-
-    async def adopt_brand(self, brand_id: int) -> None:
-        await self._db.execute(
-            "UPDATE brand_pool SET status='adopted' WHERE id=? AND status='pending'", (brand_id,)
-        )
-
-    async def discard_brand(self, brand_id: int) -> None:
-        await self._db.execute(
-            "UPDATE brand_pool SET status='discarded' WHERE id=? AND status='pending'", (brand_id,)
-        )
-
-    async def update_brand_heat(self, brand_id: int, heat: float) -> None:
-        await self._db.execute(
-            "UPDATE brand_pool SET heat=? WHERE id=?", (heat, brand_id)
-        )
-
-    async def update_naming_satisfaction(self, team_name: str, satisfaction: float) -> None:
-        await self._db.execute(
-            "UPDATE naming_rights SET satisfaction=? WHERE team_name=? AND status='active'",
-            (satisfaction, team_name),
-        )
-
-    async def update_brand_tier(self, brand_id: int, tier: str, industry: str | None = None,
-                                lock: bool = False) -> None:
-        """档位写入；lock=True 同时锁档（退出自动排名）。"""
-        sets, params = ["tier=?"], [tier]
-        if industry is not None:
-            sets.append("industry=?")
-            params.append(industry)
-        if lock:
-            sets.append("tier_locked=1")
-        params.append(brand_id)
-        await self._db.execute(
-            f"UPDATE brand_pool SET {', '.join(sets)} WHERE id=?", params
-        )
-
-    async def count_active_namings_by_brand(self, brand: str) -> int:
-        cur = await self._db.execute(
-            "SELECT COUNT(*) AS n FROM naming_rights WHERE brand=? AND status='active'", (brand,)
-        )
-        try:
-            row = await cur.fetchone()
-            return int(row["n"]) if row else 0
-        finally:
-            await cur.close()
-
-    # ─── 冠名权市场 ───────────────────────────────────────
-
-    async def get_market_round(self, season: int, window_seq: int):
-        return await self._db.fetchone(
-            "SELECT * FROM market_rounds WHERE season_number=? AND window_seq=?",
-            (season, window_seq),
-        )
-
-    async def list_open_rounds(self) -> list:
-        return await self._db.fetchall("SELECT * FROM market_rounds WHERE status='open' ORDER BY id")
-
-    async def open_market_round(self, season: int, window_seq: int, bid_mode: str,
-                                opened_by: str) -> int:
-        """开启招商轮；同窗已存在（推进幂等）时返回既有轮 id。"""
-        row = await self.get_market_round(season, window_seq)
-        if row:
-            return int(row["id"])
-        cur = await self._db.execute(
-            "INSERT INTO market_rounds (season_number, window_seq, bid_mode, status, opened_by) "
-            "VALUES (?, ?, ?, 'open', ?)",
-            (season, window_seq, bid_mode, opened_by),
-        )
-        try:
-            return int(cur.lastrowid or 0)
-        finally:
-            await cur.close()
-
-    async def settle_market_round(self, round_id: int) -> None:
-        """轮次收口：未成交报价作废+轮置 settled，同事务。"""
-        async def work(conn):
-            await conn.execute(
-                "UPDATE market_offers SET status='expired' WHERE round_id=? AND status='pending'",
-                (round_id,),
-            )
-            await conn.execute(
-                "UPDATE market_rounds SET status='settled', settled_at=datetime('now','localtime') "
-                "WHERE id=? AND status='open'",
-                (round_id,),
-            )
-        await self._db.execute_transaction(work)
-
-    async def add_market_offer(self, round_id: int, brand_id: int, team_name: str,
-                               package_no: int, amount: float, windows: int,
-                               package_json: str, expire_at: str | None) -> int:
-        cur = await self._db.execute(
-            "INSERT OR IGNORE INTO market_offers (round_id, brand_id, team_name, package_no, "
-            "amount, windows, package_json, status, expire_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?)",
-            (round_id, brand_id, team_name, package_no, amount, windows, package_json, expire_at),
-        )
-        try:
-            return int(cur.lastrowid or 0)
-        finally:
-            await cur.close()
-
-    async def list_round_offers(self, round_id: int) -> list:
-        return await self._db.fetchall(
-            "SELECT o.*, b.brand, b.tier, b.industry, b.pitch FROM market_offers o "
-            "JOIN brand_pool b ON b.id=o.brand_id WHERE o.round_id=? ORDER BY o.id",
-            (round_id,),
-        )
-
-    async def get_market_offer(self, offer_id: int):
-        return await self._db.fetchone(
-            "SELECT o.*, b.brand, b.tier, b.industry, b.pitch, "
-            "r.status AS round_status, r.bid_mode AS round_mode "
-            "FROM market_offers o JOIN brand_pool b ON b.id=o.brand_id "
-            "JOIN market_rounds r ON r.id=o.round_id WHERE o.id=?",
-            (offer_id,),
-        )
-
-    async def delete_market_offer(self, offer_id: int) -> int:
-        """删除仍处 pending 的报价行；已被签约/过期的不删，返回删除行数。"""
-        cur = await self._db.execute(
-            "DELETE FROM market_offers WHERE id=? AND status='pending'", (offer_id,),
-        )
-        try:
-            return int(cur.rowcount or 0)
-        finally:
-            await cur.close()
-
-    async def list_pending_offers_for_team(self, team_name: str) -> list:
-        """本队当前收到的报价（挂 open 轮；含已过期，展示层标注）。"""
-        return await self._db.fetchall(
-            "SELECT o.*, b.brand, b.tier, b.industry, b.pitch FROM market_offers o "
-            "JOIN brand_pool b ON b.id=o.brand_id "
-            "JOIN market_rounds r ON r.id=o.round_id "
-            "WHERE o.team_name=? AND r.status='open' ORDER BY o.id",
-            (team_name,),
-        )
-
-    async def list_fcfs_offers(self) -> list:
-        """先到先得公开挂价（team_name=''，open 轮）。"""
-        return await self._db.fetchall(
-            "SELECT o.*, b.brand, b.tier, b.industry, b.pitch FROM market_offers o "
-            "JOIN brand_pool b ON b.id=o.brand_id "
-            "JOIN market_rounds r ON r.id=o.round_id "
-            "WHERE o.team_name='' AND o.status='pending' AND r.status='open' ORDER BY o.id",
-        )
-
-    async def expire_stale_offers(self) -> int:
-        """TTL 懒清理：expire_at 已到的 pending 报价置 expired，返回数量。"""
-        cur = await self._db.execute(
-            "UPDATE market_offers SET status='expired' "
-            "WHERE status='pending' AND expire_at IS NOT NULL AND expire_at <= ?",
-            (self._now_str(),),
-        )
-        return max(0, cur.rowcount)
-
-    async def accept_market_offer(self, offer_id: int, team_name: str, season: int,
-                                  window_seq: int, brand_quota: int | None = None) -> dict | None:
-        """原子签约：报价认领与合同写入同事务（防先到先得/独家名额并发双签）。
-
-        服务层已做前置校验，此处兜底复查（报价 pending、未过期、定向匹配、队无
-        active 冠名、品牌档位名额）；任一失败返回 None，整体回滚。brand_quota
-        非空时在事务内复查品牌生效冠名数（服务层检查与事务提交之间无原子性）。
-        """
-        async def work(conn):
-            cur = await conn.execute("SELECT * FROM market_offers WHERE id=?", (offer_id,))
-            try:
-                offer = await cur.fetchone()
-            finally:
-                await cur.close()
-            if not offer or offer["status"] != "pending":
-                return None
-            if offer["expire_at"] is not None and offer["expire_at"] <= self._now_str():
-                return None
-            if offer["team_name"] and offer["team_name"] != team_name:
-                return None
-            cur = await conn.execute(
-                "SELECT id FROM naming_rights WHERE team_name=? AND status='active'", (team_name,)
-            )
-            try:
-                if await cur.fetchone():
-                    return None
-            finally:
-                await cur.close()
-            cur = await conn.execute(
-                "SELECT brand, heat FROM brand_pool WHERE id=?", (offer["brand_id"],)
-            )
-            try:
-                brand_row = await cur.fetchone()
-            finally:
-                await cur.close()
-            if not brand_row:
-                return None
-            if brand_quota is not None:
-                cur = await conn.execute(
-                    "SELECT COUNT(*) AS n FROM naming_rights WHERE brand=? AND status='active'",
-                    (brand_row["brand"],),
-                )
-                try:
-                    used = await cur.fetchone()
-                finally:
-                    await cur.close()
-                if used and int(used["n"]) >= int(brand_quota):
-                    return None
-            await conn.execute(
-                "INSERT OR REPLACE INTO naming_rights (team_name, brand, heat, fee_per_window, "
-                "windows_total, windows_remaining, status, signed_season, signed_window, package_json) "
-                "VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?, ?)",
-                (team_name, brand_row["brand"], float(brand_row["heat"]), float(offer["amount"]),
-                 int(offer["windows"]), int(offer["windows"]), season, window_seq,
-                 offer["package_json"]),
-            )
-            await conn.execute(
-                "UPDATE market_offers SET status='accepted' WHERE id=?", (offer_id,)
-            )
-            return {"brand": brand_row["brand"], "amount": float(offer["amount"]),
-                    "windows": int(offer["windows"]), "package_json": offer["package_json"]}
-        return await self._db.execute_transaction(work)
-
-    # ─── 窗口死忠快照（对赌奖金 redo 口径） ─────────────────
-
-    async def upsert_window_fans_log(self, season: int, window_seq: int, team_name: str,
-                                     fans_before: float, fans_after: float) -> None:
-        await self._db.execute(
-            "INSERT OR REPLACE INTO window_fans_log (season_number, window_seq, team_name, fans_before, fans_after) "
-            "VALUES (?, ?, ?, ?, ?)",
-            (season, window_seq, team_name, float(fans_before), float(fans_after)),
-        )
-
-    async def get_window_fans_log(self, season: int, window_seq: int, team_name: str) -> dict | None:
-        cur = await self._db.execute(
-            "SELECT * FROM window_fans_log WHERE season_number=? AND window_seq=? AND team_name=?",
-            (season, window_seq, team_name),
-        )
-        try:
-            return await cur.fetchone()
-        finally:
-            await cur.close()
-
-    # ─── 档期 ─────────────────────────────────────────────
-
-    async def add_booking(
-        self, team_name: str, season: int, window_seq: int, slot_no: int,
-        activity_type: str, booked_by: str,
-    ) -> None:
-        await self._db.execute(
-            "INSERT OR REPLACE INTO venue_bookings (team_name, season_number, window_seq, slot_no, activity_type, booked_by) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            (team_name, season, window_seq, slot_no, activity_type, booked_by),
-        )
-
-    async def book_activity(self, team_name: str, activity_type: str,
-                            slot_no: int, booked_by: str = "") -> dict:
-        """预订本窗口档期：赛程状态读取、占用检查与写入同事务，
-        防止与 /主场推进 并发时订到旧窗口，且覆盖已有预订时返回原活动。"""
-        async def work(conn):
-            cur = await conn.execute(
-                "SELECT season_number, window_seq FROM league_state WHERE id=1"
-            )
-            try:
-                state_row = await cur.fetchone()
-            finally:
-                await cur.close()
-            season = int(state_row["season_number"]) if state_row else 1
-            window_seq = int(state_row["window_seq"]) if state_row else 1
-            cur = await conn.execute(
-                "SELECT activity_type FROM venue_bookings "
-                "WHERE team_name=? AND season_number=? AND window_seq=? AND slot_no=?",
-                (team_name, season, window_seq, slot_no),
-            )
-            try:
-                prev = await cur.fetchone()
-            finally:
-                await cur.close()
-            await conn.execute(
-                "INSERT OR REPLACE INTO venue_bookings (team_name, season_number, window_seq, slot_no, activity_type, booked_by) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
-                (team_name, season, window_seq, slot_no, activity_type, booked_by),
-            )
-            return {"season": season, "window_seq": window_seq,
-                    "replaced": prev["activity_type"] if prev else None}
-
-        return await self._db.execute_transaction(work)
-
-    async def get_bookings(self, team_name: str, season: int, window_seq: int) -> list:
-        return await self._db.fetchall(
-            "SELECT * FROM venue_bookings WHERE team_name=? AND season_number=? AND window_seq=? ORDER BY slot_no",
-            (team_name, season, window_seq),
-        )
-
-    async def delete_booking(self, team_name: str, season: int, window_seq: int,
-                             slot_no: int) -> int:
-        cur = await self._db.execute(
-            "DELETE FROM venue_bookings WHERE team_name=? AND season_number=? "
-            "AND window_seq=? AND slot_no=?",
-            (team_name, season, window_seq, slot_no),
-        )
-        try:
-            return int(cur.rowcount or 0)
-        finally:
-            await cur.close()
-
-    async def clear_bookings(self, season: int, window_seq: int) -> None:
-        await self._db.execute(
-            "DELETE FROM venue_bookings WHERE season_number=? AND window_seq=?", (season, window_seq)
-        )
-
-    # ─── 事件池/日志 ──────────────────────────────────────
-
-    async def upsert_event(self, event_id: str, name: str, category: str, weight: int,
-                           conditions_json: str, effects_json: str, template: str,
-                           source: str, status: str,
-                           event_type: str = "instant", options_json: str = "{}",
-                           soft_conditions: int = 0) -> None:
-        await self._db.execute(
-            "INSERT OR REPLACE INTO event_pool (event_id, name, category, weight, conditions_json, "
-            "effects_json, options_json, soft_conditions, event_type, template, source, status) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (event_id, name, category, weight, conditions_json, effects_json,
-             options_json, int(soft_conditions), event_type, template, source, status),
-        )
-
-    async def get_last_finished_home(self, team_name: str):
-        """最近一场已完赛（result 非空）主场；无则 None。"""
-        return await self._db.fetchone(
-            "SELECT * FROM matches WHERE home_team=? AND result IS NOT NULL "
-            "ORDER BY id DESC LIMIT 1", (team_name,)
-        )
-
-    async def list_events(self, status: str | None = None) -> list:
-        if status is None:
-            return await self._db.fetchall("SELECT * FROM event_pool ORDER BY id")
-        return await self._db.fetchall(
-            "SELECT * FROM event_pool WHERE status=? ORDER BY id", (status,)
-        )
-
-    async def adopt_event(self, event_id: int) -> None:
-        await self._db.execute(
-            "UPDATE event_pool SET status='adopted' WHERE id=? AND status='pending'", (event_id,)
-        )
-
-    async def discard_event(self, event_id: int) -> None:
-        await self._db.execute(
-            "UPDATE event_pool SET status='discarded' WHERE id=? AND status='pending'", (event_id,)
-        )
-
-    async def add_event_log(
-        self, team_name: str, season: int, window_seq: int, event_id: str,
-        effect_json: str, text: str,
-    ) -> None:
-        await self._db.execute(
-            "INSERT INTO events_log (team_name, season_number, window_seq, event_id, effect_json, text) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            (team_name, season, window_seq, event_id, effect_json, text),
-        )
-
-    async def update_event_log_text(self, team_name: str, event_id: str, text: str) -> None:
-        await self._db.execute(
-            "UPDATE events_log SET text=? WHERE id = "
-            "(SELECT id FROM events_log WHERE team_name=? AND event_id=? "
-            "ORDER BY id DESC LIMIT 1)",
-            (text, team_name, event_id),
-        )
-
-    async def get_window_events(self, team_name: str, season: int, window_seq: int) -> list:
-        return await self._db.fetchall(
-            "SELECT * FROM events_log WHERE team_name=? AND season_number=? AND window_seq=? ORDER BY id",
-            (team_name, season, window_seq),
-        )
-
-    async def get_window_events_all(self, season: int, window_seq: int) -> list:
-        """窗口内全部球队的事件日志（回退全局最近一次分配用）。"""
-        return await self._db.fetchall(
-            "SELECT * FROM events_log WHERE season_number=? AND window_seq=? ORDER BY id",
-            (season, window_seq),
-        )
-
-    async def fetch_event_by_id(self, event_id: str):
-        return await self._db.fetchone(
-            "SELECT * FROM event_pool WHERE event_id=?", (event_id,)
-        )
-
-    async def delete_event_log_by_id(self, log_id: int) -> None:
-        """取消即发事件：删除其单条日志行（最新一条实例）。"""
-        await self._db.execute(
-            "DELETE FROM events_log WHERE id=?", (int(log_id),)
-        )
-
-    async def delete_event_logs(self, team_name: str, season: int, window_seq: int,
-                                event_id: str) -> int:
-        """取消选择事件：删除该实例（同队同窗口同事件）的全部广播/结果日志行。"""
-        cur = await self._db.execute(
-            "DELETE FROM events_log WHERE team_name=? AND season_number=? AND window_seq=? AND event_id=?",
-            (team_name, season, window_seq, event_id),
-        )
-        try:
-            return cur.rowcount or 0
-        finally:
-            await cur.close()
-
-    # ─── 事件选择（玩家决策） ─────────────────────────────
-
-    async def add_event_choice(self, team_name: str, season: int, window_seq: int,
-                               event_id: str) -> None:
-        """记录一条待定选择（同队同窗口同事件幂等）。"""
-        await self._db.execute(
-            "INSERT OR IGNORE INTO event_choices (team_name, season_number, window_seq, event_id) "
-            "VALUES (?, ?, ?, ?)",
-            (team_name, season, window_seq, event_id),
-        )
-
-    async def get_event_choice(self, team_name: str, season: int, window_seq: int,
-                               event_id: str):
-        return await self._db.fetchone(
-            "SELECT * FROM event_choices WHERE team_name=? AND season_number=? AND window_seq=? AND event_id=?",
-            (team_name, season, window_seq, event_id),
-        )
-
-    async def set_event_choice(self, team_name: str, season: int, window_seq: int,
-                               event_id: str, choice_no: int) -> None:
-        await self._db.execute(
-            "UPDATE event_choices SET choice_no=? "
-            "WHERE team_name=? AND season_number=? AND window_seq=? AND event_id=?",
-            (choice_no, team_name, season, window_seq, event_id),
-        )
-
-    async def list_event_choices(self, season: int, window_seq: int) -> list:
-        return await self._db.fetchall(
-            "SELECT * FROM event_choices WHERE season_number=? AND window_seq=? ORDER BY team_name, id",
-            (season, window_seq),
-        )
-
-    async def get_unresolved_choices(self, season: int, window_seq: int) -> list:
-        return await self._db.fetchall(
-            "SELECT * FROM event_choices WHERE season_number=? AND window_seq=? AND resolved=0 "
-            "ORDER BY team_name, id",
-            (season, window_seq),
-        )
-
-    async def mark_choice_resolved(self, choice_id: int, outcome_json: str) -> None:
-        await self._db.execute(
-            "UPDATE event_choices SET resolved=1, outcome=? WHERE id=?",
-            (outcome_json, choice_id),
-        )
-
-    async def reset_choices_for_redo(self, season: int, window_seq: int) -> int:
-        """强制重算：把该窗口已结算的选择重置为待定（保留玩家已导入的 choice_no）。"""
-        cur = await self._db.execute(
-            "UPDATE event_choices SET resolved=0, outcome='' "
-            "WHERE season_number=? AND window_seq=? AND resolved=1",
-            (season, window_seq),
-        )
-        try:
-            return cur.rowcount or 0
-        finally:
-            await cur.close()
-
-    async def delete_event_choice(self, team_name: str, season: int, window_seq: int,
-                                  event_id: str) -> None:
-        """取消选择事件：删除待定/已选未结的实例行（之后可重新触发）。"""
-        await self._db.execute(
-            "DELETE FROM event_choices WHERE team_name=? AND season_number=? AND window_seq=? AND event_id=?",
-            (team_name, season, window_seq, event_id),
-        )
-
-    async def next_event_counter(self) -> int:
-        """生成唯一草稿 ID 序号：基于 MAX(id)，避免 REPLACE 后 COUNT 复用撞号。"""
-        row = await self._db.fetchone(
-            "SELECT MAX(id) AS n FROM event_pool"
-        )
-        n = row["n"] if row and row["n"] is not None else 0
-        return n + 1
-
-    # ─── 窗口结算 ─────────────────────────────────────────
-
-    async def has_window_summary(self, season: int, window_seq: int) -> bool:
-        row = await self._db.fetchone(
-            "SELECT 1 FROM window_summaries WHERE season_number=? AND window_seq=?", (season, window_seq)
-        )
-        return row is not None
-
-    async def add_window_summary(self, season: int, window_seq: int) -> None:
-        await self._db.execute(
-            "INSERT OR IGNORE INTO window_summaries (season_number, window_seq) VALUES (?, ?)",
-            (season, window_seq),
-        )
-
-    async def claim_window_summary(self, season: int, window_seq: int) -> int:
-        """原子认领窗口结算权：借 UNIQUE(season_number, window_seq)，仅一个请求能插入成功。
-
-        返回受影响行数：1=获得结算权；0=该窗口已有标记（已结算/并发已认领）。
-        标记先于任何扣费创建，配合 tx_ids 增量持久化，中途崩溃后强制重算可精确撤销。
-        """
-        cur = await self._db.execute(
-            "INSERT OR IGNORE INTO window_summaries (season_number, window_seq, tx_ids) VALUES (?, ?, '[]')",
-            (season, window_seq),
-        )
-        try:
-            return cur.rowcount or 0
-        finally:
-            await cur.close()
-
-    async def get_window_summary(self, season: int, window_seq: int):
-        return await self._db.fetchone(
-            "SELECT * FROM window_summaries WHERE season_number=? AND window_seq=?",
-            (season, window_seq),
-        )
-
-    async def list_window_summaries(self, season: int) -> list:
-        return await self._db.fetchall(
-            "SELECT * FROM window_summaries WHERE season_number=? ORDER BY window_seq",
-            (season,),
-        )
-
-    async def save_window_summary_tx_ids(self, season: int, window_seq: int,
-                                         tx_ids_json: str) -> None:
-        await self._db.execute(
-            "UPDATE window_summaries SET tx_ids=? WHERE season_number=? AND window_seq=?",
-            (tx_ids_json, season, window_seq),
-        )
-
-    async def delete_transactions_by_ids(self, tx_ids: list[int]) -> int:
-        """按流水 ID 精确删除（结算强制重算撤销用），返回删除条数。"""
-        ids = [i for i in tx_ids if i]
-        if not ids:
-            return 0
-        placeholders = ", ".join("?" * len(ids))
-        cur = await self._db.execute(
-            f"DELETE FROM revenue_transactions WHERE id IN ({placeholders})", ids
-        )
-        try:
-            return cur.rowcount or 0
-        finally:
-            await cur.close()
-
-    async def delete_latest_event_tx(self, team_name: str, season: int, window_seq: int,
-                                     note: str) -> int:
-        """删除该队该窗口指定 note 的最新一条 event 流水（取消即发事件回退用）。"""
-        cur = await self._db.execute(
-            "DELETE FROM revenue_transactions WHERE id = "
-            "(SELECT id FROM revenue_transactions "
-            " WHERE team_name=? AND season_number=? AND window_seq=? AND kind='event' AND note=? "
-            " ORDER BY id DESC LIMIT 1)",
-            (team_name, season, window_seq, note),
-        )
-        try:
-            return cur.rowcount or 0
-        finally:
-            await cur.close()
-
-    async def recompute_balance(self, team_name: str) -> None:
-        """按流水重算余额（建设券流水不影响余额，故排除 credit 类）。
-
-        SUM 子查询内联在 UPDATE 语句中，取数与写回为单条原子语句，
-        与并发 apply_balance 的 balance=balance+? 叠加语义保持一致。
-        """
-        await self._db.execute(
-            "INSERT OR IGNORE INTO club_balance (team_name, balance, build_credit) VALUES (?, 0, 0)",
-            (team_name,),
-        )
-        await self._db.execute(
-            "UPDATE club_balance SET balance=("
-            "SELECT COALESCE(SUM(amount), 0.0) FROM revenue_transactions "
-            "WHERE team_name=club_balance.team_name AND kind != 'credit'"
-            "), updated_at=datetime('now','localtime') WHERE team_name=?",
-            (team_name,),
+            "ORDER BY season_number, tournament_id, round_no, leg, id"
         )
