@@ -7,4 +7,4 @@
   - 来源：Google Fonts / notofonts 官方仓库，`feedback.googlefonts.com` 与 GitHub `google/fonts` 分发本文件的构建。
 
 管理员也可向此目录放入任意中文字体文件（`.ttf/.otf/.ttc`），插件会自动扫描使用；
-或通过 `/主场设置 chart_font_path` 指定独立字体文件。
+或通过 AstrBot 插件配置的 `chart_font_path` 指定独立字体文件。

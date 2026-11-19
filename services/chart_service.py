@@ -1,4 +1,5 @@
-"""比赛统计图：轮次上座表格图 + 赛季上座走势图。
+"""展示图：轮次预告图（对阵+天气+比分）、轮次统计图（club 上座映射）、
+赛季走势图（积分折线 × 场均上座柱双轴）。
 
 风格参照 S8 计算器「展示」工作表：微软雅黑字体、薰衣草紫(#B19CD9)表头与
 合计行（白字粗体）、细网格线、黑色粗体标题、千分位数字。
@@ -12,6 +13,7 @@ from pathlib import Path
 from astrbot.api import logger
 
 from . import formula
+from .tour_sync import effective_round, load_round_map
 
 # 展示工作表配色
 HEADER_FILL = (177, 156, 217)
@@ -111,7 +113,7 @@ _RESULT_CN = {"W": "胜", "D": "平", "L": "负", "C": "取消"}
 def match_sort_key(m: dict) -> tuple:
     """轮次图行序键：按 开球周→日→时间 升序。
 
-    match_time 经 norm_time 归一为零填充 HH:MM，字典序即时间序；
+    match_time 已是零填充 HH:MM（v15 同步/迁移保证），字典序即时间序；
     缺失的周/日/时间垫底；Python 排序稳定，同键保持导入原序。
     """
     week = m.get("week_no")
@@ -219,7 +221,7 @@ def _font(size: int, bold: bool = False):
     if not path:
         raise ChartError(
             "未找到可用中文字体（已搜索内置字体与系统字体目录）。"
-            "请安装中文字体，或用 /主场设置 chart_font_path 指定字体文件。"
+            "请安装中文字体，或在 AstrBot 插件配置中设置 chart_font_path。"
         )
     try:
         font = ImageFont.truetype(path, size, index=0)
@@ -355,6 +357,72 @@ WEATHER_COLORS = {
 }
 
 
+def _round_rows(matches: list, fx_by_mid: dict, stadiums: dict) -> tuple:
+    """轮次统计图行构建（纯函数）：只画已赛行，上座按 matchId 从 club fixtures 映射。
+
+    返回 (rows, total, counted, played_count)：上座缺失显示「—」且不丢行；
+    弃权行显示「弃权」不计入合计；总行数恒等于已赛行数。
+    """
+    played = sorted(
+        (dict(m) for m in matches if m["tour_status"] == "finished"),
+        key=match_sort_key,
+    )
+    rows, total, counted = [], 0, 0
+    for m in played:
+        fx = fx_by_mid.get(m["tour_match_id"]) if m["tour_match_id"] else None
+        name = (fx.get("stadium_name") if fx else None) or stadiums.get(m["home_team"]) \
+            or f"{m['home_team']}主场"
+        head = [
+            f"W{m['week_no']}" if m.get("week_no") else "",
+            f"D{m['day_no']}" if m.get("day_no") else "",
+            formula.weekday_name(m.get("day_no")),
+            m.get("match_time") or "",
+            m["weather"] or "？",
+            m["home_team"],
+        ]
+        if m["result"] == "C":
+            # 弃权：观众/上座率显示 -，不计入合计与场均
+            rows.append(head + ["弃权", m["away_team"], name, "-", "-"])
+            continue
+        attendance = fx.get("attendance") if fx else None
+        if attendance is None:
+            # club 上座缺失：显示 — 不丢行，不计入合计
+            rows.append(head + [m["score"] or "—", m["away_team"], name, "—", "—"])
+            continue
+        attendance = int(attendance)
+        total += attendance
+        counted += 1
+        rate = "—"
+        if fx and fx.get("capacity"):
+            rate = f"{attendance / int(fx['capacity']) * 100:.1f}%"
+        rows.append(head + [m["score"] or _RESULT_CN.get(m["result"], "?"),
+                            m["away_team"], name, f"{attendance:,}", rate])
+    return rows, total, counted, len(played)
+
+
+def _season_points(rows: list) -> tuple[dict, int]:
+    """按轮累计积分（纯函数）：主队视角 result → W3/D1/L0，客队镜像，C 不计。
+
+    返回 ({队名: [(轮, 累计积分), ...]}, 最大轮次)；次级无带入分，各队从首轮起累计。
+    """
+    cum: dict[str, int] = {}
+    series: dict[str, list] = {}
+    max_round = 0
+    for m in sorted(rows, key=lambda r: (r["round_no"], r["leg"], r["id"])):
+        rnd = int(m["round_no"])
+        max_round = max(max_round, rnd)
+        res = m["result"]
+        home, away = m["home_team"], m["away_team"]
+        if res and res != "C":
+            hp = {"W": 3, "D": 1, "L": 0}.get(res, 0)
+            ap = {"W": 0, "D": 1, "L": 3}.get(res, 0)
+            cum[home] = cum.get(home, 0) + hp
+            cum[away] = cum.get(away, 0) + ap
+        for team, pts in ((home, cum.get(home, 0)), (away, cum.get(away, 0))):
+            series.setdefault(team, []).append((rnd, pts))
+    return series, max_round
+
+
 def _fs_safe(text: str) -> str:
     """competition 等外部文本入文件名：只保留词字符与连字符（\\w 含 CJK）。"""
     return re.sub(r"[^\w-]+", "_", str(text)).strip("_")[:24] or "x"
@@ -464,6 +532,117 @@ def _draw_trend(title: str, subtitle: str, series, out_path: str,
     return out_path
 
 
+def _draw_season_chart(title: str, subtitle: str, series, bars: dict,
+                       out_path: str, max_round: int, note: str | None = None) -> str:
+    """赛季走势双轴图：左轴按轮累计积分折线（series: [(队名, [(轮, 累计), ...])]），
+    右轴当轮场均上座柱（bars: {轮: 场均}，缺失轮为 0）。"""
+    import math
+
+    from PIL import Image, ImageDraw
+
+    S = _SUPERSAMPLE
+    W, H = 1180 * S, 640 * S
+    margin_t, margin_b = 96 * S, 64 * S
+    names = [n for n, _ in series]
+    legend_cols = 2 if len(series) > 14 else 1
+    per_col = math.ceil(len(series) / legend_cols) if series else 1
+    legend_row_h = 28 * S
+    name_w = (max((len(n) for n in names), default=4)) * 24 * S
+    legend_pitch = name_w + 60 * S
+    margin_r = min(legend_cols * legend_pitch + 80 * S, 900 * S)
+    margin_l = 90 * S
+    plot_w = W - margin_l - margin_r
+    plot_h = H - margin_t - margin_b
+
+    x_max = max(1, max_round)
+    max_pts = max((max(p for _, p in pts) for _, pts in series), default=3)
+    pts_top = _nice_ceil(max(max_pts, 3))
+    max_bar = max((int(v) for v in bars.values()), default=0)
+    bar_top = _nice_ceil(max_bar)
+
+    def sx(rnd):
+        return margin_l + (rnd - 1) / max(1, x_max - 1) * plot_w
+
+    def sy_pts(v):
+        return margin_t + plot_h - v / pts_top * plot_h
+
+    def sy_bar(v):
+        return margin_t + plot_h - v / bar_top * plot_h
+
+    img = Image.new("RGB", (W, H), BG)
+    dr = ImageDraw.Draw(img)
+    f_title = _font(30 * S, bold=True)
+    f_axis = _font(20 * S)
+
+    # 柱（当轮场均上座，右轴）：先画柱再画线，线在上层
+    bw = plot_w / max(1, x_max) * 0.55
+    base = margin_t + plot_h
+    for rnd, val in sorted(bars.items()):
+        if val <= 0:
+            continue
+        x0 = sx(rnd) - bw / 2
+        y0 = sy_bar(val)
+        dr.rectangle([x0, y0, x0 + bw, base], fill=(206, 196, 226))
+
+    # 左轴刻度（积分）
+    for i in range(6):
+        yy = margin_t + plot_h * i / 5
+        val = pts_top * (5 - i) / 5
+        dr.line([margin_l, yy, W - margin_r, yy], fill=GRID, width=S)
+        tick = str(int(round(val)))
+        tw = _text_w(dr, tick, f_axis)
+        dr.text((margin_l - 12 * S - tw, yy - 13 * S), tick, font=f_axis, fill=(110, 110, 110))
+    # 右轴刻度（场均上座）
+    for i in range(6):
+        yy = margin_t + plot_h * i / 5
+        val = bar_top * (5 - i) / 5
+        tick = _fmt_k(int(round(val)))
+        tw = _text_w(dr, tick, f_axis)
+        dr.text((W - margin_r + 10 * S, yy - 13 * S), tick, font=f_axis, fill=(130, 110, 170))
+
+    # x 轴刻度（轮次）
+    step = max(1, (x_max + 1) // 10)
+    for xv in range(1, x_max + 1, step):
+        xx = sx(xv)
+        t = str(xv)
+        tw = _text_w(dr, t, f_axis)
+        dr.text((xx - tw / 2, margin_t + plot_h + 8 * S), t, font=f_axis, fill=(110, 110, 110))
+    dr.line([margin_l, base, W - margin_r, base], fill=TEXT_DARK, width=2 * S)
+
+    # 积分折线（每队一条，从第 1 轮起累计）
+    for idx, (name, pts) in enumerate(series):
+        color = PALETTE[idx % len(PALETTE)]
+        coords = [(sx(x), sy_pts(p)) for x, p in sorted(pts)]
+        dr.line(coords, fill=color, width=4 * S)
+        for cx, cy in coords:
+            dr.ellipse([cx - 5 * S, cy - 5 * S, cx + 5 * S, cy + 5 * S], fill=color, outline=BG)
+
+    # 图例（右侧，最多两列）
+    lx = W - margin_r + 60 * S
+    for i, name in enumerate(names):
+        col = i // per_col
+        row = i % per_col
+        ly = margin_t - 20 * S + row * legend_row_h
+        px = lx + col * legend_pitch
+        color = PALETTE[i % len(PALETTE)]
+        dr.rectangle([px, ly + 4 * S, px + 16 * S, ly + 20 * S], fill=color)
+        dr.text((px + 24 * S, ly), name, font=f_axis, fill=TEXT_DARK)
+
+    # 轴标签/标题/副标题/标注
+    dr.text((margin_l - 10 * S, H - 34 * S), "轮次", font=f_axis, fill=(110, 110, 110))
+    dr.text((16 * S, margin_t + plot_h // 2), "累计积分", font=f_axis, fill=(110, 110, 110))
+    dr.text((W - margin_r + 10 * S, margin_t - 26 * S), "场均上座", font=f_axis, fill=(130, 110, 170))
+    dr.text((margin_l, 24 * S), title, font=f_title, fill=TEXT_DARK)
+    dr.text((margin_l, 64 * S), subtitle, font=f_axis, fill=(120, 120, 120))
+    if note:
+        nw = _text_w(dr, note, f_axis)
+        dr.text((W - margin_r - nw - 8 * S, 64 * S), note, font=f_axis, fill=(200, 90, 40))
+
+    img = img.resize((W // S, H // S), Image.LANCZOS)
+    img.save(out_path)
+    return out_path
+
+
 class ChartService:
     def __init__(self, db, dao, cfg):
         self._db = db
@@ -497,63 +676,63 @@ class ChartService:
                 logger.warning(f"Failed to remove old chart {old}: {e}")
         return removed
 
-    # ─── 轮次表格图（展示工作表风格） ─────────────────────
+    # ─── 轮次查询（v15：无 window 过滤，直查赛季+轮次+赛事） ──
 
-    async def _resolve_round(self, season: int, window_seq: int, round_no: int,
-                             competition: str) -> tuple[int, list]:
-        """当前窗口优先；窗口已推进时回落到该轮最近出现的窗口。
-
-        提示「还没有赛程」往往不是没导入，而是导入时的 window_seq 已经不是
-        当前窗口；看赛程图不该被窗口挡住。
-        """
-        matches = await self._dao.get_round_matches(season, window_seq, round_no, competition)
-        if matches:
-            return window_seq, matches
-        latest = await self._dao.get_round_matches_latest(season, round_no, competition)
-        if latest:
-            return int(latest[0]["window_seq"]), latest
-        return window_seq, []
-
-    async def render_round_chart(self, round_no: int, competition: str = "联赛") -> str:
+    async def _season(self) -> int:
         state = await self._dao.get_league_state()
-        season = state["season_number"] if state else 1
-        window_seq = state["window_seq"] if state else 1
-        window_seq, matches = await self._resolve_round(
-            season, window_seq, round_no, competition
-        )
-        played = sorted((dict(m) for m in matches if m["result"]), key=match_sort_key)
-        if not played:
-            raise ChartError(f"第 {round_no} 轮({competition})还没有已录入赛果的比赛")
-        rows, total, counted = [], 0, 0
-        for m in played:
-            st = await self._dao.get_stadium(m["home_team"])
-            capacity = int(st["capacity"]) if st else 0
-            name = st["name"] if st else f"{m['home_team']}主场"
-            head = [
-                f"W{m['week_no']}" if m.get("week_no") else "",
-                f"D{m['day_no']}" if m.get("day_no") else "",
-                formula.weekday_name(m.get("day_no")),
-                m.get("match_time") or "",
-                m["weather"] or "？",
-                m["home_team"],
-            ]
-            if m["result"] == "C":
-                # 比赛取消：观众/上座率显示 -，不计入合计与场均
-                rows.append(head + ["取消", m["away_team"], name, "-", "-"])
-                continue
-            if m["attendance"] is None:
-                continue  # 已置结果但无观众（异常数据），按未录入兜底
-            total += int(m["attendance"])
-            counted += 1
-            rate = f"{int(m['attendance']) / capacity * 100:.1f}%" if capacity else "—"
-            result_cn = _RESULT_CN.get(m["result"], "?")
-            score_text = m["score"] or result_cn
-            rows.append(head + [score_text, m["away_team"], name,
-                                f"{int(m['attendance']):,}", rate])
+        if state is None or state["season_number"] is None:
+            raise ChartError("无法确定当前赛季（本地 league_state 为空，先执行 /主场赛程同步）")
+        return int(state["season_number"])
+
+    async def _round_matches(self, season: int, round_no: int,
+                             competition: str | None) -> list:
+        matches = await self._dao.get_round_matches(season, round_no, competition)
+        if not matches:
+            raise ChartError(f"第 {round_no} 轮({competition or '全部赛事'})还没有赛程")
+        return matches
+
+    async def _fixtures_for(self, matches: list, round_no: int) -> dict:
+        """按行上的 tournament_id 拉一轮 club 上座/球场，{matchId: fixture} 映射。
+
+        club /api/fixtures 按 tour stage 内轮次（m.round）定位，本地 round_no 带
+        stage offset（次级 15+/冠军杯 7+），先经 tour_round_map 换算再拉。
+        无 tour_match_id 或 club 不可用时返回空映射（展示「—」，不阻塞出图）。
+        """
+        from .club_sync import ClubSyncClient
+        tids = {int(m["tournament_id"]) for m in matches if m["tournament_id"] is not None}
+        if not tids:
+            return {}
+        round_map = await load_round_map(self._dao)
+        client = ClubSyncClient(self._cfg)
+        fx_by_mid: dict = {}
+        for tid in tids:
+            for f in await client.fetch_fixtures(tid, effective_round(round_map, tid, round_no)):
+                fx_by_mid[f["matchId"]] = f
+        return fx_by_mid
+
+    async def _stadium_names(self) -> dict:
+        """本地球场名映射（club fixtures 缺球场名时回落）。"""
+        return {s["team_name"]: s["name"] for s in await self._dao.list_stadiums()}
+
+    async def render_round_chart(self, round_no: int, competition: str | None = None) -> str:
+        """轮次统计图：本地已赛行 + club fixtures 按 matchId 映射上座。
+
+        上座缺失显示「—」且不丢行；取消行显示「取消」不计入合计；
+        全部未赛抛 ChartError「还没有赛果」；不按 window 过滤。
+        """
+        season = await self._season()
+        matches = await self._round_matches(season, round_no, competition)
+        fx_by_mid = await self._fixtures_for(matches, round_no)
+        stadiums = await self._stadium_names()
+        comp_label = competition or "全部赛事"
+
+        rows, total, counted, played_count = _round_rows(matches, fx_by_mid, stadiums)
+        if played_count == 0:
+            raise ChartError(f"第 {round_no} 轮({competition or '全部赛事'})还没有赛果")
         avg = total / counted if counted else 0
         season_label = await self._dao.season_label(season)
-        subtitle = f"{season_label} · 窗口 {window_seq} · 共 {len(played)} 场"
-        title = f"WHL {season_label} {competition}现场观众统计（第{round_no}轮）"
+        subtitle = f"{season_label} · 共 {played_count} 场"
+        title = f"WHL {season_label} {comp_label}现场观众统计（第{round_no}轮）"
         header_fill, header_text = COMPETITION_COLORS.get(competition, DEFAULT_COMPETITION_COLOR)
         headers = [
             ("周", 90, "c"), ("天", 70, "c"), ("星期", 80, "c"), ("时间", 110, "c"),
@@ -562,7 +741,7 @@ class ChartService:
             ("观众人数", 140, "r"), ("上座率", 110, "r"),
         ]
         totals_strip = build_totals_strip(total, avg)
-        out = self.charts_dir / f"round_s{season}_w{window_seq}_{_fs_safe(competition)}_r{round_no}.png"
+        out = self.charts_dir / f"round_s{season}_{_fs_safe(comp_label)}_r{round_no}.png"
         try:
             _draw_table(title, subtitle, headers, rows, totals_strip, str(out),
                         header_fill=header_fill, header_text=header_text)
@@ -576,28 +755,25 @@ class ChartService:
 
     # ─── 轮次对阵 + 天气预报合成图（上半对阵、下半天气） ─────
 
-    async def render_round_preview_chart(self, round_no: int, competition: str = "联赛") -> str:
-        state = await self._dao.get_league_state()
-        season = state["season_number"] if state else 1
-        window_seq = state["window_seq"] if state else 1
-        window_seq, matches = await self._resolve_round(
-            season, window_seq, round_no, competition
-        )
-        if not matches:
-            raise ChartError(f"第 {round_no} 轮({competition})还没有赛程")
+    async def render_round_preview_chart(self, round_no: int, competition: str | None = None) -> str:
+        """轮次预告图：本地 matches+stadium，不调 club fixtures；已赛行追加比分列。"""
+        season = await self._season()
+        matches = await self._round_matches(season, round_no, competition)
         matches = sorted((dict(m) for m in matches), key=match_sort_key)
         header_fill, header_text = COMPETITION_COLORS.get(competition, DEFAULT_COMPETITION_COLOR)
+        comp_label = competition or "全部赛事"
+        stadiums = await self._stadium_names()
 
         sched_rows, wx_rows, wx_colors = [], [], []
         for m in matches:
-            st = await self._dao.get_stadium(m["home_team"])
-            name = st["name"] if st else f"{m['home_team']}主场"
+            name = stadiums.get(m["home_team"]) or f"{m['home_team']}主场"
             sched_rows.append([
                 f"W{m['week_no']}" if m.get("week_no") else "",
                 f"D{m['day_no']}" if m.get("day_no") else "",
                 formula.weekday_name(m.get("day_no")),
                 m.get("match_time") or "",
                 m["home_team"], m["away_team"], name,
+                m["score"] if m["tour_status"] == "finished" else "",
             ])
             weather = m["weather"] or "待预报"
             wx_rows.append([m.get("match_time") or "", m["home_team"], m["away_team"], weather])
@@ -606,7 +782,7 @@ class ChartService:
 
         sched_headers = [
             ("周", 90, "c"), ("天", 70, "c"), ("星期", 80, "c"), ("时间", 110, "c"),
-            ("主队", 200, "l"), ("客队", 200, "l"), ("球场", 260, "l"),
+            ("主队", 180, "l"), ("客队", 180, "l"), ("球场", 240, "l"), ("比分", 110, "c"),
         ]
         wx_headers = [
             ("时间", 110, "c"), ("主队", 200, "l"), ("客队", 200, "l"), ("天气", 200, "c"),
@@ -628,17 +804,17 @@ class ChartService:
         img = Image.new("RGB", (width * S, height * S), BG)
         dr = ImageDraw.Draw(img)
         season_label = await self._dao.season_label(season)
-        title1 = f"WHL {season_label} {competition} 第{round_no}轮 对阵表"
-        subtitle1 = f"{season_label} · 窗口 {window_seq} · 共 {n} 场"
+        title1 = f"WHL {season_label} {comp_label} 第{round_no}轮 对阵表"
+        subtitle1 = f"{season_label} · 共 {n} 场"
         y = _draw_table_block(dr, 0, width, title1, subtitle1, sched_headers,
                               sched_rows, None, header_fill, header_text, scale=S)
         title2 = "天气预报"
-        subtitle2 = f"第 {round_no} 轮({competition}) · 未预报显示灰色「待预报」"
+        subtitle2 = f"第 {round_no} 轮({comp_label}) · 未预报显示灰色「待预报」"
         _draw_table_block(dr, y + 10 * S, width, title2, subtitle2, wx_headers,
                           wx_rows, None, header_fill, header_text, row_colors=wx_colors, scale=S)
         img = img.resize((width, height), Image.LANCZOS)
 
-        out = self.charts_dir / f"preview_s{season}_w{window_seq}_{_fs_safe(competition)}_r{round_no}.png"
+        out = self.charts_dir / f"preview_s{season}_{_fs_safe(comp_label)}_r{round_no}.png"
         try:
             img.save(out)
         except ChartError:
@@ -649,30 +825,66 @@ class ChartService:
         self._cleanup_oldest()
         return str(out)
 
-    # ─── 赛季走势图 ───────────────────────────────────────
+    # ─── 赛季走势图（积分双轴） ───────────────────────────
 
-    async def render_season_chart(self) -> str:
-        state = await self._dao.get_league_state()
-        season = state["season_number"] if state else 1
-        stadiums = await self._dao.list_stadiums()
-        series = []
-        for s in stadiums:
-            matches = await self._dao.get_home_matches_season(s["team_name"], season)
-            # 取消场（result="C"）无观众，计入会画出 0 点并拉低场均
-            played = [m for m in matches if m["result"] and m["result"] != "C"]
-            if played:
-                pts = [(i + 1, int(m["attendance"]) if m["attendance"] is not None else 0)
-                       for i, m in enumerate(played)]
-                series.append((s["team_name"], pts))
+    async def render_season_chart(self, competition: str) -> str:
+        """赛季走势图：仅顶级/次级；左轴按轮累计积分（W=3/D=1/L=0，C 不计），
+        右轴当轮联赛场均上座柱（club fixtures，缺失轮柱为 0）。"""
+        if competition not in ("顶级联赛", "次级联赛"):
+            raise ChartError("赛季走势图仅支持 顶级/次级 联赛（冠军杯无积分走势）")
+        season = await self._season()
+        all_rows = await self._dao.list_matches_by_season(season)
+        # 库内文本等价集匹配：v2 迁移行「联赛」= v3「顶级联赛」（competition_texts）
+        comp_texts = set(formula.competition_texts(competition))
+        rows = [dict(m) for m in all_rows if m["competition"] in comp_texts]
+        if not rows:
+            raise ChartError(f"{season} 赛季 {competition} 还没有赛程，先执行 /主场赛程同步")
+
+        series, max_round = _season_points(rows)
         if not series:
-            raise ChartError("本赛季还没有已录赛果的上座数据")
-        series.sort(key=lambda item: sum(y for _, y in item[1]) / len(item[1]), reverse=True)
+            raise ChartError(f"{season} 赛季 {competition} 还没有赛果")
+
+        # 当轮场均上座柱：club fixtures 每轮一次（fetch_fixtures 内 10 分钟缓存）；
+        # 拉取轮次经 tour_round_map 换算成 tour stage 内轮次（club 的定位键），
+        # 且只统计 matchId 命中本轮本地行的场次——换算后 base 轮 3 与 final 轮 3
+        # 都拉 (tid,3)，不按本轮行过滤会把另一阶段的同轮场次混进场均
+        from .club_sync import ClubSyncClient
+        tids = {int(m["tournament_id"]) for m in rows if m["tournament_id"] is not None}
+        tmid_by_round: dict[int, set] = {}
+        for m in rows:
+            if m["tour_match_id"] is not None:
+                tmid_by_round.setdefault(int(m["round_no"]), set()).add(int(m["tour_match_id"]))
+        round_map = await load_round_map(self._dao)
+        client = ClubSyncClient(self._cfg)
+        bars: dict[int, float] = {}
+        for rnd in range(1, max_round + 1):
+            ids = tmid_by_round.get(rnd) or set()
+            atts = []
+            for tid in tids:
+                for f in await client.fetch_fixtures(
+                    tid, effective_round(round_map, tid, rnd)
+                ):
+                    if f.get("attendance") is None:
+                        continue
+                    if ids and f["matchId"] not in ids:
+                        continue
+                    atts.append(int(f["attendance"]))
+            bars[rnd] = sum(atts) / len(atts) if atts else 0
+
         season_label = await self._dao.season_label(season)
-        title = f"WHL {season_label} 各队主场观众走势"
-        subtitle = "横轴为球队本赛季按顺序的第几次主场 · 图例按场均上座排序"
-        out = self.charts_dir / f"season_s{season}_trend.png"
+        title = f"WHL {season_label} {competition} 积分走势 × 场均上座"
+        note = "次级联赛积分不含带入分，从 0 起累计" if competition == "次级联赛" else None
+        out = self.charts_dir / f"season_s{season}_{_fs_safe(competition)}.png"
         try:
-            _draw_trend(title, subtitle, series, str(out))
+            _draw_season_chart(
+                title,
+                f"{season_label} · 左轴按轮累计积分（W=3/D=1/L=0，弃权不计）｜右轴当轮场均上座",
+                [(name, pts) for name, pts in sorted(series.items(), key=lambda kv: -kv[1][-1][1])],
+                bars,
+                str(out),
+                max_round=max_round,
+                note=note,
+            )
         except ChartError:
             raise
         except Exception as e:

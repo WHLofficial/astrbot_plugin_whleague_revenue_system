@@ -1,569 +1,308 @@
-"""统计图：轮次表格图 / 赛季走势图渲染与命令路径。"""
+"""三图测试（v3）：轮次预告图（比分列）、轮次统计图（club 上座映射、缺失 —）、
+赛季走势图（次级从 0 起积分、冠军杯报错）、轮次查询无 window 过滤、文件名无 window 段。"""
 
 import os
 import sys
+import tempfile
 from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from tests.common import TestEnv  # noqa: E402
+import tests.common  # noqa: E402,F401  (install_stubs 副作用)
+
+from astrbot_plugin_whleague_revenue_system.db.connection import DatabaseManager  # noqa: E402
+from astrbot_plugin_whleague_revenue_system.db.dao import StadiumDAO  # noqa: E402
+from astrbot_plugin_whleague_revenue_system.db.schema import init_schema  # noqa: E402
+from astrbot_plugin_whleague_revenue_system.services import chart_service as cs  # noqa: E402
 from astrbot_plugin_whleague_revenue_system.services.chart_service import (  # noqa: E402
     ChartError,
     ChartService,
-    build_totals_strip,
-    match_sort_key,
+    _round_rows,
+    _season_points,
 )
-
-_PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
-
-
-def _png_ok(path) -> bool:
-    data = Path(path).read_bytes()
-    return data[:8] == _PNG_MAGIC and len(data) > 4000
+from astrbot_plugin_whleague_revenue_system.services.club_sync import ClubSyncClient  # noqa: E402
 
 
-def _color_count(path, target, tol=14) -> int:
-    from PIL import Image
+def _row(mid, tid, comp, rnd, home, away, tstatus="pending", leg=0, score=None,
+         result=None, week=None, day=None, mtime=None, weather=None):
+    return {
+        "id": mid, "season_number": 9, "tournament_id": tid, "competition": comp,
+        "round_no": rnd, "leg": leg, "stage_name": "", "home_team": home,
+        "away_team": away, "home_score": None, "away_score": None, "pen_home": None,
+        "pen_away": None, "result": result, "score": score,
+        "tour_status": tstatus, "walkover_side": None, "weather": weather,
+        "wx_coef": None, "week_no": week, "day_no": day, "match_time": mtime,
+        "tour_match_id": mid, "synced_at": None,
+    }
 
-    im = Image.open(path).convert("RGB")
+
+FX = {
+    101: {"matchId": 101, "attendance": 20000, "stadium_name": "安菲尔德", "capacity": 54000},
+    # 102 缺失 → 「—」
+    103: {"matchId": 103, "attendance": 8000, "stadium_name": "圣詹姆斯公园", "capacity": 52000},
+}
+
+
+async def _env():
+    tmp = tempfile.TemporaryDirectory()
+    db = DatabaseManager(os.path.join(tmp.name, "t.db"))
+    dao = StadiumDAO(db)
+    await db.init()
     try:
-        w, h = im.size
-        px = im.load()
-        return sum(1 for y in range(0, h, 3) for x in range(0, w, 3)
-                   if abs(px[x, y][0] - target[0]) < tol
-                   and abs(px[x, y][1] - target[1]) < tol
-                   and abs(px[x, y][2] - target[2]) < tol)
-    finally:
-        im.close()
+        await init_schema(db)
+        await dao.set_league_state(9, "S9")
+        return tmp, db, dao
+    except BaseException:
+        await db.close()
+        tmp.cleanup()
+        raise
 
 
-def _header_band_count(path, header_rgb, tol=10) -> int:
-    """统计图中表头填充色出现的横向色带数（用于确认多区块都存在）。"""
-    from PIL import Image
-
-    im = Image.open(path).convert("RGB")
-    try:
-        w, h = im.size
-        px = im.load()
-        bands, in_band = 0, False
-        for y in range(h):
-            run = sum(
-                1 for x in range(0, w, 4)
-                if abs(px[x, y][0] - header_rgb[0]) < tol
-                and abs(px[x, y][1] - header_rgb[1]) < tol
-                and abs(px[x, y][2] - header_rgb[2]) < tol
-            )
-            if run > 30 and not in_band:
-                bands += 1
-                in_band = True
-            elif run <= 30:
-                in_band = False
-        return bands
-    finally:
-        im.close()
-
-
-PURPLE = (177, 156, 217)
-ORANGE = (233, 113, 50)
-GREEN = (92, 180, 142)
+async def test_round_rows_missing_attendance_keeps_rows():
+    matches = [
+        _row(101, 11, "顶级联赛", 12, "利物浦", "巴塞罗那", "finished", score="2:1",
+             result="W", week=7, day=6, mtime="19:30"),
+        _row(102, 11, "顶级联赛", 12, "切尔西", "阿森纳", "finished", score="1:1",
+             result="D", week=7, day=6, mtime="21:00"),
+        _row(103, 11, "顶级联赛", 12, "纽卡斯尔联", "勒沃库森", "finished", score="弃权",
+             result="C", week=7, day=7, mtime="22:00"),
+        _row(104, 11, "顶级联赛", 12, "皇马", "拜仁", "pending", week=8, day=1, mtime="18:00"),
+    ]
+    rows, total, counted, played_count = _round_rows(matches, FX, {})
+    # 不丢行：总行数 == 已赛行数（3），未赛行不画
+    assert played_count == 3 and len(rows) == 3, (played_count, rows)
+    by_home = {r[5]: r for r in rows}
+    # 上座缺失行显示 —
+    chelsea = by_home["切尔西"]
+    assert chelsea[9] == "—" and chelsea[10] == "—", chelsea
+    # 映射命中行显示数值 + 上座率
+    liver = by_home["利物浦"]
+    assert liver[9] == "20,000" and liver[10] == "37.0%" and liver[8] == "安菲尔德", liver
+    assert liver[6] == "2:1"
+    # 弃权行显示「弃权」且不计入合计
+    assert by_home["纽卡斯尔联"][6] == "弃权" and by_home["纽卡斯尔联"][9] == "-"
+    assert total == 20000 and counted == 1, (total, counted)
 
 
-async def _seed_round(env, round_no: int = 1, with_two: bool = False):
-    for team, inf in [("利物浦", 150.0), ("巴塞罗那", 120.0),
-                      ("纽卡斯尔联", 130.0), ("勒沃库森", 110.0)]:
-        await env.stadium_service.import_attributes(team, influence=inf)
-    lines = f"{round_no} 利物浦 巴塞罗那"
-    if with_two:
-        lines += f"\n{round_no} 纽卡斯尔联 勒沃库森"
-    await env.fixture_service.import_fixtures(lines)
-    for home in (("利物浦", "纽卡斯尔联") if with_two else ("利物浦",)):
-        await env.fixture_service.set_weather(round_no, home, "晴")
-    results = "利物浦 胜" + ("\n纽卡斯尔联 平" if with_two else "")
-    await env.fixture_service.record_results(round_no, results)
-
-
-async def test_round_chart_renders():
-    env = await TestEnv().setup()
-    try:
-        await _seed_round(env, with_two=True)
-        svc = ChartService(env.db, env.dao, env.cfg)
-        path = await svc.render_round_chart(1)
-        assert _png_ok(path), path
-        assert "round_s1" in path
-        # 存档图表目录
-        assert (Path(env.db.db_path).parent / "charts").is_dir()
-    finally:
-        await env.teardown()
-
-
-async def test_season_chart_renders():
-    env = await TestEnv().setup()
-    try:
-        await _seed_round(env, round_no=1, with_two=True)
-        await env.fixture_service.advance_window("tester")
-        await env.fixture_service.import_fixtures("1 利物浦 巴塞罗那")
-        await env.fixture_service.set_weather(1, "利物浦", "雨")
-        await env.fixture_service.record_results("1", "利物浦 负")
-        svc = ChartService(env.db, env.dao, env.cfg)
-        path = await svc.render_season_chart()
-        assert _png_ok(path), path
-        assert "season_s1" in path
-    finally:
-        await env.teardown()
-
-
-async def test_chart_no_data_errors():
-    env = await TestEnv().setup()
-    try:
-        svc = ChartService(env.db, env.dao, env.cfg)
-        try:
-            await svc.render_round_chart(1)
-            assert False, "无赛程应报错"
-        except ChartError as e:
-            assert "没有已录入赛果" in str(e)
-        # 有赛程但未录赛果
-        await env.stadium_service.import_attributes("利物浦", influence=150.0)
-        await env.stadium_service.import_attributes("巴塞罗那", influence=120.0)
-        await env.fixture_service.import_fixtures("1 利物浦 巴塞罗那")
-        try:
-            await svc.render_round_chart(1)
-            assert False, "无赛果应报错"
-        except ChartError as e:
-            assert "没有已录入赛果" in str(e)
-        try:
-            await svc.render_season_chart()
-            assert False, "赛季无数据应报错"
-        except ChartError as e:
-            assert "还没有已录赛果" in str(e)
-    finally:
-        await env.teardown()
-
-
-async def test_round_chart_full_columns():
-    env = await TestEnv().setup()
-    try:
-        await env.stadium_service.import_attributes("利物浦", influence=150.0)
-        await env.stadium_service.import_attributes("巴塞罗那", influence=120.0)
-        await env.fixture_service.import_fixtures("顶级9 利物浦 巴塞罗那 W12 D6 15:00")
-        await env.fixture_service.set_weather(1, "利物浦", "晴", "顶级联赛")
-        await env.fixture_service.record_results(1, "利物浦 胜 2-1", "顶级联赛")
-        svc = ChartService(env.db, env.dao, env.cfg)
-        path = await svc.render_round_chart(1, "顶级联赛")
-        assert _png_ok(path), path
-        from PIL import Image
-
-        im = Image.open(path)
-        try:
-            w, h = im.size
-        finally:
-            im.close()
-        assert w > 1400, f"11 列图表应更宽: {w}x{h}"
-    finally:
-        await env.teardown()
-
-
-async def test_preview_chart_renders():
-    env = await TestEnv().setup()
-    try:
-        for team, inf in [("利物浦", 150.0), ("巴塞罗那", 120.0),
-                          ("纽卡斯尔联", 130.0), ("勒沃库森", 110.0)]:
-            await env.stadium_service.import_attributes(team, influence=inf)
-        await env.fixture_service.import_fixtures(
-            "顶级9 利物浦 巴塞罗那 W12 D6 15:00\n顶级9 纽卡斯尔联 勒沃库森 W12 D6 20:00\n"
-        )
-        # 只预报第一场，第二场留「待预报」
-        await env.fixture_service.set_weather(1, "利物浦", "晴", "顶级联赛")
-        svc = ChartService(env.db, env.dao, env.cfg)
-        path = await svc.render_round_preview_chart(1, "顶级联赛")
-        assert _png_ok(path), path
-        from PIL import Image
-
-        im = Image.open(path)
-        try:
-            w, h = im.size
-        finally:
-            im.close()
-        assert h > 400, f"两块堆叠应更高: {w}x{h}"
-        # 命令路径
-        from astrbot_plugin_whleague_revenue_system.handlers.player import PlayerHandler
-
-        ph = PlayerHandler(type("P", (), {
-            "dao": env.dao,
-            "config_cache": env.cfg,
-            "fixture_service": env.fixture_service,
-            "stadium_service": env.stadium_service,
-            "brand_service": env.brand_service,
-            "bridge": env.bridge,
-            "chart_service": svc,
-        })())
-        ev = _FakeEvent("/主场轮次预告图 顶级9")
-        out = [r async for r in ph.preview_chart(ev)]
-        assert out and isinstance(out[0], str) and _png_ok(out[0]), out
-        ev2 = _FakeEvent("/主场轮次预告图")
-        out2 = [r async for r in ph.preview_chart(ev2)]
-        assert out2 and "用法" in out2[0], out2
-    finally:
-        await env.teardown()
-
-
-async def test_preview_chart_falls_back_to_previous_window():
-    """窗口推进后旧轮次仍能出图（不再误报「还没有赛程」）。"""
-    env = await TestEnv().setup()
-    try:
-        for team in ("利物浦", "巴塞罗那"):
-            await env.stadium_service.import_attributes(team, influence=120.0)
-        await env.fixture_service.import_fixtures("顶级9 利物浦 巴塞罗那")
-        await env.fixture_service.advance_window("tester")
-        svc = ChartService(env.db, env.dao, env.cfg)
-        path = await svc.render_round_preview_chart(1, "顶级联赛")
-        assert _png_ok(path), path
-        assert "_w1_" in Path(path).name, path       # 图落在导入时的窗口 1
-    finally:
-        await env.teardown()
-
-
-async def test_preview_chart_no_fixtures():
-    env = await TestEnv().setup()
-    try:
-        svc = ChartService(env.db, env.dao, env.cfg)
-        try:
-            await svc.render_round_preview_chart(1)
-            assert False, "无赛程应报错"
-        except ChartError as e:
-            assert "还没有赛程" in str(e)
-    finally:
-        await env.teardown()
-
-
-async def test_chart_competition_colors():
-    env = await TestEnv().setup()
-    try:
-        for team, inf in [("利物浦", 150.0), ("巴塞罗那", 120.0),
-                          ("纽卡斯尔联", 130.0), ("勒沃库森", 110.0)]:
-            await env.stadium_service.import_attributes(team, influence=inf)
-        r = await env.fixture_service.import_fixtures(
-            "顶级9 利物浦 巴塞罗那\n次级9 纽卡斯尔联 勒沃库森\n冠军3 利物浦 勒沃库森\n"
-        )
-        assert r["imported"] == 3, r
-        comp_top, rn_top = await env.fixture_service.resolve_round_arg("顶级9")
-        comp_sub, rn_sub = await env.fixture_service.resolve_round_arg("次级9")
-        comp_cup, rn_cup = await env.fixture_service.resolve_round_arg("冠军3")
-        assert (rn_top, rn_sub, rn_cup) == (1, 1, 1)
-        for rnd, comp, line in [
-            (rn_top, comp_top, "利物浦 胜"),
-            (rn_sub, comp_sub, "纽卡斯尔联 平"),
-            (rn_cup, comp_cup, "利物浦 负"),
-        ]:
-            await env.fixture_service.set_weather(rnd, line.split()[0], "晴", comp)
-            await env.fixture_service.record_results(rnd, line, comp)
-        svc = ChartService(env.db, env.dao, env.cfg)
-        p_top = await svc.render_round_chart(rn_top, comp_top)
-        p_sub = await svc.render_round_chart(rn_sub, comp_sub)
-        p_cup = await svc.render_round_chart(rn_cup, comp_cup)
-        assert _color_count(p_top, ORANGE) > 200, "顶级联赛应为橙色表头"
-        assert _color_count(p_sub, PURPLE) > 200, "次级联赛应为紫色表头"
-        assert _color_count(p_cup, GREEN) > 200, "冠军杯应为绿色表头"
-        assert _color_count(p_top, PURPLE) == 0, "顶级图不应出现紫色"
-        assert _color_count(p_sub, ORANGE) == 0, "次级图不应出现橙色"
-        # 默认联赛（无前缀）用绿色
-        await env.fixture_service.import_fixtures("1 利物浦 巴塞罗那")
-        comp_ln, rn_ln = await env.fixture_service.resolve_round_arg("1")
-        assert comp_ln == "联赛" and rn_ln == 1, (comp_ln, rn_ln)
-        await env.fixture_service.record_results(rn_ln, "利物浦 胜", "联赛")
-        p_league = await svc.render_round_chart(rn_ln, "联赛")
-        assert _color_count(p_league, GREEN) > 200, "默认联赛应为绿色表头"
-    finally:
-        await env.teardown()
-
-
-class _FakeEvent:
-    def __init__(self, message: str, sender: str = "10001"):
-        self.message = message
-        self.sender = sender
-        self.results = []
-
-    def get_message_str(self):
-        return self.message
-
-    def get_sender_id(self):
-        return self.sender
-
-    def get_sender_name(self):
-        return "tester"
-
-    def get_group_id(self):
-        return "99999"
-
-    def get_messages(self):
-        return []
-
-    def is_admin(self):
-        return False
-
-    def plain_result(self, text):
-        self.results.append(text)
-        return text
-
-    def image_result(self, path):
-        self.results.append(path)
-        return path
-
-
-async def test_chart_commands():
-    env = await TestEnv().setup()
-    try:
-        await _seed_round(env, with_two=True)
-        from astrbot_plugin_whleague_revenue_system.handlers.player import PlayerHandler
-
-        ph = PlayerHandler(type("P", (), {
-            "dao": env.dao,
-            "config_cache": env.cfg,
-            "fixture_service": env.fixture_service,
-            "stadium_service": env.stadium_service,
-            "brand_service": env.brand_service,
-            "bridge": env.bridge,
-            "chart_service": ChartService(env.db, env.dao, env.cfg),
-        })())
-        ev = _FakeEvent("/主场轮次统计图 1")
-        out = [r async for r in ph.round_chart(ev)]
-        assert out and isinstance(out[0], str) and _png_ok(out[0]), out
-        # 非管理员也可查（命令本身无权限校验）
-        ev2 = _FakeEvent("/主场轮次统计图")
-        out2 = [r async for r in ph.round_chart(ev2)]
-        assert out2 and "用法" in out2[0], out2
-        ev3 = _FakeEvent("/主场赛季走势图 3")
-        out3 = [r async for r in ph.season_chart(ev3)]
-        assert out3 and isinstance(out3[0], str) and _png_ok(out3[0]), out3
-    finally:
-        await env.teardown()
-
-
-async def test_chart_bundled_font_and_override():
-    """内置字体存在可加载；chart_font_path 覆盖优先于系统扫描。"""
-    from astrbot_plugin_whleague_revenue_system.services.chart_service import (
-        _font,
-        _list_plugin_fonts,
-        set_font_override,
-    )
-
-    bundled = _list_plugin_fonts()
-    assert bundled, "插件应内置中文字体"
-    assert os.path.exists(bundled[0])
-    # 覆盖到内置字体：_font 不应抛 ChartError，且能拿到 Regular 字重
-    set_font_override(bundled[0])
-    try:
-        f = _font(20)
-        assert f is not None
-    finally:
-        set_font_override("")
-    # 无效覆盖路径 → 回退系统字体（本机 msyh 在候选清单内），不抛错
-    set_font_override(r"C:\Windows\Fonts\not_exist.ttf")
-    try:
-        _font(20, bold=False)
-    finally:
-        set_font_override("")
-
-
-async def test_chart_bundled_font_weight_differentiates():
-    """同一内置变量字体下，bold=True 必须真的切到粗体（避免全图等重 Regular）。
-
-    CJK 字形各字重前进宽度一致（全宽方块），但笔画墨量随字重增加，故用渲染墨量判别。
-    """
-    from PIL import Image, ImageDraw
-
-    from astrbot_plugin_whleague_revenue_system.services.chart_service import (
-        _font,
-        _list_plugin_fonts,
-        set_font_override,
-    )
-
-    def _ink(font) -> int:
-        img = Image.new("RGB", (260, 140), "white")
-        dr = ImageDraw.Draw(img)
-        dr.text((8, 8), "合计观众场次", font=font, fill="black")
-        px = img.load()
-        return sum(1 for y in range(img.size[1]) for x in range(img.size[0])
-                   if px[x, y][0] < 128)
-
-    bundled = _list_plugin_fonts()
-    assert bundled, "插件应内置中文字体"
-    set_font_override(bundled[0])
-    try:
-        ink_regular = _ink(_font(40, bold=False))
-        ink_bold = _ink(_font(40, bold=True))
-        assert ink_bold > ink_regular * 1.3, (
-            f"内置字体下粗体墨量应明显更大: regular={ink_regular} bold={ink_bold}"
-        )
-    finally:
-        set_font_override("")
-
-
-async def test_chart_long_team_names_and_preview_height():
-    """超长队名渲染不崩溃；预告图高度按实际绘制范围（无底部多余空白）。"""
-    from PIL import Image
-
-    env = await TestEnv().setup()
-    try:
-        long_a = "皇家马德里足球俱乐部阿斯图里亚斯竞技队"
-        long_b = "巴塞罗那城际联合体育协会精英队"
-        for team, inf in [(long_a, 150.0), (long_b, 130.0)]:
-            await env.stadium_service.import_attributes(team, influence=inf)
-        await env.fixture_service.import_fixtures(f"顶级9 {long_a} {long_b}\n")
-        await env.fixture_service.set_weather(1, long_a, "晴", "顶级联赛")
-        await env.fixture_service.record_results(1, f"{long_a} 胜 2-1", "顶级联赛")
-        svc = ChartService(env.db, env.dao, env.cfg)
-        pv = await svc.render_round_preview_chart(1, "顶级联赛")
-        assert _png_ok(pv), pv
-        im = Image.open(pv)
-        try:
-            w, h = im.size
-        finally:
-            im.close()
-        # 单场预告图高度 = content*2 + 10（无底部多余 pad）
-        assert h == 406, f"预告图高度应为紧致 406，实为 {w}x{h}"
-        rp = await svc.render_round_chart(1, "顶级联赛")
-        assert _png_ok(rp), rp
-    finally:
-        await env.teardown()
-
-
-async def test_preview_chart_weather_block_present():
-    """预告图必须包含两个区块（对阵表 + 天气预报），天气块不能被挤出画布。"""
-    env = await TestEnv().setup()
-    try:
-        for team, inf in [("利物浦", 150.0), ("巴塞罗那", 120.0),
-                          ("纽卡斯尔联", 130.0), ("勒沃库森", 110.0)]:
-            await env.stadium_service.import_attributes(team, influence=inf)
-        await env.fixture_service.import_fixtures(
-            "顶级9 利物浦 巴塞罗那 W12 D6 15:00\n顶级9 纽卡斯尔联 勒沃库森 W12 D6 20:00\n"
-        )
-        await env.fixture_service.set_weather(1, "利物浦", "晴", "顶级联赛")
-        svc = ChartService(env.db, env.dao, env.cfg)
-        pv = await svc.render_round_preview_chart(1, "顶级联赛")
-        assert _png_ok(pv), pv
-        assert _header_band_count(pv, ORANGE) >= 2, "预告图应含对阵表 + 天气两个表头色带"
-    finally:
-        await env.teardown()
-
-
-async def test_chart_cancelled_match():
-    """取消场次：轮次图能出（观众 -、不算场均）、全取消场均=0；走势图不含取消队。"""
-    env = await TestEnv().setup()
-    try:
-        for team, inf in [("利物浦", 150.0), ("巴塞罗那", 120.0), ("纽卡斯尔联", 130.0)]:
-            await env.stadium_service.import_attributes(team, influence=inf)
-        await env.fixture_service.import_fixtures(
-            "1 利物浦 巴塞罗那\n1 纽卡斯尔联 勒沃库森"
-        )
-        await env.fixture_service.set_weather(1, "纽卡斯尔联", "晴")
-        await env.fixture_service.record_results(1, "利物浦 取消\n纽卡斯尔联 胜")
-        svc = ChartService(env.db, env.dao, env.cfg)
-        p1 = await svc.render_round_chart(1)
-        assert _png_ok(p1), p1
-        # 全取消轮次：场均 0、不除零，图仍能出
-        await env.fixture_service.import_fixtures("2 巴塞罗那 利物浦")
-        await env.fixture_service.record_results(2, "巴塞罗那 取消")
-        p2 = await svc.render_round_chart(2)
-        assert _png_ok(p2), p2
-        st2 = await env.fixture_service.round_stats(2)
-        assert any("取消" in ln for ln in st2["lines"]), st2
-        assert st2["totals"]["attendance"] == 0, st2["totals"]
-        # 走势图不含取消队（利物浦仅剩取消场，图里只有纽卡斯尔联一条线）
-        pt = await svc.render_season_chart()
-        assert _png_ok(pt), pt
-        from astrbot_plugin_whleague_revenue_system.services.chart_service import PALETTE
-        assert _color_count(pt, PALETTE[1]) == 0, "取消队不应出现在走势图中"
-    finally:
-        await env.teardown()
-
-
-async def test_match_sort_key_and_totals_strip():
-    """行序键：周→日→时间升序、缺失垫底；合计四格条带：跨列与文本格式。"""
+async def test_season_points_starts_from_zero():
     rows = [
-        {"week_no": 9, "day_no": 7, "match_time": "20:00"},
-        {"week_no": 9, "day_no": None, "match_time": None},
-        {"week_no": 9, "day_no": 6, "match_time": "15:00"},
-        {"week_no": 9, "day_no": 6, "match_time": "12:30"},
-        {"week_no": None, "day_no": 5, "match_time": "21:00"},
+        _row(1, 11, "次级联赛", 1, "勒沃库森", "多特蒙德", "finished", score="2:1", result="W"),
+        _row(2, 11, "次级联赛", 2, "多特蒙德", "勒沃库森", "finished", score="1:1", result="D"),
+        _row(3, 11, "次级联赛", 3, "勒沃库森", "阿贾克斯", "finished", score="弃权", result="C"),
+        _row(4, 11, "次级联赛", 3, "多特蒙德", "纽卡斯尔联", "finished", score="2:0", result="W"),
     ]
-    ordered = sorted(rows, key=match_sort_key)
-    assert [(r["day_no"], r["match_time"]) for r in ordered] == [
-        (5, "21:00"),
-        (6, "12:30"),
-        (6, "15:00"),
-        (7, "20:00"),
-        (None, None),
-    ]
-    assert build_totals_strip(218115, 43623.0) == [
-        ("合计", "label", 0, 3),
-        ("218,115", "value", 3, 8),
-        ("场均", "label", 8, 9),
-        ("43,623", "value", 9, 11),
-    ]
-    zero = build_totals_strip(0, 0)
-    assert zero[1][0] == "0" and zero[3][0] == "0"
+    series, max_round = _season_points(rows)
+    assert max_round == 3
+    # 首轮积分即首轮战果（无带入分，从 0 起累计）
+    assert series["勒沃库森"][0] == (1, 3)
+    assert series["多特蒙德"][0] == (1, 0)
+    # R2 平局各 +1；R3 勒沃库森弃权不计、多特蒙德胜 +3
+    assert series["勒沃库森"][1] == (2, 4) and series["勒沃库森"][2] == (3, 4)
+    assert series["多特蒙德"][2] == (3, 4)
 
 
-async def test_trend_two_column_legend_fits():
-    """>14 队双列图例按实际列数预留宽度：旧单列预算会把第二列画出画布右缘。"""
-    import tempfile
+async def _render_env(monkey_fixtures=True):
+    tmp, db, dao = await _env()
+    svc = ChartService(db, dao, {"club_sync_url": "http://club.test", "club_sync_secret": "s"})
+    if monkey_fixtures:
 
-    from PIL import Image
+        async def _stub_fetch(self, tid, rnd):
+            return _FX_BY_ROUND.get(rnd, [])
 
-    from astrbot_plugin_whleague_revenue_system.services.chart_service import (
-        BG,
-        _draw_trend,
+        original = ClubSyncClient.fetch_fixtures
+        ClubSyncClient.fetch_fixtures = _stub_fetch
+        return tmp, db, dao, svc, original
+    return tmp, db, dao, svc, None
+
+
+_FX_BY_ROUND = {
+    12: [FX[101], FX[103]],
+    1: [dict(FX[101], matchId=201, attendance=15000),
+        dict(FX[101], matchId=202, attendance=18000)],
+    2: [dict(FX[101], matchId=203, attendance=16000)],
+    3: [],
+}
+
+
+async def _seed(dao):
+    await dao.upsert_match(9, 11, "顶级联赛", 12, "利物浦", "巴塞罗那", tour_match_id=101,
+                           week_no=7, day_no=6, match_time="19:30")
+    await dao.upsert_match(9, 11, "顶级联赛", 12, "切尔西", "阿森纳", tour_match_id=102,
+                           week_no=7, day_no=6, match_time="21:00")
+    await dao.upsert_match(9, 11, "顶级联赛", 12, "纽卡斯尔联", "勒沃库森", tour_match_id=103,
+                           week_no=7, day_no=7, match_time="22:00")
+    await dao.upsert_match(9, 11, "顶级联赛", 13, "利物浦", "尤文图斯", tour_match_id=104)
+    for mid, score, result in ((101, "2:1", "W"), (102, "1:1", "D"), (103, "弃权", "C")):
+        await db_set_result(dao, mid, score, result)
+
+
+async def db_set_result(dao, tmid, score, result):
+    row = await dao._db.fetchone("SELECT id FROM matches WHERE tour_match_id=?", (tmid,))
+    await dao._db.execute(
+        "UPDATE matches SET score=?, result=?, tour_status='finished' WHERE id=?",
+        (score, result, row["id"]),
     )
-    out = Path(tempfile.gettempdir()) / "whl_trend_legend_fit.png"
-    series = [(f"超长球队名称{i}", [(1, 1000 + i * 50), (2, 900 + i * 30)])
-              for i in range(18)]
-    _draw_trend("双列图例预算", "副标题", series, str(out))
-    im = Image.open(out).convert("RGB")
+
+
+async def test_render_round_chart_attendance_missing_and_png():
+    tmp, db, dao, svc, original = await _render_env()
     try:
-        w, h = im.size
-        px = im.load()
-        for x in (w - 1, w - 2):
-            for y in range(0, h, 7):
-                assert px[x, y] == BG, (x, y, px[x, y])
+        await _seed(dao)
+        out = await svc.render_round_chart(12, "顶级联赛")
+        p = Path(out)
+        assert p.exists() and p.stat().st_size > 0
+        assert p.name == "round_s9_顶级联赛_r12.png", p.name
+        # 全部未赛 → 还没有赛果
+        try:
+            await svc.render_round_chart(13, "顶级联赛")
+            raise AssertionError("全 pending 轮应报「还没有赛果」")
+        except ChartError as e:
+            assert "还没有赛果" in str(e), str(e)
     finally:
-        im.close()
-        out.unlink(missing_ok=True)
+        ClubSyncClient.fetch_fixtures = original
+        await db.close()
+        tmp.cleanup()
 
 
-async def test_fs_safe_competition_filename():
-    """competition 入文件名前净化：词字符/CJK 保留，路径与 Windows 非法字符替换。"""
-    from astrbot_plugin_whleague_revenue_system.services.chart_service import _fs_safe
-
-    assert _fs_safe("顶级联赛") == "顶级联赛"
-    assert _fs_safe("顶级/联赛:*?") == "顶级_联赛"
-    assert _fs_safe("../evil") == "evil"
-    assert _fs_safe("***") == "x"
-    assert len(_fs_safe("字" * 100)) <= 24
-
-
-async def test_cleanup_tolerates_vanished_file():
-    """清理时文件在列出与 stat 之间消失（并发删除/他端清理）不拖垮图表命令。"""
-    from unittest.mock import patch
-
-    env = await TestEnv().setup()
+async def test_render_round_preview_chart_png_and_score_column():
+    tmp, db, dao, svc, original = await _render_env()
     try:
-        svc = ChartService(env.db, env.dao, env.cfg)
-        d = svc.charts_dir
-        for i in range(3):
-            (d / f"old_{i}.png").write_bytes(_PNG_MAGIC + b"0" * 4096)
-        real_stat = Path.stat
-        seen = {}
-
-        def flaky(self, *a, **k):
-            seen[self.name] = seen.get(self.name, 0) + 1
-            if self.name == "old_1.png" and seen[self.name] >= 2:
-                raise FileNotFoundError(2, "vanished")
-            return real_stat(self, *a, **k)
-
-        with patch.object(Path, "stat", flaky):
-            removed = svc._cleanup_oldest(keep=2)
-        assert isinstance(removed, int)
-        # old_1 在 is_file 之后再 stat 应已消失（第 2 次触发）
-        assert seen.get("old_1.png", 0) >= 2
+        await _seed(dao)
+        out = await svc.render_round_preview_chart(12, "顶级联赛")
+        p = Path(out)
+        assert p.exists() and p.stat().st_size > 0
+        assert p.name == "preview_s9_顶级联赛_r12.png", p.name
+        # 预告图对应 R12 本地三行（已赛行比分列非空、弃权显示「弃权」）
+        sched = await db.fetchall("SELECT tour_match_id, score FROM matches WHERE round_no=12 ORDER BY tour_match_id")
+        assert [r["score"] for r in sched] == ["2:1", "1:1", "弃权"]
     finally:
-        await env.teardown()
+        ClubSyncClient.fetch_fixtures = original
+        await db.close()
+        tmp.cleanup()
+
+
+async def test_render_season_chart_second_div_and_champions_cup():
+    tmp, db, dao, svc, original = await _render_env()
+    try:
+        for rnd, home, away, score, result in (
+            (1, "勒沃库森", "多特蒙德", "2:1", "W"),
+            (2, "多特蒙德", "勒沃库森", "1:1", "D"),
+        ):
+            await dao.upsert_match(9, 22, "次级联赛", rnd, home, away,
+                                   tour_match_id=200 + rnd)
+            row = await db.fetchone("SELECT id FROM matches WHERE tour_match_id=?", (200 + rnd,))
+            await db.execute(
+                "UPDATE matches SET score=?, result=?, tour_status='finished' WHERE id=?",
+                (score, result, row["id"]),
+            )
+        out = await svc.render_season_chart("次级联赛")
+        p = Path(out)
+        assert p.exists() and p.stat().st_size > 0
+        assert p.name == "season_s9_次级联赛.png", p.name
+        try:
+            await svc.render_season_chart("冠军杯")
+            raise AssertionError("冠军杯应报错")
+        except ChartError as e:
+            assert "顶级/次级" in str(e), str(e)
+    finally:
+        ClubSyncClient.fetch_fixtures = original
+        await db.close()
+        tmp.cleanup()
+
+
+async def test_fetch_fixtures_cache_second_call_no_request():
+    calls = {"n": 0}
+
+    async def _counting(self, tid, rnd):
+        calls["n"] += 1
+        return [{"matchId": 1, "attendance": 100, "stadium_name": "S", "capacity": 1000}]
+
+    original = ClubSyncClient._fetch_fixtures_remote
+    ClubSyncClient._fetch_fixtures_remote = _counting
+    ClubSyncClient.reset_fixtures_cache()
+    try:
+        client = ClubSyncClient({"club_sync_url": "http://club.test", "club_sync_secret": "s"})
+        a = await client.fetch_fixtures(11, 12)
+        b = await client.fetch_fixtures(11, 12)
+        assert a == b and calls["n"] == 1, calls
+        c = await client.fetch_fixtures(11, 13)
+        assert calls["n"] == 2 and c[0]["attendance"] == 100
+    finally:
+        ClubSyncClient._fetch_fixtures_remote = original
+        ClubSyncClient.reset_fixtures_cache()
+
+
+async def test_parse_fixtures_payload_club_shape():
+    """H1 回归：club /api/fixtures 实际形状——顶层 matches、stadium 为对象。
+
+    与 club 仓 src/worker/routes/fixtures.ts:28-42 + weather-ops.ts buildRoundView
+    同构：{tournamentId, round, matches:[{matchId, homeClub, awayTeamName,
+    stageName, finished, stadium:{name,capacity,tier,venueName}|null, weather,
+    attendance}]}。旧解析只认 fixtures/items 键与扁平 stadiumName/capacity，
+    对真实响应永远返回 []（上座 100% 缺失）。
+    """
+    from astrbot_plugin_whleague_revenue_system.services.club_sync import (
+        parse_fixtures_payload,
+    )
+
+    payload = {
+        "tournamentId": 11, "round": 1,
+        "matches": [
+            {
+                "matchId": 101, "tournamentId": 11, "round": 1,
+                "homeClub": {"id": 5, "name": "利物浦"},
+                "awayTeamName": "巴塞罗那", "stageName": "常规赛", "finished": True,
+                "stadium": {"name": "安菲尔德", "capacity": 54000, "tier": 1,
+                            "venueName": "星光冠名的安菲尔德"},
+                "weather": "晴", "attendance": 20000,
+            },
+            {
+                "matchId": 102, "tournamentId": 11, "round": 1,
+                "homeClub": {"id": 6, "name": "切尔西"},
+                "awayTeamName": "阿森纳", "stageName": "常规赛", "finished": True,
+                "stadium": {"name": "斯坦福桥", "capacity": 40000, "tier": 1,
+                            "venueName": ""},
+                "weather": None, "attendance": None,
+            },
+            # 无球场行的场次不会出现在 /api/fixtures（club 侧已过滤），
+            # 但解析层对 stadium=None 也不得整批失败
+            {"matchId": 103, "homeClub": {"id": 7, "name": "X"},
+             "awayTeamName": "Y", "stageName": "", "finished": False,
+             "stadium": None, "weather": None, "attendance": None},
+        ],
+    }
+    out = parse_fixtures_payload(payload)
+    assert [f["matchId"] for f in out] == [101, 102, 103]
+    assert out[0]["attendance"] == 20000 and out[0]["capacity"] == 54000
+    assert out[0]["stadium_name"] == "星光冠名的安菲尔德", "展示名优先 venueName（生效冠名）"
+    assert out[1]["stadium_name"] == "斯坦福桥", "无冠名回落球场名"
+    assert out[1]["attendance"] is None and out[1]["capacity"] == 40000
+    assert out[2]["stadium_name"] is None and out[2]["capacity"] is None
+    # 旧形状（顶层 fixtures/items + 扁平字段）兼容；非法形状返回 []
+    old = parse_fixtures_payload(
+        {"fixtures": [{"matchId": "9", "attendance": 1, "stadiumName": "S", "capacity": 10}]}
+    )
+    assert old == [{"matchId": 9, "attendance": 1, "stadium_name": "S", "capacity": 10}]
+    assert parse_fixtures_payload({"nope": 1}) == []
+    assert parse_fixtures_payload("bad") == []
+    assert parse_fixtures_payload([{"nomatchid": 1}]) == []
+
+
+async def test_round_query_has_no_window_filter():
+    tmp, db, dao = await _env()
+    try:
+        # 同轮次跨「窗口」概念不存在：v15 直查赛季+轮次+赛事
+        await dao.upsert_match(9, 11, "顶级联赛", 12, "A", "B", tour_match_id=301)
+        await dao.upsert_match(9, 22, "次级联赛", 12, "C", "D", tour_match_id=302)
+        rows = await dao.get_round_matches(9, 12)
+        assert len(rows) == 2, rows
+        rows = await dao.get_round_matches(9, 12, "顶级联赛")
+        assert len(rows) == 1 and rows[0]["tournament_id"] == 11
+    finally:
+        await db.close()
+        tmp.cleanup()
+
+
+if __name__ == "__main__":
+    from tests.common import run_module
+    sys.exit(run_module("tests.s8_charts"))
